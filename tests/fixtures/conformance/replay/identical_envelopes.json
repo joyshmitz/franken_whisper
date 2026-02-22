@@ -1,0 +1,19 @@
+{
+  "name": "identical_replay_envelopes",
+  "expected": {
+    "input_content_hash": "abc123def456",
+    "backend_identity": "whisper-cli",
+    "backend_version": "whisper 1.7.2",
+    "output_payload_hash": "output789abc"
+  },
+  "observed": {
+    "input_content_hash": "abc123def456",
+    "backend_identity": "whisper-cli",
+    "backend_version": "whisper 1.7.2",
+    "output_payload_hash": "output789abc"
+  },
+  "expect_within_tolerance": true,
+  "expect_input_hash_match": true,
+  "expect_backend_identity_match": true,
+  "expect_output_hash_match": true
+}

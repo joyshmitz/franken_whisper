@@ -1,0 +1,37 @@
+{
+  "name": "segment_count_mismatch",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.5,
+    "require_text_exact": false,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "hello",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "text": "world",
+      "speaker": null,
+      "confidence": null
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 2.1,
+      "text": "hello world",
+      "speaker": null,
+      "confidence": 0.90
+    }
+  ],
+  "expect_within_tolerance": false,
+  "expected_timestamp_violations": null,
+  "expected_text_mismatches": null,
+  "expected_speaker_mismatches": null
+}

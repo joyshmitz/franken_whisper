@@ -1,0 +1,90 @@
+{
+  "schema_version": "1.0.0",
+  "default_max_regression_pct": 20.0,
+  "benchmarks": [
+    {
+      "id": "tty_encode/chunk_ms/20",
+      "baseline_ns": 61000000.0,
+      "enforce": true,
+      "notes": "~61 ms baseline from 2026-02-22 snapshot"
+    },
+    {
+      "id": "tty_encode/chunk_ms/60",
+      "baseline_ns": 56000000.0,
+      "enforce": true,
+      "notes": "~56 ms baseline from 2026-02-22 snapshot"
+    },
+    {
+      "id": "tty_decode/chunk_ms/20",
+      "baseline_ns": 380000.0,
+      "enforce": true,
+      "notes": "~0.38 ms baseline from 2026-02-22 snapshot"
+    },
+    {
+      "id": "tty_decode/chunk_ms/60",
+      "baseline_ns": 200000.0,
+      "enforce": true,
+      "notes": "~0.20 ms baseline from 2026-02-22 snapshot"
+    },
+    {
+      "id": "tty_control_emit/frame/handshake",
+      "baseline_ns": 333.0,
+      "enforce": true,
+      "notes": "control emit frame guardrail uses <= ~0.40 us worst-case threshold"
+    },
+    {
+      "id": "tty_control_emit/frame/handshake_ack",
+      "baseline_ns": 333.0,
+      "enforce": true,
+      "notes": "control emit frame guardrail uses <= ~0.40 us worst-case threshold"
+    },
+    {
+      "id": "tty_control_emit/frame/ack",
+      "baseline_ns": 333.0,
+      "enforce": true,
+      "notes": "control emit frame guardrail uses <= ~0.40 us worst-case threshold"
+    },
+    {
+      "id": "tty_control_emit/frame/backpressure",
+      "baseline_ns": 333.0,
+      "enforce": true,
+      "notes": "control emit frame guardrail uses <= ~0.40 us worst-case threshold"
+    },
+    {
+      "id": "tty_control_emit/frame/retransmit_request",
+      "baseline_ns": 333.0,
+      "enforce": true,
+      "notes": "control emit frame guardrail uses <= ~0.40 us worst-case threshold"
+    },
+    {
+      "id": "tty_control_emit/frame/retransmit_response",
+      "baseline_ns": 333.0,
+      "enforce": true,
+      "notes": "control emit frame guardrail uses <= ~0.40 us worst-case threshold"
+    },
+    {
+      "id": "sync_export/runs/10",
+      "baseline_ns": 104440000.0,
+      "enforce": false,
+      "notes": "provisional until frankensqlite io_uring panic is resolved"
+    },
+    {
+      "id": "sync_export/runs/50",
+      "baseline_ns": 561750000.0,
+      "enforce": false,
+      "notes": "provisional until frankensqlite io_uring panic is resolved"
+    },
+    {
+      "id": "sync_import/runs/10",
+      "baseline_ns": 84460000.0,
+      "enforce": false,
+      "notes": "provisional until frankensqlite io_uring panic is resolved"
+    },
+    {
+      "id": "sync_import/runs/50",
+      "baseline_ns": 78690000.0,
+      "enforce": false,
+      "notes": "provisional until frankensqlite io_uring panic is resolved"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "text": "Speaker one opens the meeting. Speaker two overlaps by a narrow boundary. Speaker one resumes without losing context. Speaker three asks for a repeat. Speaker two confirms the corrected timeline.",
+  "chunks": [
+    {"text": " Speaker one opens the meeting.", "timestamp": [0.0, 2.0]},
+    {"text": " Speaker two overlaps by a narrow boundary.", "timestamp": [2.0, 4.01]},
+    {"text": " Speaker one resumes without losing context.", "timestamp": [4.01, 6.0]},
+    {"text": " Speaker three asks for a repeat.", "timestamp": [6.0, 8.02]},
+    {"text": " Speaker two confirms the corrected timeline.", "timestamp": [8.02, 10.0]}
+  ]
+}

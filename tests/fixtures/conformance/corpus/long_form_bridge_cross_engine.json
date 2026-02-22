@@ -1,0 +1,30 @@
+{
+  "name": "golden_long_form_bridge_cross_engine",
+  "tags": ["long_form", "bridge"],
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "pair_drift_caps": {
+    "max_timestamp_violations": 0,
+    "max_text_mismatches": 0,
+    "max_speaker_mismatches": 0,
+    "allow_length_mismatch": false
+  },
+  "canonical": [
+    {"start_sec": 0.0, "end_sec": 14.5, "text": "In this long form fixture we validate that cross engine comparisons remain stable across many contiguous segments.", "speaker": null, "confidence": null},
+    {"start_sec": 14.5, "end_sec": 31.0, "text": "The transcript continues with additional detail so that timing drift accumulation is exercised over a longer horizon.", "speaker": null, "confidence": null},
+    {"start_sec": 31.0, "end_sec": 47.5, "text": "We keep punctuation and spacing deterministic to preserve text exactness guarantees in strict mode.", "speaker": null, "confidence": null},
+    {"start_sec": 47.5, "end_sec": 64.0, "text": "Segment four confirms that mid stream boundaries remain monotonic and replay safe.", "speaker": null, "confidence": null},
+    {"start_sec": 64.0, "end_sec": 78.5, "text": "Segment five records a speaker handoff marker in plain text without relying on diarization metadata.", "speaker": null, "confidence": null},
+    {"start_sec": 78.5, "end_sec": 93.0, "text": "Segment six verifies that downstream normalization keeps confidence and ordering contracts intact.", "speaker": null, "confidence": null},
+    {"start_sec": 93.0, "end_sec": 108.0, "text": "Segment seven extends the sample close to two minutes to emulate production scale meeting excerpts.", "speaker": null, "confidence": null},
+    {"start_sec": 108.0, "end_sec": 120.0, "text": "Segment eight closes the long form corpus scenario and anchors final tolerance checks.", "speaker": null, "confidence": null}
+  ],
+  "engines": [
+    {"engine": "whisper_cpp_bridge_long_form", "format": "json_payload", "artifact": "tests/fixtures/golden/whisper_cpp_long_form_output.json", "expect_within_tolerance": true},
+    {"engine": "insanely_fast_bridge_long_form", "format": "json_payload", "artifact": "tests/fixtures/golden/insanely_fast_long_form_output.json", "expect_within_tolerance": true},
+    {"engine": "whisper_diarization_bridge_long_form", "format": "diarization_srt", "artifact": "tests/fixtures/golden/diarization_long_form_output.srt", "expect_within_tolerance": true}
+  ]
+}

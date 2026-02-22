@@ -1,0 +1,21 @@
+{
+  "engine": "whisper.cpp-native",
+  "schema_version": "native-pilot-v1",
+  "in_process": true,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 2.5,
+      "text": " Hello world.",
+      "confidence": 0.92
+    },
+    {
+      "start": 2.5,
+      "end": 6.0,
+      "text": " This is a test of the whisper speech recognition system.",
+      "confidence": 0.91
+    }
+  ],
+  "language": "en",
+  "text": "Hello world. This is a test of the whisper speech recognition system."
+}

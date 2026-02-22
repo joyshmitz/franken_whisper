@@ -1,0 +1,10 @@
+{
+  "text": "Short speech island after a long silence. Second island appears near the midpoint. Third island closes the sparse recording. Final island confirms trailing silence handling.",
+  "segments": [
+    {"start": 5.0, "end": 7.0, "text": " Short speech island after a long silence.", "avg_logprob": -0.27, "no_speech_prob": 0.03},
+    {"start": 30.0, "end": 32.2, "text": " Second island appears near the midpoint.", "avg_logprob": -0.26, "no_speech_prob": 0.03},
+    {"start": 58.0, "end": 60.0, "text": " Third island closes the sparse recording.", "avg_logprob": -0.25, "no_speech_prob": 0.03},
+    {"start": 88.5, "end": 90.0, "text": " Final island confirms trailing silence handling.", "avg_logprob": -0.24, "no_speech_prob": 0.03}
+  ],
+  "language": "en"
+}

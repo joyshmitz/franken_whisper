@@ -1,0 +1,9 @@
+{
+  "text": "Hello and welcome to the multilingual system check. Buenos dias, este canal mezcla ingles y espanol. Bonjour, cette ligne confirme la couverture romance. Grazie, the final segment returns to english control.",
+  "chunks": [
+    {"text": " Hello and welcome to the multilingual system check.", "timestamp": [0.0, 5.2]},
+    {"text": " Buenos dias, este canal mezcla ingles y espanol.", "timestamp": [5.2, 10.4]},
+    {"text": " Bonjour, cette ligne confirme la couverture romance.", "timestamp": [10.4, 15.6]},
+    {"text": " Grazie, the final segment returns to english control.", "timestamp": [15.6, 20.8]}
+  ]
+}

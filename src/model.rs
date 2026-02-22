@@ -1,0 +1,2171 @@
+use std::path::PathBuf;
+
+use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+// ---------------------------------------------------------------------------
+// Phase 3: backend-specific parameter types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputFormat {
+    Txt,
+    Vtt,
+    Srt,
+    Csv,
+    Json,
+    JsonFull,
+    Lrc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampLevel {
+    Chunk,
+    Word,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DecodingParams {
+    pub best_of: Option<u32>,
+    pub beam_size: Option<u32>,
+    pub max_context: Option<i32>,
+    pub max_segment_length: Option<u32>,
+    pub temperature: Option<f32>,
+    pub temperature_increment: Option<f32>,
+    pub entropy_threshold: Option<f32>,
+    pub logprob_threshold: Option<f32>,
+    pub no_speech_threshold: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VadParams {
+    pub model_path: Option<PathBuf>,
+    pub threshold: Option<f32>,
+    pub min_speech_duration_ms: Option<u32>,
+    pub min_silence_duration_ms: Option<u32>,
+    pub max_speech_duration_s: Option<f32>,
+    pub speech_pad_ms: Option<u32>,
+    pub samples_overlap: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SpeakerConstraints {
+    pub num_speakers: Option<u32>,
+    pub min_speakers: Option<u32>,
+    pub max_speakers: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiarizationConfig {
+    pub no_stem: bool,
+    pub whisper_model: Option<String>,
+    pub suppress_numerals: bool,
+    pub device: Option<String>,
+    pub batch_size: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// bd-1rj.2: Word-level timestamp parameters (whisper.cpp)
+// ---------------------------------------------------------------------------
+
+/// Configuration for word-level timestamp extraction in whisper.cpp.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WordTimestampParams {
+    /// Enable word-level timestamps (whisper.cpp: -ml 1).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum number of characters per word segment.
+    pub max_len: Option<u32>,
+    /// Word timestamp probability threshold (whisper.cpp: -wt).
+    pub token_threshold: Option<f32>,
+    /// Token sum probability threshold for splitting words (whisper.cpp: -wtps).
+    pub token_sum_threshold: Option<f32>,
+}
+
+// ---------------------------------------------------------------------------
+// bd-1rj.3: Insanely-fast-whisper tuning parameters
+// ---------------------------------------------------------------------------
+
+/// Device map strategy for insanely-fast-whisper model placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceMapStrategy {
+    /// Automatic device placement across available GPUs.
+    Auto,
+    /// Sequential placement on a single device.
+    Sequential,
+}
+
+/// Extended tuning parameters for insanely-fast-whisper.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InsanelyFastTuningParams {
+    /// Device map strategy for multi-GPU setups.
+    pub device_map: Option<DeviceMapStrategy>,
+    /// Torch dtype for inference (e.g. "float16", "bfloat16", "float32").
+    pub torch_dtype: Option<String>,
+    /// Disable BetterTransformer optimization.
+    #[serde(default)]
+    pub disable_better_transformer: bool,
+}
+
+// ---------------------------------------------------------------------------
+// bd-1rj.4: Diarization pipeline extension parameters
+// ---------------------------------------------------------------------------
+
+/// Forced alignment configuration for whisper-diarization.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AlignmentConfig {
+    /// Alignment model identifier (e.g. "WAV2VEC2_ASR_LARGE_LV60K_960H").
+    pub alignment_model: Option<String>,
+    /// Interpolation resolution character for alignment (e.g. words, characters).
+    pub interpolate_method: Option<String>,
+    /// Return character-level alignments in addition to word-level.
+    #[serde(default)]
+    pub return_char_alignments: bool,
+}
+
+/// Punctuation restoration parameters for whisper-diarization.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PunctuationConfig {
+    /// Punctuation restoration model identifier.
+    pub model: Option<String>,
+    /// Enable punctuation restoration post-processing.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Source separation (Demucs) parameters for whisper-diarization.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SourceSeparationConfig {
+    /// Enable Demucs source separation before diarization.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Demucs model name (e.g. "htdemucs", "htdemucs_ft").
+    pub model: Option<String>,
+    /// Number of audio shifts for test-time augmentation.
+    pub shifts: Option<u32>,
+    /// Overlap between audio chunks (0.0 to 1.0).
+    pub overlap: Option<f32>,
+}
+
+/// Aggregated backend-specific parameters for Phase 3 parity.
+///
+/// Each backend picks the fields it supports and ignores the rest.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BackendParams {
+    /// Additional output formats to request from whisper.cpp (beyond JSON).
+    pub output_formats: Vec<OutputFormat>,
+    /// Timestamp granularity for insanely-fast-whisper.
+    pub timestamp_level: Option<TimestampLevel>,
+    /// Decoding parameters (whisper.cpp).
+    pub decoding: Option<DecodingParams>,
+    /// Voice Activity Detection parameters (whisper.cpp).
+    pub vad: Option<VadParams>,
+    /// Speaker count constraints (insanely-fast + diarization).
+    pub speaker_constraints: Option<SpeakerConstraints>,
+    /// Diarization-specific pipeline options.
+    pub diarization_config: Option<DiarizationConfig>,
+    /// GPU device identifier (insanely-fast, diarization).
+    pub gpu_device: Option<String>,
+    /// Enable Flash Attention 2 (insanely-fast).
+    pub flash_attention: Option<bool>,
+    /// Explicit HuggingFace token override for insanely-fast diarization.
+    pub insanely_fast_hf_token: Option<String>,
+    /// Explicit transcript artifact path override for insanely-fast output.
+    pub insanely_fast_transcript_path: Option<PathBuf>,
+    /// Suppress timestamps in output (whisper.cpp).
+    pub no_timestamps: bool,
+    /// Exit after detecting language (whisper.cpp).
+    pub detect_language_only: bool,
+    /// Batch size for inference (insanely-fast, diarization).
+    pub batch_size: Option<u32>,
+    /// Split on word boundaries (whisper.cpp).
+    pub split_on_word: bool,
+    /// Number of threads for computation (whisper.cpp: -t).
+    pub threads: Option<u32>,
+    /// Number of processors for parallel processing (whisper.cpp: -p).
+    pub processors: Option<u32>,
+    /// Disable GPU acceleration (whisper.cpp: -ng).
+    #[serde(default)]
+    pub no_gpu: bool,
+    /// Initial text prompt for biasing transcription (whisper.cpp: --prompt).
+    pub prompt: Option<String>,
+    /// Always prepend initial prompt to every segment (whisper.cpp: --carry-initial-prompt).
+    #[serde(default)]
+    pub carry_initial_prompt: bool,
+    /// Disable temperature fallback during decoding (whisper.cpp: -nf).
+    #[serde(default)]
+    pub no_fallback: bool,
+    /// Suppress non-speech tokens (whisper.cpp: -sns).
+    #[serde(default)]
+    pub suppress_nst: bool,
+    /// Time offset in milliseconds (whisper.cpp: -ot).
+    pub offset_ms: Option<u64>,
+    /// Duration of audio to process in milliseconds (whisper.cpp: -d).
+    pub duration_ms: Option<u64>,
+    /// Audio context size, 0 = all (whisper.cpp: -ac).
+    pub audio_ctx: Option<i32>,
+    /// Word timestamp probability threshold (whisper.cpp: -wt).
+    pub word_threshold: Option<f32>,
+    /// Regex pattern to suppress matching tokens (whisper.cpp: --suppress-regex).
+    pub suppress_regex: Option<String>,
+    // -----------------------------------------------------------------
+    // bd-1rj.2: whisper.cpp word-level timestamps
+    // -----------------------------------------------------------------
+    /// Word-level timestamp extraction configuration (whisper.cpp).
+    pub word_timestamps: Option<WordTimestampParams>,
+    // -----------------------------------------------------------------
+    // bd-1rj.3: insanely-fast-whisper tuning
+    // -----------------------------------------------------------------
+    /// Extended tuning parameters for insanely-fast-whisper.
+    pub insanely_fast_tuning: Option<InsanelyFastTuningParams>,
+    // -----------------------------------------------------------------
+    // bd-1rj.4: diarization pipeline extensions
+    // -----------------------------------------------------------------
+    /// Forced alignment configuration (whisper-diarization).
+    pub alignment: Option<AlignmentConfig>,
+    /// Punctuation restoration parameters (whisper-diarization).
+    pub punctuation: Option<PunctuationConfig>,
+    /// Source separation (Demucs) parameters (whisper-diarization).
+    pub source_separation: Option<SourceSeparationConfig>,
+}
+
+/// Describes the capabilities of a specific engine implementation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineCapabilities {
+    pub supports_diarization: bool,
+    pub supports_translation: bool,
+    pub supports_word_timestamps: bool,
+    pub supports_gpu: bool,
+    pub supports_streaming: bool,
+}
+
+/// A single backend entry in the `backends.discovery` report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendDiscoveryEntry {
+    /// Machine-readable backend identifier (matches [`BackendKind`] serialization).
+    pub name: String,
+    /// Which [`BackendKind`] this entry corresponds to.
+    pub kind: BackendKind,
+    /// Whether the backend's external binary/script is currently available.
+    pub available: bool,
+    /// Declared capabilities of this engine.
+    pub capabilities: EngineCapabilities,
+}
+
+/// Top-level report for the `backends.discovery` NDJSON event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendsReport {
+    pub backends: Vec<BackendDiscoveryEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendKind {
+    Auto,
+    WhisperCpp,
+    InsanelyFast,
+    WhisperDiarization,
+}
+
+impl BackendKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::WhisperCpp => "whisper_cpp",
+            Self::InsanelyFast => "insanely_fast",
+            Self::WhisperDiarization => "whisper_diarization",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InputSource {
+    File {
+        path: PathBuf,
+    },
+    Stdin {
+        hint_extension: Option<String>,
+    },
+    Microphone {
+        seconds: u32,
+        device: Option<String>,
+        ffmpeg_format: Option<String>,
+        ffmpeg_source: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscribeRequest {
+    pub input: InputSource,
+    pub backend: BackendKind,
+    pub model: Option<String>,
+    pub language: Option<String>,
+    pub translate: bool,
+    pub diarize: bool,
+    pub persist: bool,
+    pub db_path: PathBuf,
+    pub timeout_ms: Option<u64>,
+    /// Phase 3 backend-specific parameters (backward-compatible default).
+    #[serde(default)]
+    pub backend_params: BackendParams,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionSegment {
+    pub start_sec: Option<f64>,
+    pub end_sec: Option<f64>,
+    pub text: String,
+    pub speaker: Option<String>,
+    pub confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccelerationBackend {
+    None,
+    Frankentorch,
+    Frankenjax,
+}
+
+impl AccelerationBackend {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Frankentorch => "frankentorch",
+            Self::Frankenjax => "frankenjax",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccelerationReport {
+    pub backend: AccelerationBackend,
+    pub input_values: usize,
+    pub normalized_confidences: bool,
+    pub pre_mass: Option<f64>,
+    pub post_mass: Option<f64>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionResult {
+    pub backend: BackendKind,
+    pub transcript: String,
+    pub language: Option<String>,
+    pub segments: Vec<TranscriptionSegment>,
+    pub acceleration: Option<AccelerationReport>,
+    pub raw_output: Value,
+    pub artifact_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunEvent {
+    pub seq: u64,
+    pub ts_rfc3339: String,
+    pub stage: String,
+    pub code: String,
+    pub message: String,
+    pub payload: Value,
+}
+
+/// Deterministic replay envelope for regression drift detection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReplayEnvelope {
+    /// SHA-256 of the normalized WAV input bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_content_hash: Option<String>,
+    /// Identity string for the backend command that produced output (e.g. "whisper-cli 1.7.2").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_identity: Option<String>,
+    /// Version string reported by the backend command/runtime when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_version: Option<String>,
+    /// SHA-256 of the raw backend output JSON payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_payload_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunReport {
+    pub run_id: String,
+    pub trace_id: String,
+    pub started_at_rfc3339: String,
+    pub finished_at_rfc3339: String,
+    pub input_path: String,
+    pub normalized_wav_path: String,
+    pub request: TranscribeRequest,
+    pub result: TranscriptionResult,
+    pub events: Vec<RunEvent>,
+    pub warnings: Vec<String>,
+    pub evidence: Vec<Value>,
+    /// Deterministic replay envelope for regression drift detection.
+    #[serde(default)]
+    pub replay: ReplayEnvelope,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSummary {
+    pub run_id: String,
+    pub started_at_rfc3339: String,
+    pub finished_at_rfc3339: String,
+    pub backend: BackendKind,
+    pub transcript_preview: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamedRunEvent {
+    pub run_id: String,
+    pub event: RunEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredRunDetails {
+    pub run_id: String,
+    pub started_at_rfc3339: String,
+    pub finished_at_rfc3339: String,
+    pub backend: BackendKind,
+    pub transcript: String,
+    pub segments: Vec<TranscriptionSegment>,
+    pub events: Vec<RunEvent>,
+    pub warnings: Vec<String>,
+    pub acceleration: Option<AccelerationReport>,
+    #[serde(default)]
+    pub replay: ReplayEnvelope,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn backend_kind_serialization_round_trip() {
+        for kind in [
+            BackendKind::Auto,
+            BackendKind::WhisperCpp,
+            BackendKind::InsanelyFast,
+            BackendKind::WhisperDiarization,
+        ] {
+            let serialized = serde_json::to_string(&kind).unwrap();
+            let deserialized: BackendKind = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(kind, deserialized);
+        }
+    }
+
+    #[test]
+    fn backend_kind_as_str_matches_serde() {
+        assert_eq!(BackendKind::Auto.as_str(), "auto");
+        assert_eq!(BackendKind::WhisperCpp.as_str(), "whisper_cpp");
+        assert_eq!(BackendKind::InsanelyFast.as_str(), "insanely_fast");
+        assert_eq!(
+            BackendKind::WhisperDiarization.as_str(),
+            "whisper_diarization"
+        );
+    }
+
+    #[test]
+    fn output_format_serialization_round_trip() {
+        for fmt in [
+            OutputFormat::Txt,
+            OutputFormat::Vtt,
+            OutputFormat::Srt,
+            OutputFormat::Csv,
+            OutputFormat::Json,
+            OutputFormat::JsonFull,
+            OutputFormat::Lrc,
+        ] {
+            let serialized = serde_json::to_string(&fmt).unwrap();
+            let deserialized: OutputFormat = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(fmt, deserialized);
+        }
+    }
+
+    #[test]
+    fn timestamp_level_serialization_round_trip() {
+        for level in [TimestampLevel::Chunk, TimestampLevel::Word] {
+            let serialized = serde_json::to_string(&level).unwrap();
+            let deserialized: TimestampLevel = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(level, deserialized);
+        }
+    }
+
+    #[test]
+    fn acceleration_backend_as_str() {
+        assert_eq!(AccelerationBackend::None.as_str(), "none");
+        assert_eq!(AccelerationBackend::Frankentorch.as_str(), "frankentorch");
+        assert_eq!(AccelerationBackend::Frankenjax.as_str(), "frankenjax");
+    }
+
+    #[test]
+    fn backend_params_default_is_empty() {
+        let bp = BackendParams::default();
+        assert!(bp.output_formats.is_empty());
+        assert!(bp.timestamp_level.is_none());
+        assert!(bp.decoding.is_none());
+        assert!(bp.vad.is_none());
+        assert!(bp.speaker_constraints.is_none());
+        assert!(bp.diarization_config.is_none());
+        assert!(bp.gpu_device.is_none());
+        assert!(bp.flash_attention.is_none());
+        assert!(!bp.no_timestamps);
+        assert!(!bp.detect_language_only);
+        assert!(bp.batch_size.is_none());
+        assert!(!bp.split_on_word);
+    }
+
+    #[test]
+    fn transcription_result_serialization_round_trip() {
+        let result = TranscriptionResult {
+            backend: BackendKind::WhisperCpp,
+            transcript: "hello world".to_owned(),
+            language: Some("en".to_owned()),
+            segments: vec![TranscriptionSegment {
+                start_sec: Some(0.0),
+                end_sec: Some(1.5),
+                text: "hello world".to_owned(),
+                speaker: Some("SPEAKER_00".to_owned()),
+                confidence: Some(0.95),
+            }],
+            acceleration: None,
+            raw_output: json!({"test": true}),
+            artifact_paths: vec!["output.json".to_owned()],
+        };
+
+        let serialized = serde_json::to_string(&result).unwrap();
+        let deserialized: TranscriptionResult = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.backend, BackendKind::WhisperCpp);
+        assert_eq!(deserialized.transcript, "hello world");
+        assert_eq!(deserialized.language.as_deref(), Some("en"));
+        assert_eq!(deserialized.segments.len(), 1);
+        assert_eq!(
+            deserialized.segments[0].speaker.as_deref(),
+            Some("SPEAKER_00")
+        );
+    }
+
+    #[test]
+    fn replay_envelope_default_has_all_none() {
+        let envelope = ReplayEnvelope::default();
+        assert!(envelope.input_content_hash.is_none());
+        assert!(envelope.backend_identity.is_none());
+        assert!(envelope.backend_version.is_none());
+        assert!(envelope.output_payload_hash.is_none());
+    }
+
+    #[test]
+    fn replay_envelope_skip_serializing_if_none() {
+        let envelope = ReplayEnvelope::default();
+        let json = serde_json::to_value(&envelope).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(
+            obj.is_empty(),
+            "default envelope should serialize empty: {obj:?}"
+        );
+    }
+
+    #[test]
+    fn transcribe_request_with_default_backend_params() {
+        let request_json = json!({
+            "input": {"kind": "file", "path": "test.wav"},
+            "backend": "auto",
+            "model": null,
+            "language": "en",
+            "translate": false,
+            "diarize": false,
+            "persist": true,
+            "db_path": "db.sqlite3",
+            "timeout_ms": null
+        });
+
+        let request: TranscribeRequest = serde_json::from_value(request_json).unwrap();
+        assert_eq!(request.backend, BackendKind::Auto);
+        assert!(request.backend_params.output_formats.is_empty());
+    }
+
+    #[test]
+    fn input_source_file_variant_round_trip() {
+        let source = InputSource::File {
+            path: PathBuf::from("test.wav"),
+        };
+        let json = serde_json::to_value(&source).unwrap();
+        assert_eq!(json["kind"], "file");
+        let deserialized: InputSource = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(deserialized, InputSource::File { ref path } if path.as_os_str() == "test.wav")
+        );
+    }
+
+    #[test]
+    fn input_source_stdin_variant_round_trip() {
+        let source = InputSource::Stdin {
+            hint_extension: Some("wav".to_owned()),
+        };
+        let json = serde_json::to_value(&source).unwrap();
+        assert_eq!(json["kind"], "stdin");
+        let deserialized: InputSource = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(deserialized, InputSource::Stdin { hint_extension: Some(ext) } if ext == "wav")
+        );
+    }
+
+    #[test]
+    fn decoding_params_default_all_none() {
+        let dp = DecodingParams::default();
+        assert!(dp.best_of.is_none());
+        assert!(dp.beam_size.is_none());
+        assert!(dp.max_context.is_none());
+        assert!(dp.max_segment_length.is_none());
+        assert!(dp.temperature.is_none());
+        assert!(dp.temperature_increment.is_none());
+        assert!(dp.entropy_threshold.is_none());
+        assert!(dp.logprob_threshold.is_none());
+        assert!(dp.no_speech_threshold.is_none());
+    }
+
+    #[test]
+    fn vad_params_default_all_none() {
+        let vp = VadParams::default();
+        assert!(vp.model_path.is_none());
+        assert!(vp.threshold.is_none());
+        assert!(vp.min_speech_duration_ms.is_none());
+        assert!(vp.min_silence_duration_ms.is_none());
+        assert!(vp.max_speech_duration_s.is_none());
+        assert!(vp.speech_pad_ms.is_none());
+        assert!(vp.samples_overlap.is_none());
+    }
+
+    #[test]
+    fn input_source_microphone_variant_round_trip() {
+        let source = InputSource::Microphone {
+            seconds: 30,
+            device: Some("hw:1,0".to_owned()),
+            ffmpeg_format: Some("alsa".to_owned()),
+            ffmpeg_source: Some("hw:1,0".to_owned()),
+        };
+        let json = serde_json::to_value(&source).unwrap();
+        assert_eq!(json["kind"], "microphone");
+        assert_eq!(json["seconds"], 30);
+        assert_eq!(json["device"], "hw:1,0");
+        let deserialized: InputSource = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            deserialized,
+            InputSource::Microphone { seconds: 30, .. }
+        ));
+    }
+
+    #[test]
+    fn speaker_constraints_serialization_round_trip() {
+        let sc = SpeakerConstraints {
+            num_speakers: Some(3),
+            min_speakers: Some(1),
+            max_speakers: Some(5),
+        };
+        let json = serde_json::to_string(&sc).unwrap();
+        let deserialized: SpeakerConstraints = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.num_speakers, Some(3));
+        assert_eq!(deserialized.min_speakers, Some(1));
+        assert_eq!(deserialized.max_speakers, Some(5));
+    }
+
+    #[test]
+    fn diarization_config_serialization_round_trip() {
+        let dc = DiarizationConfig {
+            no_stem: true,
+            whisper_model: Some("large-v2".to_owned()),
+            suppress_numerals: true,
+            device: Some("cuda:0".to_owned()),
+            batch_size: Some(16),
+        };
+        let json = serde_json::to_string(&dc).unwrap();
+        let deserialized: DiarizationConfig = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.no_stem);
+        assert_eq!(deserialized.whisper_model.as_deref(), Some("large-v2"));
+        assert!(deserialized.suppress_numerals);
+        assert_eq!(deserialized.device.as_deref(), Some("cuda:0"));
+        assert_eq!(deserialized.batch_size, Some(16));
+    }
+
+    #[test]
+    fn run_event_serialization_round_trip() {
+        let event = RunEvent {
+            seq: 42,
+            ts_rfc3339: "2025-01-15T10:30:00Z".to_owned(),
+            stage: "backend".to_owned(),
+            code: "ok".to_owned(),
+            message: "completed".to_owned(),
+            payload: json!({"elapsed_ms": 1234}),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: RunEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.seq, 42);
+        assert_eq!(deserialized.stage, "backend");
+    }
+
+    #[test]
+    fn acceleration_report_serialization_round_trip() {
+        let report = AccelerationReport {
+            backend: AccelerationBackend::Frankentorch,
+            input_values: 100,
+            normalized_confidences: true,
+            pre_mass: Some(0.8),
+            post_mass: Some(1.0),
+            notes: vec!["normalized".to_owned()],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let deserialized: AccelerationReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.backend, AccelerationBackend::Frankentorch);
+        assert_eq!(deserialized.input_values, 100);
+        assert!(deserialized.normalized_confidences);
+    }
+
+    #[test]
+    fn backend_params_phase4_fields_default_to_none_false() {
+        let bp = BackendParams::default();
+        assert!(bp.threads.is_none());
+        assert!(bp.processors.is_none());
+        assert!(!bp.no_gpu);
+        assert!(bp.prompt.is_none());
+        assert!(!bp.carry_initial_prompt);
+        assert!(!bp.no_fallback);
+        assert!(!bp.suppress_nst);
+        assert!(bp.offset_ms.is_none());
+        assert!(bp.duration_ms.is_none());
+        assert!(bp.audio_ctx.is_none());
+        assert!(bp.word_threshold.is_none());
+        assert!(bp.suppress_regex.is_none());
+        assert!(bp.insanely_fast_hf_token.is_none());
+        assert!(bp.insanely_fast_transcript_path.is_none());
+    }
+
+    #[test]
+    fn backend_params_phase4_serde_round_trip() {
+        let bp = BackendParams {
+            threads: Some(4),
+            processors: Some(2),
+            no_gpu: true,
+            prompt: Some("test prompt".to_owned()),
+            carry_initial_prompt: true,
+            no_fallback: true,
+            suppress_nst: true,
+            offset_ms: Some(5000),
+            duration_ms: Some(30000),
+            audio_ctx: Some(0),
+            word_threshold: Some(0.25),
+            suppress_regex: Some(r"\[.*\]".to_owned()),
+            ..BackendParams::default()
+        };
+        let json = serde_json::to_string(&bp).unwrap();
+        let parsed: BackendParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.threads, Some(4));
+        assert_eq!(parsed.processors, Some(2));
+        assert!(parsed.no_gpu);
+        assert_eq!(parsed.prompt.as_deref(), Some("test prompt"));
+        assert!(parsed.carry_initial_prompt);
+        assert!(parsed.no_fallback);
+        assert!(parsed.suppress_nst);
+        assert_eq!(parsed.offset_ms, Some(5000));
+        assert_eq!(parsed.duration_ms, Some(30000));
+        assert_eq!(parsed.audio_ctx, Some(0));
+        assert_eq!(parsed.word_threshold, Some(0.25));
+        assert_eq!(parsed.suppress_regex.as_deref(), Some(r"\[.*\]"));
+    }
+
+    // --- ReplayEnvelope serde edge cases ---
+
+    #[test]
+    fn replay_envelope_populated_round_trip() {
+        let envelope = ReplayEnvelope {
+            input_content_hash: Some("abc123".to_owned()),
+            backend_identity: Some("whisper-cli".to_owned()),
+            backend_version: Some("1.7.2".to_owned()),
+            output_payload_hash: Some("def456".to_owned()),
+        };
+        let json = serde_json::to_string(&envelope).unwrap();
+        let parsed: ReplayEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.input_content_hash.as_deref(), Some("abc123"));
+        assert_eq!(parsed.backend_identity.as_deref(), Some("whisper-cli"));
+        assert_eq!(parsed.backend_version.as_deref(), Some("1.7.2"));
+        assert_eq!(parsed.output_payload_hash.as_deref(), Some("def456"));
+    }
+
+    #[test]
+    fn replay_envelope_deserializes_from_empty_object() {
+        let parsed: ReplayEnvelope = serde_json::from_str("{}").unwrap();
+        assert!(parsed.input_content_hash.is_none());
+        assert!(parsed.backend_identity.is_none());
+        assert!(parsed.backend_version.is_none());
+        assert!(parsed.output_payload_hash.is_none());
+    }
+
+    // --- TranscriptionResult edge cases ---
+
+    #[test]
+    fn transcription_result_empty_transcript_and_segments() {
+        let result = TranscriptionResult {
+            backend: BackendKind::Auto,
+            transcript: String::new(),
+            language: None,
+            segments: vec![],
+            acceleration: None,
+            raw_output: json!(null),
+            artifact_paths: vec![],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: TranscriptionResult = serde_json::from_str(&json).unwrap();
+        assert!(parsed.transcript.is_empty());
+        assert!(parsed.segments.is_empty());
+        assert!(parsed.language.is_none());
+        assert!(parsed.acceleration.is_none());
+    }
+
+    // --- AccelerationReport edge cases ---
+
+    #[test]
+    fn acceleration_report_none_backend_round_trip() {
+        let report = AccelerationReport {
+            backend: AccelerationBackend::None,
+            input_values: 0,
+            normalized_confidences: false,
+            pre_mass: None,
+            post_mass: None,
+            notes: vec![],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: AccelerationReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.backend, AccelerationBackend::None);
+        assert_eq!(parsed.input_values, 0);
+        assert!(!parsed.normalized_confidences);
+        assert!(parsed.notes.is_empty());
+    }
+
+    // --- EngineCapabilities ---
+
+    #[test]
+    fn engine_capabilities_serde_round_trip() {
+        let caps = EngineCapabilities {
+            supports_diarization: true,
+            supports_translation: false,
+            supports_word_timestamps: true,
+            supports_gpu: true,
+            supports_streaming: false,
+        };
+        let json = serde_json::to_string(&caps).unwrap();
+        let parsed: EngineCapabilities = serde_json::from_str(&json).unwrap();
+        assert!(parsed.supports_diarization);
+        assert!(!parsed.supports_translation);
+        assert!(parsed.supports_word_timestamps);
+        assert!(parsed.supports_gpu);
+        assert!(!parsed.supports_streaming);
+    }
+
+    // --- RunSummary ---
+
+    #[test]
+    fn run_summary_serde_round_trip() {
+        let summary = RunSummary {
+            run_id: "run-42".to_owned(),
+            started_at_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            finished_at_rfc3339: "2026-01-01T00:01:00Z".to_owned(),
+            backend: BackendKind::InsanelyFast,
+            transcript_preview: "hello world...".to_owned(),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let parsed: RunSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.run_id, "run-42");
+        assert_eq!(parsed.backend, BackendKind::InsanelyFast);
+        assert_eq!(parsed.transcript_preview, "hello world...");
+    }
+
+    // --- StreamedRunEvent ---
+
+    #[test]
+    fn streamed_run_event_serde_round_trip() {
+        let sre = StreamedRunEvent {
+            run_id: "run-99".to_owned(),
+            event: RunEvent {
+                seq: 1,
+                ts_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+                stage: "ingest".to_owned(),
+                code: "ingest.ok".to_owned(),
+                message: "done".to_owned(),
+                payload: json!({}),
+            },
+        };
+        let json = serde_json::to_string(&sre).unwrap();
+        let parsed: StreamedRunEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.run_id, "run-99");
+        assert_eq!(parsed.event.code, "ingest.ok");
+    }
+
+    // --- VadParams and DecodingParams serde ---
+
+    #[test]
+    fn vad_params_populated_round_trip() {
+        let vp = VadParams {
+            model_path: Some(PathBuf::from("/models/vad.bin")),
+            threshold: Some(0.5),
+            min_speech_duration_ms: Some(250),
+            min_silence_duration_ms: Some(100),
+            max_speech_duration_s: Some(30.0),
+            speech_pad_ms: Some(200),
+            samples_overlap: Some(0.1),
+        };
+        let json = serde_json::to_string(&vp).unwrap();
+        let parsed: VadParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.threshold, Some(0.5));
+        assert_eq!(parsed.min_speech_duration_ms, Some(250));
+        assert_eq!(
+            parsed.model_path.as_deref(),
+            Some(std::path::Path::new("/models/vad.bin"))
+        );
+    }
+
+    #[test]
+    fn decoding_params_populated_round_trip() {
+        let dp = DecodingParams {
+            best_of: Some(5),
+            beam_size: Some(3),
+            max_context: Some(-1),
+            max_segment_length: Some(50),
+            temperature: Some(0.0),
+            temperature_increment: Some(0.2),
+            entropy_threshold: Some(2.4),
+            logprob_threshold: Some(-1.0),
+            no_speech_threshold: Some(0.6),
+        };
+        let json = serde_json::to_string(&dp).unwrap();
+        let parsed: DecodingParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.best_of, Some(5));
+        assert_eq!(parsed.max_context, Some(-1));
+        assert_eq!(parsed.temperature, Some(0.0));
+    }
+
+    // --- DiarizationConfig defaults ---
+
+    #[test]
+    fn diarization_config_default_all_false_none() {
+        let dc = DiarizationConfig::default();
+        assert!(!dc.no_stem);
+        assert!(dc.whisper_model.is_none());
+        assert!(!dc.suppress_numerals);
+        assert!(dc.device.is_none());
+        assert!(dc.batch_size.is_none());
+    }
+
+    #[test]
+    fn backend_params_phase4_backward_compatible_deserialization() {
+        // JSON without Phase 4 fields should still parse successfully.
+        let json = r#"{"output_formats":[],"no_timestamps":false,"detect_language_only":false,"split_on_word":false}"#;
+        let parsed: BackendParams = serde_json::from_str(json).unwrap();
+        assert!(parsed.threads.is_none());
+        assert!(!parsed.no_gpu);
+        assert!(parsed.prompt.is_none());
+        assert!(!parsed.carry_initial_prompt);
+    }
+
+    // --- StoredRunDetails ---
+
+    #[test]
+    fn stored_run_details_serde_round_trip() {
+        let details = StoredRunDetails {
+            run_id: "run-777".to_owned(),
+            started_at_rfc3339: "2026-01-15T10:00:00Z".to_owned(),
+            finished_at_rfc3339: "2026-01-15T10:01:30Z".to_owned(),
+            backend: BackendKind::WhisperDiarization,
+            transcript: "hello world from diarization".to_owned(),
+            segments: vec![
+                TranscriptionSegment {
+                    start_sec: Some(0.0),
+                    end_sec: Some(1.0),
+                    text: "hello".to_owned(),
+                    speaker: Some("SPEAKER_00".to_owned()),
+                    confidence: Some(0.99),
+                },
+                TranscriptionSegment {
+                    start_sec: Some(1.0),
+                    end_sec: Some(2.5),
+                    text: "world from diarization".to_owned(),
+                    speaker: Some("SPEAKER_01".to_owned()),
+                    confidence: Some(0.85),
+                },
+            ],
+            events: vec![RunEvent {
+                seq: 0,
+                ts_rfc3339: "2026-01-15T10:00:00Z".to_owned(),
+                stage: "ingest".to_owned(),
+                code: "ok".to_owned(),
+                message: "ingested".to_owned(),
+                payload: json!({}),
+            }],
+            warnings: vec!["low confidence segment".to_owned()],
+            acceleration: Some(AccelerationReport {
+                backend: AccelerationBackend::Frankenjax,
+                input_values: 50,
+                normalized_confidences: true,
+                pre_mass: Some(0.7),
+                post_mass: Some(1.0),
+                notes: vec!["jax accelerated".to_owned()],
+            }),
+            replay: ReplayEnvelope {
+                input_content_hash: Some("sha256-abc".to_owned()),
+                backend_identity: Some("whisper-diarization".to_owned()),
+                backend_version: Some("0.0.15".to_owned()),
+                output_payload_hash: Some("sha256-def".to_owned()),
+            },
+        };
+        let json = serde_json::to_string(&details).unwrap();
+        let parsed: StoredRunDetails = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.run_id, "run-777");
+        assert_eq!(parsed.backend, BackendKind::WhisperDiarization);
+        assert_eq!(parsed.segments.len(), 2);
+        assert_eq!(parsed.segments[1].speaker.as_deref(), Some("SPEAKER_01"));
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.warnings.len(), 1);
+        assert!(parsed.acceleration.is_some());
+        assert_eq!(
+            parsed.replay.backend_identity.as_deref(),
+            Some("whisper-diarization")
+        );
+    }
+
+    #[test]
+    fn stored_run_details_minimal_round_trip() {
+        let details = StoredRunDetails {
+            run_id: "run-min".to_owned(),
+            started_at_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            finished_at_rfc3339: "2026-01-01T00:00:01Z".to_owned(),
+            backend: BackendKind::Auto,
+            transcript: String::new(),
+            segments: vec![],
+            events: vec![],
+            warnings: vec![],
+            acceleration: None,
+            replay: ReplayEnvelope::default(),
+        };
+        let json = serde_json::to_string(&details).unwrap();
+        let parsed: StoredRunDetails = serde_json::from_str(&json).unwrap();
+        assert!(parsed.transcript.is_empty());
+        assert!(parsed.segments.is_empty());
+        assert!(parsed.events.is_empty());
+        assert!(parsed.warnings.is_empty());
+        assert!(parsed.acceleration.is_none());
+    }
+
+    // --- RunReport full round-trip ---
+
+    fn make_test_run_report() -> RunReport {
+        RunReport {
+            run_id: "run-full".to_owned(),
+            trace_id: "trace-abc123".to_owned(),
+            started_at_rfc3339: "2026-02-01T12:00:00Z".to_owned(),
+            finished_at_rfc3339: "2026-02-01T12:01:00Z".to_owned(),
+            input_path: "/tmp/input.wav".to_owned(),
+            normalized_wav_path: "/tmp/normalized.wav".to_owned(),
+            request: TranscribeRequest {
+                input: InputSource::File {
+                    path: PathBuf::from("/tmp/input.wav"),
+                },
+                backend: BackendKind::WhisperCpp,
+                model: Some("large-v3".to_owned()),
+                language: Some("en".to_owned()),
+                translate: false,
+                diarize: false,
+                persist: true,
+                db_path: PathBuf::from("db.sqlite3"),
+                timeout_ms: Some(120_000),
+                backend_params: BackendParams::default(),
+            },
+            result: TranscriptionResult {
+                backend: BackendKind::WhisperCpp,
+                transcript: "hello world".to_owned(),
+                language: Some("en".to_owned()),
+                segments: vec![TranscriptionSegment {
+                    start_sec: Some(0.0),
+                    end_sec: Some(1.5),
+                    text: "hello world".to_owned(),
+                    speaker: None,
+                    confidence: Some(0.97),
+                }],
+                acceleration: None,
+                raw_output: json!({"text": "hello world"}),
+                artifact_paths: vec![],
+            },
+            events: vec![
+                RunEvent {
+                    seq: 0,
+                    ts_rfc3339: "2026-02-01T12:00:00Z".to_owned(),
+                    stage: "ingest".to_owned(),
+                    code: "ok".to_owned(),
+                    message: "ingested".to_owned(),
+                    payload: json!({}),
+                },
+                RunEvent {
+                    seq: 1,
+                    ts_rfc3339: "2026-02-01T12:00:30Z".to_owned(),
+                    stage: "backend".to_owned(),
+                    code: "ok".to_owned(),
+                    message: "transcribed".to_owned(),
+                    payload: json!({"elapsed_ms": 30000}),
+                },
+            ],
+            warnings: vec![],
+            evidence: vec![json!({"decision": "whisper_cpp", "score": 0.9})],
+            replay: ReplayEnvelope {
+                input_content_hash: Some("sha256-input".to_owned()),
+                backend_identity: Some("whisper-cli".to_owned()),
+                backend_version: Some("1.7.2".to_owned()),
+                output_payload_hash: Some("sha256-output".to_owned()),
+            },
+        }
+    }
+
+    #[test]
+    fn run_report_full_serde_round_trip() {
+        let report = make_test_run_report();
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: RunReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.run_id, "run-full");
+        assert_eq!(parsed.trace_id, "trace-abc123");
+        assert_eq!(parsed.events.len(), 2);
+        assert_eq!(parsed.evidence.len(), 1);
+        assert_eq!(parsed.result.transcript, "hello world");
+        assert_eq!(
+            parsed.replay.input_content_hash.as_deref(),
+            Some("sha256-input")
+        );
+    }
+
+    #[test]
+    fn run_report_preserves_evidence_through_serde() {
+        let mut report = make_test_run_report();
+        report.evidence = vec![
+            json!({"contract": "backend_selection", "action": "whisper_cpp"}),
+            json!({"contract": "retry_decision", "action": "no_retry"}),
+        ];
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: RunReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.evidence.len(), 2);
+        assert_eq!(parsed.evidence[0]["contract"], "backend_selection");
+        assert_eq!(parsed.evidence[1]["action"], "no_retry");
+    }
+
+    #[test]
+    fn run_report_empty_evidence_round_trips() {
+        let mut report = make_test_run_report();
+        report.evidence = vec![];
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: RunReport = serde_json::from_str(&json).unwrap();
+        assert!(parsed.evidence.is_empty());
+    }
+
+    // --- BackendKind as_str consistency with serde ---
+
+    #[test]
+    fn backend_kind_as_str_matches_serde_serialized_value() {
+        for kind in [
+            BackendKind::Auto,
+            BackendKind::WhisperCpp,
+            BackendKind::InsanelyFast,
+            BackendKind::WhisperDiarization,
+        ] {
+            let serialized = serde_json::to_string(&kind).unwrap();
+            // serde serializes with quotes: "auto", "whisper_cpp", etc.
+            let expected = format!("\"{}\"", kind.as_str());
+            assert_eq!(
+                serialized, expected,
+                "as_str() and serde disagree for {kind:?}"
+            );
+        }
+    }
+
+    // --- AccelerationBackend as_str consistency with serde ---
+
+    #[test]
+    fn acceleration_backend_as_str_matches_serde() {
+        for ab in [
+            AccelerationBackend::None,
+            AccelerationBackend::Frankentorch,
+            AccelerationBackend::Frankenjax,
+        ] {
+            let serialized = serde_json::to_string(&ab).unwrap();
+            let expected = format!("\"{}\"", ab.as_str());
+            assert_eq!(
+                serialized, expected,
+                "as_str() and serde disagree for {ab:?}"
+            );
+        }
+    }
+
+    // --- InputSource::Microphone edge cases ---
+
+    #[test]
+    fn input_source_microphone_all_optional_fields_none() {
+        let source = InputSource::Microphone {
+            seconds: 10,
+            device: None,
+            ffmpeg_format: None,
+            ffmpeg_source: None,
+        };
+        let json = serde_json::to_value(&source).unwrap();
+        assert_eq!(json["kind"], "microphone");
+        assert_eq!(json["seconds"], 10);
+        assert!(json["device"].is_null());
+        assert!(json["ffmpeg_format"].is_null());
+        assert!(json["ffmpeg_source"].is_null());
+        let deserialized: InputSource = serde_json::from_value(json).unwrap();
+        match deserialized {
+            InputSource::Microphone {
+                seconds,
+                device,
+                ffmpeg_format,
+                ffmpeg_source,
+            } => {
+                assert_eq!(seconds, 10);
+                assert!(device.is_none());
+                assert!(ffmpeg_format.is_none());
+                assert!(ffmpeg_source.is_none());
+            }
+            other => panic!("expected Microphone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_source_stdin_no_hint_round_trip() {
+        let source = InputSource::Stdin {
+            hint_extension: None,
+        };
+        let json = serde_json::to_value(&source).unwrap();
+        assert_eq!(json["kind"], "stdin");
+        assert!(json["hint_extension"].is_null());
+        let deserialized: InputSource = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            deserialized,
+            InputSource::Stdin {
+                hint_extension: None
+            }
+        ));
+    }
+
+    // --- TranscriptionSegment edge cases ---
+
+    #[test]
+    fn transcription_segment_all_optional_none() {
+        let seg = TranscriptionSegment {
+            start_sec: None,
+            end_sec: None,
+            text: "no timestamps".to_owned(),
+            speaker: None,
+            confidence: None,
+        };
+        let json = serde_json::to_string(&seg).unwrap();
+        let parsed: TranscriptionSegment = serde_json::from_str(&json).unwrap();
+        assert!(parsed.start_sec.is_none());
+        assert!(parsed.end_sec.is_none());
+        assert!(parsed.speaker.is_none());
+        assert!(parsed.confidence.is_none());
+        assert_eq!(parsed.text, "no timestamps");
+    }
+
+    // --- TranscribeRequest full round-trip ---
+
+    #[test]
+    fn transcribe_request_full_round_trip() {
+        let request = TranscribeRequest {
+            input: InputSource::Microphone {
+                seconds: 60,
+                device: Some("mic1".to_owned()),
+                ffmpeg_format: None,
+                ffmpeg_source: None,
+            },
+            backend: BackendKind::InsanelyFast,
+            model: Some("large-v3".to_owned()),
+            language: Some("ja".to_owned()),
+            translate: true,
+            diarize: true,
+            persist: false,
+            db_path: PathBuf::from("/custom/db.sqlite3"),
+            timeout_ms: Some(300_000),
+            backend_params: BackendParams {
+                gpu_device: Some("cuda:0".to_owned()),
+                batch_size: Some(24),
+                flash_attention: Some(true),
+                timestamp_level: Some(TimestampLevel::Word),
+                ..BackendParams::default()
+            },
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: TranscribeRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.backend, BackendKind::InsanelyFast);
+        assert!(parsed.translate);
+        assert!(parsed.diarize);
+        assert!(!parsed.persist);
+        assert_eq!(parsed.timeout_ms, Some(300_000));
+        assert_eq!(parsed.backend_params.gpu_device.as_deref(), Some("cuda:0"));
+        assert_eq!(parsed.backend_params.batch_size, Some(24));
+        assert_eq!(parsed.backend_params.flash_attention, Some(true));
+        assert_eq!(
+            parsed.backend_params.timestamp_level,
+            Some(TimestampLevel::Word)
+        );
+        assert_eq!(parsed.language.as_deref(), Some("ja"));
+    }
+
+    // --- AccelerationBackend serde round-trip ---
+
+    #[test]
+    fn acceleration_backend_serde_round_trip() {
+        for ab in [
+            AccelerationBackend::None,
+            AccelerationBackend::Frankentorch,
+            AccelerationBackend::Frankenjax,
+        ] {
+            let serialized = serde_json::to_string(&ab).unwrap();
+            let deserialized: AccelerationBackend = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(ab, deserialized);
+        }
+    }
+
+    // --- SpeakerConstraints defaults ---
+
+    #[test]
+    fn speaker_constraints_default_all_none() {
+        let sc = SpeakerConstraints::default();
+        assert!(sc.num_speakers.is_none());
+        assert!(sc.min_speakers.is_none());
+        assert!(sc.max_speakers.is_none());
+    }
+
+    #[test]
+    fn transcription_segment_full_round_trip() {
+        let seg = TranscriptionSegment {
+            start_sec: Some(1.5),
+            end_sec: Some(3.75),
+            text: "hello world".to_owned(),
+            speaker: Some("SPEAKER_00".to_owned()),
+            confidence: Some(0.95),
+        };
+        let json = serde_json::to_string(&seg).unwrap();
+        let parsed: TranscriptionSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.start_sec, Some(1.5));
+        assert_eq!(parsed.end_sec, Some(3.75));
+        assert_eq!(parsed.text, "hello world");
+        assert_eq!(parsed.speaker.as_deref(), Some("SPEAKER_00"));
+        assert_eq!(parsed.confidence, Some(0.95));
+    }
+
+    #[test]
+    fn backend_params_with_output_formats_round_trip() {
+        let params = BackendParams {
+            output_formats: vec![OutputFormat::Srt, OutputFormat::Vtt, OutputFormat::Lrc],
+            ..BackendParams::default()
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let parsed: BackendParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.output_formats.len(), 3);
+        assert_eq!(parsed.output_formats[0], OutputFormat::Srt);
+        assert_eq!(parsed.output_formats[1], OutputFormat::Vtt);
+        assert_eq!(parsed.output_formats[2], OutputFormat::Lrc);
+    }
+
+    #[test]
+    fn backend_params_with_all_populated_round_trip() {
+        let params = BackendParams {
+            output_formats: vec![OutputFormat::Txt],
+            timestamp_level: Some(TimestampLevel::Word),
+            decoding: Some(DecodingParams {
+                best_of: Some(5),
+                beam_size: Some(3),
+                ..DecodingParams::default()
+            }),
+            vad: Some(VadParams {
+                threshold: Some(0.5),
+                ..VadParams::default()
+            }),
+            speaker_constraints: Some(SpeakerConstraints {
+                num_speakers: Some(4),
+                ..SpeakerConstraints::default()
+            }),
+            diarization_config: Some(DiarizationConfig {
+                no_stem: true,
+                whisper_model: Some("large".to_owned()),
+                suppress_numerals: true,
+                device: Some("cuda:0".to_owned()),
+                batch_size: Some(16),
+            }),
+            gpu_device: Some("cuda:0".to_owned()),
+            flash_attention: Some(true),
+            insanely_fast_hf_token: Some("hf_example_token".to_owned()),
+            insanely_fast_transcript_path: Some(PathBuf::from("artifacts/insanely-fast.json")),
+            no_timestamps: true,
+            detect_language_only: true,
+            batch_size: Some(16),
+            split_on_word: true,
+            threads: Some(8),
+            processors: Some(2),
+            no_gpu: true,
+            prompt: Some("medical".to_owned()),
+            carry_initial_prompt: true,
+            no_fallback: true,
+            suppress_nst: true,
+            offset_ms: Some(5000),
+            duration_ms: Some(60000),
+            audio_ctx: Some(0),
+            word_threshold: Some(0.01),
+            suppress_regex: Some(r"\[.*\]".to_owned()),
+            ..BackendParams::default()
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let parsed: BackendParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.output_formats.len(), 1);
+        assert_eq!(parsed.timestamp_level, Some(TimestampLevel::Word));
+        assert!(parsed.decoding.is_some());
+        assert!(parsed.vad.is_some());
+        assert!(parsed.speaker_constraints.is_some());
+        assert!(parsed.diarization_config.is_some());
+        assert_eq!(parsed.gpu_device.as_deref(), Some("cuda:0"));
+        assert_eq!(parsed.flash_attention, Some(true));
+        assert_eq!(
+            parsed.insanely_fast_hf_token.as_deref(),
+            Some("hf_example_token")
+        );
+        assert_eq!(
+            parsed.insanely_fast_transcript_path.as_deref(),
+            Some(PathBuf::from("artifacts/insanely-fast.json").as_path())
+        );
+        assert!(parsed.no_timestamps);
+        assert!(parsed.detect_language_only);
+        assert!(parsed.split_on_word);
+        assert_eq!(parsed.threads, Some(8));
+        assert_eq!(parsed.processors, Some(2));
+        assert!(parsed.no_gpu);
+        assert_eq!(parsed.prompt.as_deref(), Some("medical"));
+        assert!(parsed.carry_initial_prompt);
+        assert!(parsed.no_fallback);
+        assert!(parsed.suppress_nst);
+        assert_eq!(parsed.offset_ms, Some(5000));
+        assert_eq!(parsed.duration_ms, Some(60000));
+        assert_eq!(parsed.audio_ctx, Some(0));
+        assert_eq!(parsed.word_threshold, Some(0.01));
+        assert_eq!(parsed.suppress_regex.as_deref(), Some(r"\[.*\]"));
+    }
+
+    #[test]
+    fn run_event_with_complex_payload_round_trip() {
+        let event = RunEvent {
+            seq: 42,
+            ts_rfc3339: "2026-02-22T12:34:56Z".to_owned(),
+            stage: "backend".to_owned(),
+            code: "backend.selected".to_owned(),
+            message: "chose whisper_cpp via Bayesian selection".to_owned(),
+            payload: json!({
+                "posterior": [0.7, 0.2, 0.1],
+                "action": "try_whisper_cpp",
+                "nested": {"key": "value", "arr": [1, 2, 3]}
+            }),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: RunEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.seq, 42);
+        assert_eq!(parsed.stage, "backend");
+        assert_eq!(parsed.payload["action"], "try_whisper_cpp");
+        assert_eq!(parsed.payload["nested"]["arr"][2], 3);
+    }
+
+    #[test]
+    fn replay_envelope_partial_fields_round_trip() {
+        let envelope = ReplayEnvelope {
+            input_content_hash: Some("abc".to_owned()),
+            backend_identity: None,
+            backend_version: Some("1.0".to_owned()),
+            output_payload_hash: None,
+        };
+        let json = serde_json::to_string(&envelope).unwrap();
+        let parsed: ReplayEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.input_content_hash.as_deref(), Some("abc"));
+        assert!(parsed.backend_identity.is_none());
+        assert_eq!(parsed.backend_version.as_deref(), Some("1.0"));
+        assert!(parsed.output_payload_hash.is_none());
+    }
+
+    #[test]
+    fn output_format_all_variants_as_str() {
+        let variants = [
+            (OutputFormat::Txt, "txt"),
+            (OutputFormat::Vtt, "vtt"),
+            (OutputFormat::Srt, "srt"),
+            (OutputFormat::Csv, "csv"),
+            (OutputFormat::Json, "json"),
+            (OutputFormat::JsonFull, "json_full"),
+            (OutputFormat::Lrc, "lrc"),
+        ];
+        for (fmt, expected) in variants {
+            let serialized = serde_json::to_string(&fmt).unwrap();
+            assert_eq!(
+                serialized,
+                format!("\"{expected}\""),
+                "OutputFormat serde for {fmt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_level_chunk_round_trip() {
+        let level = TimestampLevel::Chunk;
+        let json = serde_json::to_string(&level).unwrap();
+        let parsed: TimestampLevel = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TimestampLevel::Chunk);
+    }
+
+    #[test]
+    fn unicode_in_all_string_fields_round_trips() {
+        let seg = TranscriptionSegment {
+            start_sec: Some(0.0),
+            end_sec: Some(1.0),
+            text: "日本語のテスト 🎤".to_owned(),
+            speaker: Some("話者_01".to_owned()),
+            confidence: Some(0.88),
+        };
+        let json = serde_json::to_string(&seg).unwrap();
+        let parsed: TranscriptionSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.text, "日本語のテスト 🎤");
+        assert_eq!(parsed.speaker.as_deref(), Some("話者_01"));
+    }
+
+    #[test]
+    fn run_report_backward_compat_without_replay_field() {
+        // JSON without the `replay` field should deserialize with default.
+        let json = json!({
+            "run_id": "run-old",
+            "trace_id": "trace-old",
+            "started_at_rfc3339": "2026-01-01T00:00:00Z",
+            "finished_at_rfc3339": "2026-01-01T00:00:01Z",
+            "input_path": "in.wav",
+            "normalized_wav_path": "norm.wav",
+            "request": {
+                "input": {"kind": "file", "path": "in.wav"},
+                "backend": "auto",
+                "model": null,
+                "language": null,
+                "translate": false,
+                "diarize": false,
+                "persist": false,
+                "db_path": "db.sqlite3",
+                "timeout_ms": null
+            },
+            "result": {
+                "backend": "whisper_cpp",
+                "transcript": "test",
+                "language": null,
+                "segments": [],
+                "acceleration": null,
+                "raw_output": {},
+                "artifact_paths": []
+            },
+            "events": [],
+            "warnings": [],
+            "evidence": []
+        });
+        let parsed: RunReport = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.run_id, "run-old");
+        assert!(parsed.replay.input_content_hash.is_none());
+        assert!(parsed.replay.backend_identity.is_none());
+    }
+
+    #[test]
+    fn stored_run_details_backward_compat_without_replay_field() {
+        let json = json!({
+            "run_id": "run-legacy",
+            "started_at_rfc3339": "2026-01-01T00:00:00Z",
+            "finished_at_rfc3339": "2026-01-01T00:00:01Z",
+            "backend": "insanely_fast",
+            "transcript": "hello",
+            "segments": [],
+            "events": [],
+            "warnings": [],
+            "acceleration": null
+        });
+        let parsed: StoredRunDetails = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.run_id, "run-legacy");
+        assert_eq!(parsed.backend, BackendKind::InsanelyFast);
+        assert!(parsed.replay.input_content_hash.is_none());
+    }
+
+    #[test]
+    fn transcription_result_with_acceleration_round_trip() {
+        let result = TranscriptionResult {
+            backend: BackendKind::WhisperCpp,
+            transcript: "accelerated".to_owned(),
+            language: Some("en".to_owned()),
+            segments: vec![],
+            acceleration: Some(AccelerationReport {
+                backend: AccelerationBackend::Frankenjax,
+                input_values: 50,
+                normalized_confidences: false,
+                pre_mass: None,
+                post_mass: Some(0.99),
+                notes: vec!["jax".to_owned(), "fast".to_owned()],
+            }),
+            raw_output: json!({}),
+            artifact_paths: vec!["a.json".to_owned(), "b.srt".to_owned()],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: TranscriptionResult = serde_json::from_str(&json).unwrap();
+        let accel = parsed.acceleration.expect("should have acceleration");
+        assert_eq!(accel.backend, AccelerationBackend::Frankenjax);
+        assert_eq!(accel.input_values, 50);
+        assert!(!accel.normalized_confidences);
+        assert!(accel.pre_mass.is_none());
+        assert_eq!(accel.post_mass, Some(0.99));
+        assert_eq!(accel.notes.len(), 2);
+        assert_eq!(parsed.artifact_paths.len(), 2);
+    }
+
+    #[test]
+    fn decoding_params_extreme_f32_values_round_trip() {
+        let dp = DecodingParams {
+            best_of: Some(u32::MAX),
+            beam_size: Some(0),
+            max_context: Some(i32::MIN),
+            max_segment_length: Some(u32::MAX),
+            temperature: Some(f32::MIN_POSITIVE),
+            temperature_increment: Some(f32::MAX),
+            entropy_threshold: Some(f32::NEG_INFINITY),
+            logprob_threshold: Some(f32::INFINITY),
+            no_speech_threshold: Some(0.0),
+        };
+        let json = serde_json::to_string(&dp).unwrap();
+        let parsed: DecodingParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.best_of, Some(u32::MAX));
+        assert_eq!(parsed.max_context, Some(i32::MIN));
+        assert_eq!(parsed.temperature, Some(f32::MIN_POSITIVE));
+    }
+
+    #[test]
+    fn run_report_with_many_warnings_round_trips() {
+        let mut report = make_test_run_report();
+        report.warnings = (0..100).map(|i| format!("warning {i}")).collect();
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: RunReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.warnings.len(), 100);
+        assert_eq!(parsed.warnings[0], "warning 0");
+        assert_eq!(parsed.warnings[99], "warning 99");
+    }
+
+    #[test]
+    fn vad_params_extreme_values_round_trip() {
+        let vp = VadParams {
+            model_path: Some(PathBuf::from("/a/very/long/path/to/model.bin")),
+            threshold: Some(0.0),
+            min_speech_duration_ms: Some(0),
+            min_silence_duration_ms: Some(u32::MAX),
+            max_speech_duration_s: Some(f32::MAX),
+            speech_pad_ms: Some(0),
+            samples_overlap: Some(1.0),
+        };
+        let json = serde_json::to_string(&vp).unwrap();
+        let parsed: VadParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.threshold, Some(0.0));
+        assert_eq!(parsed.min_silence_duration_ms, Some(u32::MAX));
+        assert_eq!(parsed.samples_overlap, Some(1.0));
+    }
+
+    #[test]
+    fn input_source_file_with_special_path_characters_round_trips() {
+        let paths = [
+            "/tmp/données/résultat.wav",
+            "/path/with spaces/file name.wav",
+            "/dir/ファイル/音声.wav",
+            "/backslash\\in\\path.wav",
+            "/dots/../../../etc/file.wav",
+        ];
+        for p in paths {
+            let source = InputSource::File {
+                path: PathBuf::from(p),
+            };
+            let json = serde_json::to_string(&source).unwrap();
+            let parsed: InputSource = serde_json::from_str(&json).unwrap();
+            match parsed {
+                InputSource::File { path } => assert_eq!(path, PathBuf::from(p), "path: {p}"),
+                other => panic!("expected File variant, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn raw_output_with_diverse_json_structures_round_trips() {
+        let payloads = [
+            json!(null),
+            json!([1, "two", null, [3, 4]]),
+            json!({"nested": {"deep": {"value": 42, "arr": [true, false]}}}),
+            json!("a plain string"),
+            json!(1.2345),
+            json!(true),
+        ];
+        for payload in payloads {
+            let result = TranscriptionResult {
+                backend: BackendKind::Auto,
+                transcript: String::new(),
+                language: None,
+                segments: vec![],
+                acceleration: None,
+                raw_output: payload.clone(),
+                artifact_paths: vec![],
+            };
+            let json_str = serde_json::to_string(&result).unwrap();
+            let parsed: TranscriptionResult = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(parsed.raw_output, payload, "payload: {payload}");
+        }
+    }
+
+    #[test]
+    fn malformed_json_fails_to_deserialize_backend_kind() {
+        let bad_inputs = [
+            r#""unknown_backend""#,
+            r#""WHISPER_CPP""#,
+            r#"42"#,
+            r#"null"#,
+        ];
+        for input in bad_inputs {
+            let result = serde_json::from_str::<BackendKind>(input);
+            assert!(result.is_err(), "should reject: {input}");
+        }
+    }
+
+    #[test]
+    fn malformed_json_fails_to_deserialize_input_source() {
+        // Missing required `kind` tag
+        let no_kind = r#"{"path": "test.wav"}"#;
+        assert!(serde_json::from_str::<InputSource>(no_kind).is_err());
+
+        // Invalid `kind` value
+        let bad_kind = r#"{"kind": "url", "path": "http://example.com"}"#;
+        assert!(serde_json::from_str::<InputSource>(bad_kind).is_err());
+
+        // File variant missing required `path` field
+        let no_path = r#"{"kind": "file"}"#;
+        assert!(serde_json::from_str::<InputSource>(no_path).is_err());
+    }
+
+    #[test]
+    fn vad_params_model_path_with_unicode_round_trips() {
+        let vp = VadParams {
+            model_path: Some(PathBuf::from("/modèles/données/vad_模型.onnx")),
+            ..VadParams::default()
+        };
+        let json = serde_json::to_string(&vp).unwrap();
+        let parsed: VadParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.model_path.as_deref(),
+            Some(std::path::Path::new("/modèles/données/vad_模型.onnx"))
+        );
+    }
+
+    #[test]
+    fn transcribe_request_db_path_with_spaces_round_trips() {
+        let req = TranscribeRequest {
+            input: InputSource::File {
+                path: PathBuf::from("in.wav"),
+            },
+            backend: BackendKind::Auto,
+            model: None,
+            language: None,
+            translate: false,
+            diarize: false,
+            persist: true,
+            db_path: PathBuf::from("/Users/Name/My Projects/data base.sqlite3"),
+            timeout_ms: None,
+            backend_params: BackendParams::default(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: TranscribeRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.db_path,
+            PathBuf::from("/Users/Name/My Projects/data base.sqlite3")
+        );
+    }
+
+    #[test]
+    fn malformed_json_fails_to_deserialize_output_format_and_timestamp_level() {
+        // OutputFormat rejects unknown values.
+        let bad_formats = [r#""mp3""#, r#""JSON""#, r#"42"#, r#"null"#];
+        for input in bad_formats {
+            assert!(
+                serde_json::from_str::<OutputFormat>(input).is_err(),
+                "OutputFormat should reject: {input}"
+            );
+        }
+        // TimestampLevel rejects unknown values.
+        let bad_levels = [r#""segment""#, r#""WORD""#, r#"true"#, r#"null"#];
+        for input in bad_levels {
+            assert!(
+                serde_json::from_str::<TimestampLevel>(input).is_err(),
+                "TimestampLevel should reject: {input}"
+            );
+        }
+        // AccelerationBackend rejects unknown values.
+        let bad_accel = [r#""gpu""#, r#""NONE""#, r#"0"#];
+        for input in bad_accel {
+            assert!(
+                serde_json::from_str::<AccelerationBackend>(input).is_err(),
+                "AccelerationBackend should reject: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn backend_params_serde_default_fields_can_be_omitted() {
+        // Only no_gpu, carry_initial_prompt, no_fallback, suppress_nst have
+        // #[serde(default)]. The other required bools must be present.
+        // Provide the required fields, omit the serde(default) ones.
+        let json = r#"{
+            "output_formats": [],
+            "no_timestamps": false,
+            "detect_language_only": false,
+            "split_on_word": false
+        }"#;
+        let parsed: BackendParams = serde_json::from_str(json).unwrap();
+        // Verify the serde(default) fields defaulted to false.
+        assert!(!parsed.no_gpu);
+        assert!(!parsed.carry_initial_prompt);
+        assert!(!parsed.no_fallback);
+        assert!(!parsed.suppress_nst);
+        // All Option fields default to None.
+        assert!(parsed.decoding.is_none());
+        assert!(parsed.vad.is_none());
+        assert!(parsed.flash_attention.is_none());
+        assert!(parsed.gpu_device.is_none());
+        assert!(parsed.insanely_fast_hf_token.is_none());
+        assert!(parsed.insanely_fast_transcript_path.is_none());
+        assert!(parsed.batch_size.is_none());
+        assert!(parsed.threads.is_none());
+        assert!(parsed.processors.is_none());
+        assert!(parsed.prompt.is_none());
+    }
+
+    #[test]
+    fn flash_attention_explicit_false_round_trips_distinct_from_none() {
+        let params = BackendParams {
+            flash_attention: Some(false),
+            ..BackendParams::default()
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let parsed: BackendParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.flash_attention,
+            Some(false),
+            "Some(false) must round-trip distinctly from None"
+        );
+
+        // Verify None stays None (default).
+        let params_none = BackendParams::default();
+        let json_none = serde_json::to_string(&params_none).unwrap();
+        let parsed_none: BackendParams = serde_json::from_str(&json_none).unwrap();
+        assert_eq!(parsed_none.flash_attention, None);
+    }
+
+    #[test]
+    fn decoding_params_nan_temperature_round_trips_as_null() {
+        // serde_json serializes NaN as null, then deserializes null as None.
+        let dp = DecodingParams {
+            temperature: Some(f32::NAN),
+            ..DecodingParams::default()
+        };
+        let json = serde_json::to_string(&dp).unwrap();
+        let parsed: DecodingParams = serde_json::from_str(&json).unwrap();
+        // NaN → null → None: the value is lost during serialization.
+        assert!(
+            parsed.temperature.is_none(),
+            "NaN should round-trip as None (via null)"
+        );
+    }
+
+    #[test]
+    fn input_source_microphone_zero_and_max_seconds_round_trip() {
+        for seconds in [0_u32, u32::MAX] {
+            let source = InputSource::Microphone {
+                seconds,
+                device: None,
+                ffmpeg_format: None,
+                ffmpeg_source: None,
+            };
+            let json = serde_json::to_string(&source).unwrap();
+            let parsed: InputSource = serde_json::from_str(&json).unwrap();
+            match parsed {
+                InputSource::Microphone { seconds: s, .. } => assert_eq!(s, seconds),
+                other => panic!("expected Microphone, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn input_source_file_missing_path_fails_deserialization() {
+        // InputSource::File requires a `path` field. Omitting it must fail.
+        let json = r#"{"kind":"file"}"#;
+        let result = serde_json::from_str::<InputSource>(json);
+        assert!(result.is_err(), "missing path should fail: {result:?}");
+    }
+
+    #[test]
+    fn input_source_invalid_kind_tag_fails_deserialization() {
+        // An unrecognized tag value for the serde(tag = "kind") discriminator
+        // should produce a deserialization error.
+        let json = r#"{"kind":"bluetooth","path":"test.wav"}"#;
+        let result = serde_json::from_str::<InputSource>(json);
+        assert!(result.is_err(), "unknown kind should fail: {result:?}");
+    }
+
+    #[test]
+    fn replay_envelope_default_has_all_none_fields() {
+        let envelope = ReplayEnvelope::default();
+        assert!(envelope.input_content_hash.is_none());
+        assert!(envelope.backend_identity.is_none());
+        assert!(envelope.backend_version.is_none());
+        assert!(envelope.output_payload_hash.is_none());
+        // Default serializes to just "{}" since all fields use skip_serializing_if.
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert_eq!(
+            json, "{}",
+            "default envelope should serialize to empty object"
+        );
+    }
+
+    #[test]
+    fn acceleration_backend_as_str_all_variants() {
+        assert_eq!(AccelerationBackend::None.as_str(), "none");
+        assert_eq!(AccelerationBackend::Frankentorch.as_str(), "frankentorch");
+        assert_eq!(AccelerationBackend::Frankenjax.as_str(), "frankenjax");
+    }
+
+    #[test]
+    fn transcription_segment_confidence_infinity_round_trips_as_null() {
+        // Like NaN, serde_json serializes INFINITY as null.
+        let seg = TranscriptionSegment {
+            start_sec: Some(f64::INFINITY),
+            end_sec: Some(f64::NEG_INFINITY),
+            text: "test".to_owned(),
+            speaker: None,
+            confidence: Some(f64::INFINITY),
+        };
+        let json = serde_json::to_string(&seg).unwrap();
+        let parsed: TranscriptionSegment = serde_json::from_str(&json).unwrap();
+        // INFINITY → null → None: the values are lost.
+        assert!(
+            parsed.start_sec.is_none(),
+            "INFINITY should serialize as null → None"
+        );
+        assert!(
+            parsed.end_sec.is_none(),
+            "NEG_INFINITY should serialize as null → None"
+        );
+        assert!(
+            parsed.confidence.is_none(),
+            "INFINITY confidence should serialize as null → None"
+        );
+    }
+
+    #[test]
+    fn transcription_segment_start_after_end_serializes_without_error() {
+        // No runtime validator prevents start_sec > end_sec — this is the caller's
+        // responsibility. Verify the struct is fully serializable in this state.
+        let seg = TranscriptionSegment {
+            start_sec: Some(10.0),
+            end_sec: Some(2.0),
+            text: "backwards".to_owned(),
+            speaker: None,
+            confidence: Some(0.5),
+        };
+        let json = serde_json::to_string(&seg).unwrap();
+        let parsed: TranscriptionSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.start_sec, Some(10.0));
+        assert_eq!(parsed.end_sec, Some(2.0));
+        assert_eq!(parsed.text, "backwards");
+    }
+
+    #[test]
+    fn backend_params_carry_initial_prompt_true_with_no_prompt() {
+        // Edge case: carry_initial_prompt=true but prompt=None.
+        // This is semantically questionable but should serialize fine.
+        let params = BackendParams {
+            carry_initial_prompt: true,
+            prompt: None,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let parsed: BackendParams = serde_json::from_str(&json).unwrap();
+        assert!(parsed.carry_initial_prompt);
+        assert!(parsed.prompt.is_none());
+    }
+
+    #[test]
+    fn input_source_file_empty_path_round_trips() {
+        let source = InputSource::File {
+            path: PathBuf::from(""),
+        };
+        let json = serde_json::to_string(&source).unwrap();
+        let parsed: InputSource = serde_json::from_str(&json).unwrap();
+        match parsed {
+            InputSource::File { path } => assert_eq!(path, PathBuf::from("")),
+            other => panic!("expected File variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diarization_config_all_boolean_combinations_round_trip() {
+        for (no_stem, suppress) in [(true, true), (true, false), (false, true), (false, false)] {
+            let config = DiarizationConfig {
+                no_stem,
+                suppress_numerals: suppress,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            let parsed: DiarizationConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.no_stem, no_stem, "no_stem={no_stem} mismatch");
+            assert_eq!(
+                parsed.suppress_numerals, suppress,
+                "suppress_numerals={suppress} mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn run_report_without_replay_field_deserializes_with_default() {
+        // RunReport's replay field has #[serde(default)], so JSON without "replay"
+        // should deserialize with ReplayEnvelope::default().
+        let json = json!({
+            "run_id": "test",
+            "trace_id": "00000000000000000000000000000000",
+            "started_at_rfc3339": "2026-01-01T00:00:00Z",
+            "finished_at_rfc3339": "2026-01-01T00:00:01Z",
+            "input_path": "test.wav",
+            "normalized_wav_path": "norm.wav",
+            "request": {
+                "input": {"kind": "file", "path": "test.wav"},
+                "backend": "auto",
+                "model": null,
+                "language": null,
+                "translate": false,
+                "diarize": false,
+                "persist": true,
+                "db_path": "/tmp/test.sqlite3",
+                "timeout_ms": null,
+            },
+            "result": {
+                "backend": "whisper_cpp",
+                "transcript": "hello",
+                "language": null,
+                "segments": [],
+                "acceleration": null,
+                "raw_output": {},
+                "artifact_paths": [],
+            },
+            "events": [],
+            "warnings": [],
+            "evidence": [],
+        });
+        let report: RunReport =
+            serde_json::from_value(json).expect("should deserialize without replay field");
+        assert!(report.replay.input_content_hash.is_none());
+        assert!(report.replay.backend_identity.is_none());
+    }
+
+    // --- BackendDiscoveryEntry ---
+
+    #[test]
+    fn backend_discovery_entry_serde_round_trip() {
+        let entry = BackendDiscoveryEntry {
+            name: "whisper.cpp".to_owned(),
+            kind: BackendKind::WhisperCpp,
+            available: true,
+            capabilities: EngineCapabilities {
+                supports_diarization: false,
+                supports_translation: true,
+                supports_word_timestamps: true,
+                supports_gpu: true,
+                supports_streaming: false,
+            },
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: BackendDiscoveryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "whisper.cpp");
+        assert_eq!(parsed.kind, BackendKind::WhisperCpp);
+        assert!(parsed.available);
+        assert!(!parsed.capabilities.supports_diarization);
+        assert!(parsed.capabilities.supports_translation);
+    }
+
+    #[test]
+    fn backend_discovery_entry_unavailable_round_trip() {
+        let entry = BackendDiscoveryEntry {
+            name: "insanely-fast-whisper".to_owned(),
+            kind: BackendKind::InsanelyFast,
+            available: false,
+            capabilities: EngineCapabilities {
+                supports_diarization: true,
+                supports_translation: true,
+                supports_word_timestamps: true,
+                supports_gpu: true,
+                supports_streaming: false,
+            },
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: BackendDiscoveryEntry = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.available);
+        assert!(parsed.capabilities.supports_diarization);
+    }
+
+    // --- BackendsReport ---
+
+    #[test]
+    fn backends_report_serde_round_trip() {
+        let report = BackendsReport {
+            backends: vec![
+                BackendDiscoveryEntry {
+                    name: "whisper.cpp".to_owned(),
+                    kind: BackendKind::WhisperCpp,
+                    available: true,
+                    capabilities: EngineCapabilities {
+                        supports_diarization: false,
+                        supports_translation: true,
+                        supports_word_timestamps: true,
+                        supports_gpu: true,
+                        supports_streaming: false,
+                    },
+                },
+                BackendDiscoveryEntry {
+                    name: "whisper-diarization".to_owned(),
+                    kind: BackendKind::WhisperDiarization,
+                    available: false,
+                    capabilities: EngineCapabilities {
+                        supports_diarization: true,
+                        supports_translation: false,
+                        supports_word_timestamps: false,
+                        supports_gpu: true,
+                        supports_streaming: false,
+                    },
+                },
+            ],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: BackendsReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.backends.len(), 2);
+        assert_eq!(parsed.backends[0].name, "whisper.cpp");
+        assert_eq!(parsed.backends[1].kind, BackendKind::WhisperDiarization);
+    }
+
+    #[test]
+    fn backends_report_empty_round_trip() {
+        let report = BackendsReport { backends: vec![] };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: BackendsReport = serde_json::from_str(&json).unwrap();
+        assert!(parsed.backends.is_empty());
+    }
+}

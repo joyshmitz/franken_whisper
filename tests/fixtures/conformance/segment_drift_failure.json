@@ -1,0 +1,30 @@
+{
+  "name": "timestamp_and_text_drift",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": true
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "hello",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.99
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.30,
+      "end_sec": 1.40,
+      "text": "HELLO",
+      "speaker": "SPEAKER_01",
+      "confidence": 0.40
+    }
+  ],
+  "expect_within_tolerance": false,
+  "expected_timestamp_violations": 1,
+  "expected_text_mismatches": 1,
+  "expected_speaker_mismatches": 1
+}

@@ -1,0 +1,2 @@
+[0.00s - 2.50s] SPEAKER_00: Hello world.
+[2.50s - 6.00s] SPEAKER_01: This is a test of the whisper speech recognition system.

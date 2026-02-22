@@ -1,0 +1,44 @@
+{
+  "name": "relaxed_tolerance_accepts_significant_drift",
+  "tolerance": {
+    "timestamp_tolerance_sec": 2.0,
+    "require_text_exact": false,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 5.0,
+      "text": "this is a long sentence with many words",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 5.0,
+      "end_sec": 10.0,
+      "text": "and another sentence that continues",
+      "speaker": "SPEAKER_01",
+      "confidence": 0.88
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.8,
+      "end_sec": 5.5,
+      "text": "This is a long sentence with many words.",
+      "speaker": "spk0",
+      "confidence": 0.80
+    },
+    {
+      "start_sec": 5.5,
+      "end_sec": 11.2,
+      "text": "And another sentence that continues.",
+      "speaker": "spk1",
+      "confidence": 0.75
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

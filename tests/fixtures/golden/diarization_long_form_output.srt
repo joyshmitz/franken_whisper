@@ -1,0 +1,31 @@
+1
+00:00:00,000 --> 00:00:14,500
+[SPEAKER_00] In this long form fixture we validate that cross engine comparisons remain stable across many contiguous segments.
+
+2
+00:00:14,500 --> 00:00:31,000
+[SPEAKER_01] The transcript continues with additional detail so that timing drift accumulation is exercised over a longer horizon.
+
+3
+00:00:31,000 --> 00:00:47,500
+[SPEAKER_00] We keep punctuation and spacing deterministic to preserve text exactness guarantees in strict mode.
+
+4
+00:00:47,500 --> 00:01:04,000
+[SPEAKER_01] Segment four confirms that mid stream boundaries remain monotonic and replay safe.
+
+5
+00:01:04,000 --> 00:01:18,500
+[SPEAKER_00] Segment five records a speaker handoff marker in plain text without relying on diarization metadata.
+
+6
+00:01:18,500 --> 00:01:33,000
+[SPEAKER_01] Segment six verifies that downstream normalization keeps confidence and ordering contracts intact.
+
+7
+00:01:33,000 --> 00:01:48,000
+[SPEAKER_00] Segment seven extends the sample close to two minutes to emulate production scale meeting excerpts.
+
+8
+00:01:48,000 --> 00:02:00,000
+[SPEAKER_01] Segment eight closes the long form corpus scenario and anchors final tolerance checks.

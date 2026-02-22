@@ -1,0 +1,44 @@
+{
+  "name": "missing_timestamps_cause_violation",
+  "tolerance": {
+    "timestamp_tolerance_sec": 1.0,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "has timestamps",
+      "speaker": null,
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "text": "also has timestamps",
+      "speaker": null,
+      "confidence": 0.90
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": null,
+      "end_sec": null,
+      "text": "has timestamps",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 1.05,
+      "end_sec": 2.02,
+      "text": "also has timestamps",
+      "speaker": null,
+      "confidence": 0.88
+    }
+  ],
+  "expect_within_tolerance": false,
+  "expected_timestamp_violations": 1,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

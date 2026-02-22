@@ -1,0 +1,44 @@
+{
+  "name": "baseline_within_tolerance",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "hello",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.98
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "text": "world",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.95
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.02,
+      "end_sec": 1.03,
+      "text": "hello",
+      "speaker": "SPEAKER_ALT",
+      "confidence": 0.96
+    },
+    {
+      "start_sec": 1.02,
+      "end_sec": 2.01,
+      "text": "world",
+      "speaker": "SPEAKER_ALT",
+      "confidence": 0.93
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

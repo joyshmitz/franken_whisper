@@ -1,0 +1,11 @@
+{
+  "text": "Speaker one opens the meeting. Speaker two overlaps by a narrow boundary. Speaker one resumes without losing context. Speaker three asks for a repeat. Speaker two confirms the corrected timeline.",
+  "segments": [
+    {"start": 0.0, "end": 2.0, "text": " Speaker one opens the meeting.", "avg_logprob": -0.24, "no_speech_prob": 0.01},
+    {"start": 2.0, "end": 4.01, "text": " Speaker two overlaps by a narrow boundary.", "avg_logprob": -0.23, "no_speech_prob": 0.01},
+    {"start": 4.01, "end": 6.0, "text": " Speaker one resumes without losing context.", "avg_logprob": -0.22, "no_speech_prob": 0.01},
+    {"start": 6.0, "end": 8.02, "text": " Speaker three asks for a repeat.", "avg_logprob": -0.22, "no_speech_prob": 0.01},
+    {"start": 8.02, "end": 10.0, "text": " Speaker two confirms the corrected timeline.", "avg_logprob": -0.21, "no_speech_prob": 0.01}
+  ],
+  "language": "en"
+}

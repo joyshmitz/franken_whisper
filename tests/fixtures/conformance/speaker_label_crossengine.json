@@ -1,0 +1,44 @@
+{
+  "name": "speaker_label_crossengine_tolerance",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.1,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.5,
+      "text": "hello there",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 1.5,
+      "end_sec": 3.0,
+      "text": "how are you",
+      "speaker": "SPEAKER_01",
+      "confidence": 0.88
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.05,
+      "end_sec": 1.55,
+      "text": "hello there",
+      "speaker": "spk0",
+      "confidence": 0.92
+    },
+    {
+      "start_sec": 1.52,
+      "end_sec": 3.08,
+      "text": "how are you",
+      "speaker": "spk1",
+      "confidence": 0.85
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

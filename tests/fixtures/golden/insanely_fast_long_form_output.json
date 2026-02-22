@@ -1,0 +1,13 @@
+{
+  "text": "In this long form fixture we validate that cross engine comparisons remain stable across many contiguous segments. The transcript continues with additional detail so that timing drift accumulation is exercised over a longer horizon. We keep punctuation and spacing deterministic to preserve text exactness guarantees in strict mode. Segment four confirms that mid stream boundaries remain monotonic and replay safe. Segment five records a speaker handoff marker in plain text without relying on diarization metadata. Segment six verifies that downstream normalization keeps confidence and ordering contracts intact. Segment seven extends the sample close to two minutes to emulate production scale meeting excerpts. Segment eight closes the long form corpus scenario and anchors final tolerance checks.",
+  "chunks": [
+    {"text": " In this long form fixture we validate that cross engine comparisons remain stable across many contiguous segments.", "timestamp": [0.0, 14.5]},
+    {"text": " The transcript continues with additional detail so that timing drift accumulation is exercised over a longer horizon.", "timestamp": [14.5, 31.0]},
+    {"text": " We keep punctuation and spacing deterministic to preserve text exactness guarantees in strict mode.", "timestamp": [31.0, 47.5]},
+    {"text": " Segment four confirms that mid stream boundaries remain monotonic and replay safe.", "timestamp": [47.5, 64.0]},
+    {"text": " Segment five records a speaker handoff marker in plain text without relying on diarization metadata.", "timestamp": [64.0, 78.5]},
+    {"text": " Segment six verifies that downstream normalization keeps confidence and ordering contracts intact.", "timestamp": [78.5, 93.0]},
+    {"text": " Segment seven extends the sample close to two minutes to emulate production scale meeting excerpts.", "timestamp": [93.0, 108.0]},
+    {"text": " Segment eight closes the long form corpus scenario and anchors final tolerance checks.", "timestamp": [108.0, 120.0]}
+  ]
+}

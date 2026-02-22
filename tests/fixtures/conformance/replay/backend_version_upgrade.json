@@ -1,0 +1,19 @@
+{
+  "name": "backend_version_upgrade_breaks_replay",
+  "expected": {
+    "input_content_hash": "same-input",
+    "backend_identity": "whisper-cli",
+    "backend_version": "whisper 1.7.2",
+    "output_payload_hash": "same-output"
+  },
+  "observed": {
+    "input_content_hash": "same-input",
+    "backend_identity": "whisper-cli",
+    "backend_version": "whisper 1.8.0",
+    "output_payload_hash": "same-output"
+  },
+  "expect_within_tolerance": false,
+  "expect_input_hash_match": true,
+  "expect_backend_identity_match": true,
+  "expect_output_hash_match": true
+}

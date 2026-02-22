@@ -1,0 +1,36 @@
+{
+  "name": "large_segment_count_within_tolerance",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.1,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {"start_sec": 0.0, "end_sec": 1.0, "text": "seg 0", "speaker": "S0", "confidence": 0.9},
+    {"start_sec": 1.0, "end_sec": 2.0, "text": "seg 1", "speaker": "S0", "confidence": 0.9},
+    {"start_sec": 2.0, "end_sec": 3.0, "text": "seg 2", "speaker": "S1", "confidence": 0.9},
+    {"start_sec": 3.0, "end_sec": 4.0, "text": "seg 3", "speaker": "S0", "confidence": 0.9},
+    {"start_sec": 4.0, "end_sec": 5.0, "text": "seg 4", "speaker": "S1", "confidence": 0.9},
+    {"start_sec": 5.0, "end_sec": 6.0, "text": "seg 5", "speaker": "S0", "confidence": 0.9},
+    {"start_sec": 6.0, "end_sec": 7.0, "text": "seg 6", "speaker": "S1", "confidence": 0.9},
+    {"start_sec": 7.0, "end_sec": 8.0, "text": "seg 7", "speaker": "S0", "confidence": 0.9},
+    {"start_sec": 8.0, "end_sec": 9.0, "text": "seg 8", "speaker": "S1", "confidence": 0.9},
+    {"start_sec": 9.0, "end_sec": 10.0, "text": "seg 9", "speaker": "S0", "confidence": 0.9}
+  ],
+  "observed": [
+    {"start_sec": 0.05, "end_sec": 1.03, "text": "seg 0", "speaker": "A", "confidence": 0.88},
+    {"start_sec": 1.02, "end_sec": 2.04, "text": "seg 1", "speaker": "A", "confidence": 0.87},
+    {"start_sec": 2.01, "end_sec": 3.02, "text": "seg 2", "speaker": "B", "confidence": 0.89},
+    {"start_sec": 3.03, "end_sec": 4.01, "text": "seg 3", "speaker": "A", "confidence": 0.86},
+    {"start_sec": 4.02, "end_sec": 5.04, "text": "seg 4", "speaker": "B", "confidence": 0.88},
+    {"start_sec": 5.01, "end_sec": 6.03, "text": "seg 5", "speaker": "A", "confidence": 0.85},
+    {"start_sec": 6.04, "end_sec": 7.02, "text": "seg 6", "speaker": "B", "confidence": 0.87},
+    {"start_sec": 7.03, "end_sec": 8.01, "text": "seg 7", "speaker": "A", "confidence": 0.86},
+    {"start_sec": 8.02, "end_sec": 9.04, "text": "seg 8", "speaker": "B", "confidence": 0.88},
+    {"start_sec": 9.01, "end_sec": 10.03, "text": "seg 9", "speaker": "A", "confidence": 0.85}
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "franken_whisper Robot Mode NDJSON Event Schema",
+  "description": "JSON Schema for franken_whisper robot mode NDJSON events. Each line is one of: run_start, stage, run_complete, or run_error.",
+  "version": "1.0.0",
+  "oneOf": [
+    { "$ref": "#/$defs/run_start" },
+    { "$ref": "#/$defs/stage" },
+    { "$ref": "#/$defs/run_complete" },
+    { "$ref": "#/$defs/run_error" }
+  ],
+  "$defs": {
+    "run_start": {
+      "type": "object",
+      "required": ["event", "schema_version", "request"],
+      "properties": {
+        "event": { "const": "run_start" },
+        "schema_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "request": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "stage": {
+      "type": "object",
+      "required": ["event", "schema_version", "run_id", "seq", "ts", "stage", "code", "message", "payload"],
+      "properties": {
+        "event": { "const": "stage" },
+        "schema_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "run_id": { "type": "string", "minLength": 1 },
+        "seq": { "type": "integer", "minimum": 0 },
+        "ts": { "type": "string", "format": "date-time" },
+        "stage": {
+          "type": "string",
+          "enum": ["ingest", "normalize", "probe", "backend", "acceleration", "persist"]
+        },
+        "code": { "type": "string", "pattern": "^[a-z_]+\\.[a-z_]+$" },
+        "message": { "type": "string" },
+        "payload": {}
+      },
+      "additionalProperties": false
+    },
+    "segment": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "start_sec": { "type": ["number", "null"] },
+        "end_sec": { "type": ["number", "null"] },
+        "text": { "type": "string" },
+        "speaker": { "type": ["string", "null"] },
+        "confidence": { "type": ["number", "null"], "minimum": 0.0, "maximum": 1.0 }
+      },
+      "additionalProperties": false
+    },
+    "acceleration_report": {
+      "type": ["object", "null"],
+      "properties": {
+        "backend": { "type": "string" },
+        "input_values": { "type": "integer", "minimum": 0 },
+        "normalized_confidences": { "type": "boolean" },
+        "pre_mass": { "type": ["number", "null"] },
+        "post_mass": { "type": ["number", "null"] },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "run_complete": {
+      "type": "object",
+      "required": [
+        "event", "schema_version", "run_id", "trace_id",
+        "started_at", "finished_at", "backend", "language",
+        "transcript", "segments", "acceleration", "warnings", "evidence"
+      ],
+      "properties": {
+        "event": { "const": "run_complete" },
+        "schema_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "run_id": { "type": "string", "minLength": 1 },
+        "trace_id": { "type": "string" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" },
+        "backend": { "type": "string" },
+        "language": { "type": ["string", "null"] },
+        "transcript": { "type": "string" },
+        "segments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/segment" }
+        },
+        "acceleration": { "$ref": "#/$defs/acceleration_report" },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "evidence": { "type": "array" }
+      },
+      "additionalProperties": false
+    },
+    "run_error": {
+      "type": "object",
+      "required": ["event", "schema_version", "code", "message"],
+      "properties": {
+        "event": { "const": "run_error" },
+        "schema_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "code": {
+          "type": "string",
+          "enum": [
+            "FW-ROBOT-EXEC",
+            "FW-ROBOT-TIMEOUT",
+            "FW-ROBOT-BACKEND",
+            "FW-ROBOT-REQUEST",
+            "FW-ROBOT-STORAGE",
+            "FW-ROBOT-CANCELLED"
+          ]
+        },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

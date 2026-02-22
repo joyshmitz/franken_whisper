@@ -1,0 +1,8 @@
+{
+  "text": "Hello world. This is a test of the whisper speech recognition system.",
+  "segments": [
+    {"start": 0.0, "end": 2.5, "text": " Hello world.", "avg_logprob": -0.25, "no_speech_prob": 0.01},
+    {"start": 2.5, "end": 6.0, "text": " This is a test of the whisper speech recognition system.", "avg_logprob": -0.18, "no_speech_prob": 0.02}
+  ],
+  "language": "en"
+}

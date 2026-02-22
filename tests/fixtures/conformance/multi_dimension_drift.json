@@ -1,0 +1,58 @@
+{
+  "name": "multi_dimension_drift_all_violations",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.1,
+    "require_text_exact": true,
+    "require_speaker_exact": true
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.5,
+      "text": "first segment",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 1.5,
+      "end_sec": 3.0,
+      "text": "second segment",
+      "speaker": "SPEAKER_01",
+      "confidence": 0.88
+    },
+    {
+      "start_sec": 3.0,
+      "end_sec": 4.5,
+      "text": "third segment",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.92
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.5,
+      "end_sec": 1.8,
+      "text": "first segment",
+      "speaker": "spk0",
+      "confidence": 0.91
+    },
+    {
+      "start_sec": 1.8,
+      "end_sec": 3.2,
+      "text": "SECOND SEGMENT",
+      "speaker": "SPEAKER_01",
+      "confidence": 0.85
+    },
+    {
+      "start_sec": 3.2,
+      "end_sec": 4.5,
+      "text": "third segment different",
+      "speaker": "spk0",
+      "confidence": 0.78
+    }
+  ],
+  "expect_within_tolerance": false,
+  "expected_timestamp_violations": 3,
+  "expected_text_mismatches": 2,
+  "expected_speaker_mismatches": 2
+}

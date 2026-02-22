@@ -1,0 +1,44 @@
+{
+  "name": "speaker_only_drift_with_exact_speaker_required",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": true
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "hello",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "text": "world",
+      "speaker": "SPEAKER_01",
+      "confidence": 0.92
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.01,
+      "end_sec": 1.02,
+      "text": "hello",
+      "speaker": "spk_0",
+      "confidence": 0.93
+    },
+    {
+      "start_sec": 1.01,
+      "end_sec": 2.01,
+      "text": "world",
+      "speaker": "spk_1",
+      "confidence": 0.90
+    }
+  ],
+  "expect_within_tolerance": false,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 2
+}

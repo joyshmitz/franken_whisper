@@ -1,0 +1,9 @@
+{
+  "text": "Short speech island after a long silence. Second island appears near the midpoint. Third island closes the sparse recording. Final island confirms trailing silence handling.",
+  "chunks": [
+    {"text": " Short speech island after a long silence.", "timestamp": [5.0, 7.0]},
+    {"text": " Second island appears near the midpoint.", "timestamp": [30.0, 32.2]},
+    {"text": " Third island closes the sparse recording.", "timestamp": [58.0, 60.0]},
+    {"text": " Final island confirms trailing silence handling.", "timestamp": [88.5, 90.0]}
+  ]
+}

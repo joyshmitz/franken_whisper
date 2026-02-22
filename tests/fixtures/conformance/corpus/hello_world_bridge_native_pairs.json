@@ -1,0 +1,69 @@
+{
+  "name": "golden_hello_world_bridge_native_pairs",
+  "tags": ["smoke", "native_coverage"],
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "pair_drift_caps": {
+    "max_timestamp_violations": 0,
+    "max_text_mismatches": 0,
+    "max_speaker_mismatches": 0,
+    "allow_length_mismatch": false
+  },
+  "canonical": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 2.5,
+      "text": "Hello world.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 2.5,
+      "end_sec": 6.0,
+      "text": "This is a test of the whisper speech recognition system.",
+      "speaker": null,
+      "confidence": null
+    }
+  ],
+  "engines": [
+    {
+      "engine": "whisper_cpp_bridge",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/whisper_cpp_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_cpp_native",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/whisper_cpp_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "insanely_fast_bridge",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/insanely_fast_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "insanely_fast_native",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/insanely_fast_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_diarization_bridge",
+      "format": "diarization_srt",
+      "artifact": "tests/fixtures/golden/diarization_output.srt",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_diarization_native",
+      "format": "diarization_srt",
+      "artifact": "tests/fixtures/golden/diarization_native_output.srt",
+      "expect_within_tolerance": true
+    }
+  ]
+}

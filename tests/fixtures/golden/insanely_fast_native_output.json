@@ -1,0 +1,31 @@
+{
+  "engine": "insanely-fast-native",
+  "schema_version": "native-pilot-v1",
+  "in_process": true,
+  "text": "Hello world. This is a test of the whisper speech recognition system.",
+  "language": "en",
+  "chunks": [
+    {
+      "text": " Hello world.",
+      "timestamp": [
+        0.0,
+        2.5
+      ],
+      "confidence": 0.95
+    },
+    {
+      "text": " This is a test of the whisper speech recognition system.",
+      "timestamp": [
+        2.5,
+        6.0
+      ],
+      "confidence": 0.94
+    }
+  ],
+  "telemetry": {
+    "batch_size_effective": 8,
+    "batch_count": 1,
+    "device": "cuda:0",
+    "dtype": "float16"
+  }
+}

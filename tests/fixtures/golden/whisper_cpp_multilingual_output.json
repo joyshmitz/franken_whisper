@@ -1,0 +1,10 @@
+{
+  "text": "Hello and welcome to the multilingual system check. Buenos dias, este canal mezcla ingles y espanol. Bonjour, cette ligne confirme la couverture romance. Grazie, the final segment returns to english control.",
+  "segments": [
+    {"start": 0.0, "end": 5.2, "text": " Hello and welcome to the multilingual system check.", "avg_logprob": -0.25, "no_speech_prob": 0.01},
+    {"start": 5.2, "end": 10.4, "text": " Buenos dias, este canal mezcla ingles y espanol.", "avg_logprob": -0.24, "no_speech_prob": 0.01},
+    {"start": 10.4, "end": 15.6, "text": " Bonjour, cette ligne confirme la couverture romance.", "avg_logprob": -0.23, "no_speech_prob": 0.01},
+    {"start": 15.6, "end": 20.8, "text": " Grazie, the final segment returns to english control.", "avg_logprob": -0.22, "no_speech_prob": 0.01}
+  ],
+  "language": "multi"
+}

@@ -1,0 +1,54 @@
+# Build artifacts
+/target
+/target_local
+
+# Legacy upstream repos (reference only, not shipped)
+/legacy_whispercpp/
+/legacy_insanely_fast_whisper/
+/legacy_whisper_diarization/
+
+# Runtime state
+/.franken_whisper
+storage.sqlite3
+storage.sqlite3-wal
+storage.sqlite3-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Audio working files
+*.wav
+*.ulaw
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
+# Images (keep .webp for README illustration)
+*.png
+*.jpg
+*.jpeg
+
+# beads viewer local config and caches
+.bv/
+
+# Agent mail
+.agent-mail-project-id
+
+# macOS
+.DS_Store
+._*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Cargo lock is committed (binary crate)
+# Cargo.lock
+
+# Temporary files
+*.tmp
+*.bak

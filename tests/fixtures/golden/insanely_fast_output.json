@@ -1,0 +1,10 @@
+{
+  "text": "Hello world. This is a test of the whisper speech recognition system.",
+  "chunks": [
+    {"text": " Hello world.", "timestamp": [0.0, 2.5]},
+    {"text": " This is a test of the whisper speech recognition system.", "timestamp": [2.5, 6.0]}
+  ],
+  "speakers": [
+    {"speaker": "SPEAKER_00", "timestamp": [0.0, 6.0]}
+  ]
+}

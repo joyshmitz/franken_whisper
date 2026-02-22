@@ -1,0 +1,85 @@
+[package]
+name = "franken_whisper"
+version = "0.1.0"
+edition = "2024"
+license-file = "LICENSE"
+description = "Agent-first Rust ASR orchestration stack with ffmpeg normalization and frankensqlite-backed persistence"
+
+[features]
+default = []
+tui = ["dep:ftui"]
+gpu-frankentorch = ["dep:ft-api", "dep:ft-core"]
+gpu-frankenjax = ["dep:fj-api", "dep:fj-core"]
+
+[dependencies]
+ctrlc = "3.4"
+base64 = "0.22.1"
+chrono = { version = "0.4.40", features = ["serde"] }
+clap = { version = "4.5.31", features = ["derive", "env"] }
+crc32fast = "1.4"
+flate2 = "1.1.0"
+serde = { version = "1.0.218", features = ["derive"] }
+serde_json = "1.0.140"
+tempfile = "3.17.1"
+thiserror = "2.0.12"
+uuid = { version = "1.15.1", features = ["serde", "v4"] }
+sha2 = "0.10"
+which = "7.0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+asupersync = { path = "../asupersync", default-features = false }
+franken-kernel = { path = "../asupersync/franken_kernel" }
+franken-evidence = { path = "../asupersync/franken_evidence" }
+franken-decision = { path = "../asupersync/franken_decision" }
+fsqlite = { path = "../frankensqlite/crates/fsqlite" }
+fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
+
+ftui = { path = "../frankentui/crates/ftui", default-features = false, features = ["crossterm"], optional = true }
+ft-api = { path = "../frankentorch/crates/ft-api", optional = true }
+ft-core = { path = "../frankentorch/crates/ft-core", optional = true }
+fj-api = { path = "../frankenjax/crates/fj-api", optional = true }
+fj-core = { path = "../frankenjax/crates/fj-core", optional = true }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+# Targeted lint hardening — pedantic/nursery deferred until missing-docs addressed
+enum_glob_use = "warn"
+explicit_into_iter_loop = "warn"
+explicit_iter_loop = "warn"
+flat_map_option = "warn"
+implicit_clone = "warn"
+semicolon_if_nothing_returned = "warn"
+unused_self = "warn"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "storage_bench"
+harness = false
+
+[[bench]]
+name = "normalize_bench"
+harness = false
+
+[[bench]]
+name = "pipeline_bench"
+harness = false
+
+[[bench]]
+name = "tty_bench"
+harness = false
+
+[[bench]]
+name = "sync_bench"
+harness = false
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
