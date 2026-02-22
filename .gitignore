@@ -24,8 +24,9 @@ storage.sqlite3-shm
 *.ogg
 *.m4a
 
-# Images (keep .webp for README illustration)
+# Images (keep .webp for README illustration, .png for GitHub social preview)
 *.png
+!gh_og_share_image.png
 *.jpg
 *.jpeg
 
