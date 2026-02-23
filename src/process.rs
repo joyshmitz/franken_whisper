@@ -66,7 +66,7 @@ pub fn run_command_with_timeout(
 
 /// Run a subprocess with cancellation-aware polling.
 ///
-/// Instead of a fixed timeout, this variant polls `pcx.checkpoint()` on every
+/// Instead of a fixed timeout, this variant polls `token.checkpoint()` on every
 /// iteration (50ms sleep). If the checkpoint returns `Err(Cancelled)`, the
 /// child process is killed immediately and the error is propagated. An optional
 /// hard timeout is still respected as a safety net.

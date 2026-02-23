@@ -5304,4 +5304,192 @@ mod tests {
             elapsed
         );
     }
+
+    #[test]
+    fn concurrent_session_hyphen_and_space_names_rejected() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let store = RunStore::open(&db_path).expect("open");
+
+        for invalid_name in &["my-session", "hello world", "session.v1", "résumé"] {
+            let result = store.begin_concurrent_session(invalid_name);
+            assert!(result.is_err(), "name '{invalid_name}' should be rejected");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("invalid session name"),
+                "error for '{invalid_name}' should mention 'invalid session name': {err}"
+            );
+        }
+
+        // Valid name with underscore should succeed.
+        let session = store
+            .begin_concurrent_session("my_session_1")
+            .expect("valid name");
+        session.rollback().expect("rollback");
+    }
+
+    #[test]
+    fn storage_diagnostics_clone_and_debug() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("diag.sqlite3");
+        let store = RunStore::open(&db_path).expect("open");
+
+        let diag = store.diagnostics().expect("diagnostics");
+        let cloned = diag.clone();
+        assert_eq!(diag.page_size, cloned.page_size);
+        assert_eq!(diag.journal_mode, cloned.journal_mode);
+        assert_eq!(diag.integrity_check, cloned.integrity_check);
+        assert_eq!(diag.freelist_count, cloned.freelist_count);
+
+        let debug = format!("{:?}", diag);
+        assert!(
+            debug.contains("StorageDiagnostics"),
+            "Debug should contain struct name"
+        );
+        assert!(
+            debug.contains("WalCheckpointInfo"),
+            "Debug should contain nested struct name"
+        );
+    }
+
+    #[test]
+    fn is_busy_storage_error_embedded_substring_and_real_sqlite_format() {
+        use super::is_busy_storage_error;
+        use crate::error::FwError;
+
+        // ALL-CAPS with longer surrounding message.
+        assert!(is_busy_storage_error(&FwError::Storage(
+            "SQLITE error: DATABASE IS LOCKED while writing".to_owned()
+        )));
+        // Real SQLite BUSY error format with "snapshot conflict" embedded.
+        assert!(is_busy_storage_error(&FwError::Storage(
+            "SQLITE_BUSY snapshot conflict: unable to open read-write transaction".to_owned()
+        )));
+        // "busy" alone (without "database is busy") should NOT match.
+        assert!(!is_busy_storage_error(&FwError::Storage(
+            "database busy timeout".to_owned()
+        )));
+        // Completely unrelated error.
+        assert!(!is_busy_storage_error(&FwError::Storage(
+            "unique constraint violated".to_owned()
+        )));
+    }
+
+    #[test]
+    fn optional_text_and_optional_float_helpers() {
+        use super::{optional_float, optional_text, text_value};
+
+        assert_eq!(
+            text_value("hello".to_owned()),
+            SqliteValue::Text("hello".to_owned())
+        );
+        assert_eq!(
+            optional_text(Some("world")),
+            SqliteValue::Text("world".to_owned())
+        );
+        assert_eq!(optional_text(None), SqliteValue::Null);
+        assert_eq!(optional_float(Some(2.75)), SqliteValue::Float(2.75));
+        assert_eq!(optional_float(None), SqliteValue::Null);
+    }
+
+    #[test]
+    fn parse_backend_all_known_and_unknown() {
+        use super::parse_backend;
+        assert_eq!(parse_backend("whisper_cpp"), BackendKind::WhisperCpp);
+        assert_eq!(parse_backend("insanely_fast"), BackendKind::InsanelyFast);
+        assert_eq!(
+            parse_backend("whisper_diarization"),
+            BackendKind::WhisperDiarization
+        );
+        // Unknown strings (including "auto") fall back to Auto.
+        assert_eq!(parse_backend("auto"), BackendKind::Auto);
+        assert_eq!(parse_backend("something_else"), BackendKind::Auto);
+        assert_eq!(parse_backend(""), BackendKind::Auto);
+    }
+
+    // ── Task #212 — storage pass 2 edge-case tests ──────────────────
+
+    #[test]
+    fn value_to_string_negative_float() {
+        use super::value_to_string;
+        assert_eq!(
+            value_to_string(Some(&SqliteValue::Float(-1.5))),
+            "-1.5"
+        );
+        assert_eq!(
+            value_to_string(Some(&SqliteValue::Float(-0.001))),
+            "-0.001"
+        );
+        // Verify it parses back correctly.
+        let s = value_to_string(Some(&SqliteValue::Float(-99.99)));
+        let parsed: f64 = s.parse().expect("should parse back to f64");
+        assert!((parsed - (-99.99)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pragma_integer_nonexistent_pragma_returns_zero() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("pragma_test.sqlite3");
+        let store = RunStore::open(&db_path).expect("store should open");
+
+        // A nonexistent PRAGMA returns empty result → unwrap_or(0).
+        let val = store
+            .pragma_integer("totally_nonexistent_pragma_xyz_42")
+            .expect("should not error");
+        assert_eq!(val, 0, "nonexistent pragma should fall back to 0");
+    }
+
+    #[test]
+    fn concurrent_session_execute_with_params_invalid_sql_errors() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("params_err.sqlite3");
+        let store = RunStore::open(&db_path).expect("store should open");
+        let session = store
+            .begin_concurrent_session("params_test")
+            .expect("session should start");
+
+        let result = session.execute_with_params(
+            "INSERT INTO nonexistent_table_xyz (col) VALUES (?1)",
+            &[SqliteValue::Text("val".to_owned())],
+        );
+        assert!(result.is_err(), "invalid table should produce error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("nonexistent_table_xyz") || msg.contains("no such table"),
+            "error should mention the table: {msg}"
+        );
+    }
+
+    #[test]
+    fn value_to_i64_min_boundary() {
+        use super::value_to_i64;
+        assert_eq!(
+            value_to_i64(Some(&SqliteValue::Integer(i64::MIN))),
+            i64::MIN
+        );
+        // Text representation should also parse.
+        assert_eq!(
+            value_to_i64(Some(&SqliteValue::Text(i64::MIN.to_string()))),
+            i64::MIN
+        );
+    }
+
+    #[test]
+    fn run_store_diagnostics_contains_expected_keys() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("diag.sqlite3");
+        let store = RunStore::open(&db_path).expect("store should open");
+
+        let diag = store.diagnostics().expect("diagnostics should succeed");
+        assert!(diag.page_count >= 0, "page_count should be non-negative");
+        assert!(diag.page_size > 0, "page_size should be positive");
+        assert_eq!(diag.freelist_count, 0, "fresh db should have no freelist pages");
+        assert_eq!(diag.integrity_check, "ok", "fresh db should pass integrity check");
+        // WAL mode check.
+        assert!(
+            diag.journal_mode == "wal" || diag.journal_mode == "delete",
+            "journal mode should be wal or delete, got: {}",
+            diag.journal_mode
+        );
+    }
 }

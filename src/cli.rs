@@ -453,6 +453,41 @@ pub struct TranscribeArgs {
     /// Spell out numbers instead of digits for alignment (diarization).
     #[arg(long)]
     pub suppress_numerals: bool,
+
+    // -- Phase 5: Speculative cancel-correct streaming --
+    /// Enable speculative cancel-correct streaming mode.
+    /// Runs a fast model for instant results while a quality model
+    /// confirms or corrects in parallel.
+    #[arg(long)]
+    pub speculative: bool,
+
+    /// Fast model for speculative mode (default: auto-select smallest available).
+    #[arg(long, requires = "speculative")]
+    pub fast_model: Option<String>,
+
+    /// Quality model for speculative mode (default: auto-select largest available).
+    #[arg(long, requires = "speculative")]
+    pub quality_model: Option<String>,
+
+    /// Initial speculation window size in milliseconds (default: 3000).
+    #[arg(long, requires = "speculative", default_value = "3000")]
+    pub speculative_window_ms: Option<u64>,
+
+    /// Window overlap in milliseconds for speculative mode (default: 500).
+    #[arg(long, requires = "speculative", default_value = "500")]
+    pub speculative_overlap_ms: Option<u64>,
+
+    /// Maximum WER tolerance before correction in speculative mode (default: 0.1).
+    #[arg(long, requires = "speculative")]
+    pub correction_tolerance_wer: Option<f64>,
+
+    /// Disable adaptive window sizing in speculative mode.
+    #[arg(long, requires = "speculative")]
+    pub no_adaptive: bool,
+
+    /// Force all windows to use quality model result (evaluation mode).
+    #[arg(long, requires = "speculative")]
+    pub always_correct: bool,
 }
 
 #[derive(Debug, Args)]
@@ -794,6 +829,35 @@ impl TranscribeArgs {
             "diarize": self.diarize,
             "persist": !self.no_persist,
             "db": self.db,
+            "speculative": self.speculative,
+        })
+    }
+
+    /// Build a `SpeculativeConfig` from CLI arguments.
+    /// Returns `None` if `--speculative` is not set.
+    #[must_use]
+    pub fn to_speculative_config(&self) -> Option<crate::streaming::SpeculativeConfig> {
+        if !self.speculative {
+            return None;
+        }
+        Some(crate::streaming::SpeculativeConfig {
+            window_size_ms: self.speculative_window_ms.unwrap_or(3000),
+            overlap_ms: self.speculative_overlap_ms.unwrap_or(500),
+            fast_model_name: self
+                .fast_model
+                .clone()
+                .unwrap_or_else(|| "auto-fast".to_owned()),
+            quality_model_name: self
+                .quality_model
+                .clone()
+                .unwrap_or_else(|| "auto-quality".to_owned()),
+            tolerance: crate::speculation::CorrectionTolerance {
+                max_wer: self.correction_tolerance_wer.unwrap_or(0.1),
+                always_correct: self.always_correct,
+                ..crate::speculation::CorrectionTolerance::default()
+            },
+            adaptive: !self.no_adaptive,
+            emit_events: true,
         })
     }
 }
@@ -870,6 +934,14 @@ mod tests {
             audio_ctx: None,
             word_threshold: None,
             suppress_regex: None,
+            speculative: false,
+            fast_model: None,
+            quality_model: None,
+            speculative_window_ms: None,
+            speculative_overlap_ms: None,
+            correction_tolerance_wer: None,
+            no_adaptive: false,
+            always_correct: false,
         }
     }
 
@@ -1726,6 +1798,7 @@ mod tests {
             "diarize",
             "persist",
             "db",
+            "speculative",
         ];
         for key in keys {
             assert!(
@@ -2031,5 +2104,227 @@ mod tests {
             result.is_err(),
             "invalid frame_type should fail CLI parsing"
         );
+    }
+
+    // --- bd-qlt.11: Speculative CLI flags ---
+
+    #[test]
+    fn speculative_default_is_false() {
+        let args = minimal_args();
+        assert!(!args.speculative);
+        assert!(args.to_speculative_config().is_none());
+    }
+
+    #[test]
+    fn speculative_config_built_when_flag_set() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        let config = args.to_speculative_config().expect("should build config");
+        assert_eq!(config.window_size_ms, 3000);
+        assert_eq!(config.overlap_ms, 500);
+        assert!(config.adaptive);
+        assert!(!config.tolerance.always_correct);
+    }
+
+    #[test]
+    fn speculative_config_respects_custom_window() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        args.speculative_window_ms = Some(5000);
+        args.speculative_overlap_ms = Some(1000);
+        let config = args.to_speculative_config().expect("should build config");
+        assert_eq!(config.window_size_ms, 5000);
+        assert_eq!(config.overlap_ms, 1000);
+    }
+
+    #[test]
+    fn speculative_config_respects_model_names() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        args.fast_model = Some("whisper-tiny".to_owned());
+        args.quality_model = Some("whisper-large".to_owned());
+        let config = args.to_speculative_config().expect("should build config");
+        assert_eq!(config.fast_model_name, "whisper-tiny");
+        assert_eq!(config.quality_model_name, "whisper-large");
+    }
+
+    #[test]
+    fn speculative_config_no_adaptive_disables_adaptive() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        args.no_adaptive = true;
+        let config = args.to_speculative_config().expect("should build config");
+        assert!(!config.adaptive);
+    }
+
+    #[test]
+    fn speculative_config_always_correct_mode() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        args.always_correct = true;
+        let config = args.to_speculative_config().expect("should build config");
+        assert!(config.tolerance.always_correct);
+    }
+
+    #[test]
+    fn speculative_config_custom_wer_tolerance() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        args.correction_tolerance_wer = Some(0.25);
+        let config = args.to_speculative_config().expect("should build config");
+        assert!((config.tolerance.max_wer - 0.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn robot_summary_includes_speculative() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        let summary = args.robot_summary();
+        assert_eq!(summary["speculative"], true);
+    }
+
+    #[test]
+    fn cli_parse_speculative_flag() {
+        let cli = Cli::try_parse_from([
+            "franken_whisper",
+            "transcribe",
+            "--input",
+            "test.wav",
+            "--speculative",
+        ])
+        .expect("should parse");
+        match cli.command {
+            Command::Transcribe(args) => {
+                assert!(args.speculative);
+            }
+            other => panic!("expected Transcribe, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_speculative_with_models() {
+        let cli = Cli::try_parse_from([
+            "franken_whisper",
+            "transcribe",
+            "--input",
+            "test.wav",
+            "--speculative",
+            "--fast-model",
+            "whisper-tiny",
+            "--quality-model",
+            "whisper-large",
+            "--speculative-window-ms",
+            "5000",
+        ])
+        .expect("should parse");
+        match cli.command {
+            Command::Transcribe(args) => {
+                assert!(args.speculative);
+                assert_eq!(args.fast_model.as_deref(), Some("whisper-tiny"));
+                assert_eq!(args.quality_model.as_deref(), Some("whisper-large"));
+                assert_eq!(args.speculative_window_ms, Some(5000));
+            }
+            other => panic!("expected Transcribe, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn speculative_config_default_model_names_are_auto_sentinels() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        let config = args.to_speculative_config().expect("should build config");
+        assert_eq!(config.fast_model_name, "auto-fast");
+        assert_eq!(config.quality_model_name, "auto-quality");
+        assert!(config.emit_events);
+    }
+
+    #[test]
+    fn runs_output_format_variants_are_distinct_and_parseable() {
+        assert_ne!(RunsOutputFormat::Plain, RunsOutputFormat::Json);
+        assert_ne!(RunsOutputFormat::Plain, RunsOutputFormat::Ndjson);
+        assert_ne!(RunsOutputFormat::Json, RunsOutputFormat::Ndjson);
+
+        let cli = Cli::try_parse_from(["franken_whisper", "runs", "--format", "json"])
+            .expect("should parse");
+        match cli.command {
+            Command::Runs(args) => {
+                assert_eq!(args.format, RunsOutputFormat::Json);
+                assert_eq!(args.limit, 20);
+                assert!(args.id.is_none());
+            }
+            other => panic!("expected Runs, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_tty_audio_decode_defaults_to_fail_closed() {
+        let cli = Cli::try_parse_from([
+            "franken_whisper",
+            "tty-audio",
+            "decode",
+            "--output",
+            "out.raw",
+        ])
+        .expect("should parse");
+        match cli.command {
+            Command::TtyAudio { command } => match command {
+                TtyAudioCommand::Decode { output, recovery } => {
+                    assert_eq!(output, PathBuf::from("out.raw"));
+                    assert_eq!(recovery, TtyAudioRecoveryPolicy::FailClosed);
+                }
+                other => panic!("expected Decode, got: {other:?}"),
+            },
+            other => panic!("expected TtyAudio, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_tty_audio_control_ack() {
+        let cli = Cli::try_parse_from([
+            "franken_whisper",
+            "tty-audio",
+            "control",
+            "ack",
+            "--up-to-seq",
+            "42",
+        ])
+        .expect("should parse");
+        match cli.command {
+            Command::TtyAudio { command } => match command {
+                TtyAudioCommand::Control { command: ctrl } => match ctrl {
+                    TtyAudioControlCommand::Ack { up_to_seq } => {
+                        assert_eq!(up_to_seq, 42);
+                    }
+                    other => panic!("expected Ack, got: {other:?}"),
+                },
+                other => panic!("expected Control, got: {other:?}"),
+            },
+            other => panic!("expected TtyAudio, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_tty_audio_control_retransmit_request_with_sequences() {
+        let cli = Cli::try_parse_from([
+            "franken_whisper",
+            "tty-audio",
+            "control",
+            "retransmit-request",
+            "--sequences",
+            "1,5,10",
+        ])
+        .expect("should parse");
+        match cli.command {
+            Command::TtyAudio { command } => match command {
+                TtyAudioCommand::Control { command: ctrl } => match ctrl {
+                    TtyAudioControlCommand::RetransmitRequest { sequences } => {
+                        assert_eq!(sequences, vec![1, 5, 10]);
+                    }
+                    other => panic!("expected RetransmitRequest, got: {other:?}"),
+                },
+                other => panic!("expected Control, got: {other:?}"),
+            },
+            other => panic!("expected TtyAudio, got: {other:?}"),
+        }
     }
 }

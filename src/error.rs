@@ -702,4 +702,171 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn error_code_exact_mapping_regression_matrix() {
+        let matrix: Vec<(FwError, &str)> = vec![
+            (FwError::Io(std::io::Error::other("test")), "FW-IO"),
+            (
+                FwError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+                "FW-JSON",
+            ),
+            (
+                FwError::CommandMissing {
+                    command: "x".to_owned(),
+                },
+                "FW-CMD-MISSING",
+            ),
+            (
+                FwError::CommandFailed {
+                    command: "x".to_owned(),
+                    status: 1,
+                    stderr_suffix: String::new(),
+                },
+                "FW-CMD-FAILED",
+            ),
+            (
+                FwError::CommandTimedOut {
+                    command: "x".to_owned(),
+                    timeout_ms: 1,
+                    stderr_suffix: String::new(),
+                },
+                "FW-CMD-TIMEOUT",
+            ),
+            (
+                FwError::BackendUnavailable("x".to_owned()),
+                "FW-BACKEND-UNAVAILABLE",
+            ),
+            (
+                FwError::InvalidRequest("x".to_owned()),
+                "FW-INVALID-REQUEST",
+            ),
+            (FwError::Storage("x".to_owned()), "FW-STORAGE"),
+            (FwError::Unsupported("x".to_owned()), "FW-UNSUPPORTED"),
+            (
+                FwError::MissingArtifact(std::path::PathBuf::from("x")),
+                "FW-MISSING-ARTIFACT",
+            ),
+            (FwError::Cancelled("x".to_owned()), "FW-CANCELLED"),
+            (
+                FwError::StageTimeout {
+                    stage: "x".to_owned(),
+                    budget_ms: 1,
+                },
+                "FW-STAGE-TIMEOUT",
+            ),
+        ];
+
+        assert_eq!(matrix.len(), 12);
+        for (error, expected_code) in matrix {
+            assert_eq!(
+                error.error_code(),
+                expected_code,
+                "wrong error_code for {:?}",
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn std_error_source_chains_for_io_and_json() {
+        use std::error::Error;
+
+        let io_err = FwError::Io(std::io::Error::other("disk fail"));
+        assert!(io_err.source().is_some(), "Io variant should chain source");
+
+        let json_err = FwError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err());
+        assert!(
+            json_err.source().is_some(),
+            "Json variant should chain source"
+        );
+
+        // Non-From variants should have no source
+        let plain = FwError::Storage("db fail".to_owned());
+        assert!(
+            plain.source().is_none(),
+            "Storage variant has no chained source"
+        );
+    }
+
+    #[test]
+    fn debug_format_contains_variant_name() {
+        let cases: Vec<(FwError, &str)> = vec![
+            (FwError::Storage("x".to_owned()), "Storage"),
+            (FwError::Cancelled("x".to_owned()), "Cancelled"),
+            (
+                FwError::CommandMissing {
+                    command: "x".to_owned(),
+                },
+                "CommandMissing",
+            ),
+            (
+                FwError::MissingArtifact(std::path::PathBuf::from("x")),
+                "MissingArtifact",
+            ),
+        ];
+
+        for (error, expected_variant) in cases {
+            let debug = format!("{error:?}");
+            assert!(
+                debug.contains(expected_variant),
+                "Debug should contain `{expected_variant}`: {debug}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_code_and_robot_code_namespace_disjoint() {
+        let all_errors: Vec<FwError> = vec![
+            FwError::Io(std::io::Error::other("test")),
+            FwError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+            FwError::CommandMissing {
+                command: "x".to_owned(),
+            },
+            FwError::CommandFailed {
+                command: "x".to_owned(),
+                status: 1,
+                stderr_suffix: String::new(),
+            },
+            FwError::CommandTimedOut {
+                command: "x".to_owned(),
+                timeout_ms: 1,
+                stderr_suffix: String::new(),
+            },
+            FwError::BackendUnavailable("x".to_owned()),
+            FwError::InvalidRequest("x".to_owned()),
+            FwError::Storage("x".to_owned()),
+            FwError::Unsupported("x".to_owned()),
+            FwError::MissingArtifact(std::path::PathBuf::from("x")),
+            FwError::Cancelled("x".to_owned()),
+            FwError::StageTimeout {
+                stage: "x".to_owned(),
+                budget_ms: 1,
+            },
+        ];
+
+        let error_codes: std::collections::HashSet<&str> =
+            all_errors.iter().map(|e| e.error_code()).collect();
+        let robot_codes: std::collections::HashSet<&str> =
+            all_errors.iter().map(|e| e.robot_error_code()).collect();
+
+        // No error_code() should appear in the robot_error_code() set
+        for code in &error_codes {
+            assert!(
+                !robot_codes.contains(code),
+                "error_code `{code}` collides with a robot_error_code"
+            );
+        }
+    }
+
+    #[test]
+    fn from_command_failure_with_special_chars_in_stderr() {
+        let stderr = "error: \"invalid\" path <&'\0>".to_owned();
+        let err = FwError::from_command_failure("cmd".to_owned(), 1, stderr);
+        let text = err.to_string();
+        assert!(
+            text.contains("stderr: error: \"invalid\" path"),
+            "special chars preserved: {text}"
+        );
+    }
 }

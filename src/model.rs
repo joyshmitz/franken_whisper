@@ -2168,4 +2168,167 @@ mod tests {
         let parsed: BackendsReport = serde_json::from_str(&json).unwrap();
         assert!(parsed.backends.is_empty());
     }
+
+    #[test]
+    fn device_map_strategy_serde_round_trip_and_rejects_unknown() {
+        for (variant, expected_wire) in [
+            (DeviceMapStrategy::Auto, "\"auto\""),
+            (DeviceMapStrategy::Sequential, "\"sequential\""),
+        ] {
+            let serialized = serde_json::to_string(&variant).unwrap();
+            assert_eq!(serialized, expected_wire);
+            let deserialized: DeviceMapStrategy = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+        for bad in [r#""Auto""#, r#""parallel""#, r#"null"#, r#"0"#] {
+            assert!(
+                serde_json::from_str::<DeviceMapStrategy>(bad).is_err(),
+                "should reject: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn word_timestamp_params_default_and_serde() {
+        let wt = WordTimestampParams::default();
+        assert!(!wt.enabled);
+        assert!(wt.max_len.is_none());
+        assert!(wt.token_threshold.is_none());
+        assert!(wt.token_sum_threshold.is_none());
+
+        let populated = WordTimestampParams {
+            enabled: true,
+            max_len: Some(50),
+            token_threshold: Some(0.01),
+            token_sum_threshold: Some(0.05),
+        };
+        let json = serde_json::to_string(&populated).unwrap();
+        let parsed: WordTimestampParams = serde_json::from_str(&json).unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.max_len, Some(50));
+        assert_eq!(parsed.token_threshold, Some(0.01));
+
+        // serde(default) on enabled: omitting it yields false
+        let no_enabled = r#"{"max_len": 30}"#;
+        let parsed2: WordTimestampParams = serde_json::from_str(no_enabled).unwrap();
+        assert!(!parsed2.enabled);
+        assert_eq!(parsed2.max_len, Some(30));
+    }
+
+    #[test]
+    fn insanely_fast_tuning_params_default_and_serde() {
+        let p = InsanelyFastTuningParams::default();
+        assert!(p.device_map.is_none());
+        assert!(p.torch_dtype.is_none());
+        assert!(!p.disable_better_transformer);
+
+        let populated = InsanelyFastTuningParams {
+            device_map: Some(DeviceMapStrategy::Sequential),
+            torch_dtype: Some("bfloat16".to_owned()),
+            disable_better_transformer: true,
+        };
+        let json = serde_json::to_string(&populated).unwrap();
+        let parsed: InsanelyFastTuningParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.device_map, Some(DeviceMapStrategy::Sequential));
+        assert_eq!(parsed.torch_dtype.as_deref(), Some("bfloat16"));
+        assert!(parsed.disable_better_transformer);
+    }
+
+    #[test]
+    fn diarization_pipeline_extension_structs_default_and_serde() {
+        let ac = AlignmentConfig::default();
+        assert!(ac.alignment_model.is_none());
+        assert!(ac.interpolate_method.is_none());
+        assert!(!ac.return_char_alignments);
+
+        let ac_full = AlignmentConfig {
+            alignment_model: Some("WAV2VEC2_ASR_LARGE_LV60K_960H".to_owned()),
+            interpolate_method: Some("nearest".to_owned()),
+            return_char_alignments: true,
+        };
+        let ac_json = serde_json::to_string(&ac_full).unwrap();
+        let ac_parsed: AlignmentConfig = serde_json::from_str(&ac_json).unwrap();
+        assert!(ac_parsed.return_char_alignments);
+        assert_eq!(
+            ac_parsed.alignment_model.as_deref(),
+            Some("WAV2VEC2_ASR_LARGE_LV60K_960H")
+        );
+
+        let pc = PunctuationConfig::default();
+        assert!(!pc.enabled);
+        assert!(pc.model.is_none());
+
+        let sc = SourceSeparationConfig::default();
+        assert!(!sc.enabled);
+        assert!(sc.shifts.is_none());
+        assert!(sc.overlap.is_none());
+
+        let sc_full = SourceSeparationConfig {
+            enabled: true,
+            model: Some("htdemucs".to_owned()),
+            shifts: Some(4),
+            overlap: Some(0.25),
+        };
+        let sc_json = serde_json::to_string(&sc_full).unwrap();
+        let sc_parsed: SourceSeparationConfig = serde_json::from_str(&sc_json).unwrap();
+        assert!(sc_parsed.enabled);
+        assert_eq!(sc_parsed.shifts, Some(4));
+        assert_eq!(sc_parsed.overlap, Some(0.25));
+    }
+
+    #[test]
+    fn backend_params_extension_fields_round_trip() {
+        let params = BackendParams {
+            word_timestamps: Some(WordTimestampParams {
+                enabled: true,
+                max_len: Some(100),
+                token_threshold: Some(0.02),
+                token_sum_threshold: None,
+            }),
+            insanely_fast_tuning: Some(InsanelyFastTuningParams {
+                device_map: Some(DeviceMapStrategy::Auto),
+                torch_dtype: Some("float16".to_owned()),
+                disable_better_transformer: true,
+            }),
+            alignment: Some(AlignmentConfig {
+                alignment_model: Some("WAV2VEC2_ASR_BASE_960H".to_owned()),
+                interpolate_method: None,
+                return_char_alignments: false,
+            }),
+            punctuation: Some(PunctuationConfig {
+                model: Some("punct-base".to_owned()),
+                enabled: true,
+            }),
+            source_separation: Some(SourceSeparationConfig {
+                enabled: true,
+                model: Some("htdemucs".to_owned()),
+                shifts: Some(2),
+                overlap: Some(0.5),
+            }),
+            ..BackendParams::default()
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let parsed: BackendParams = serde_json::from_str(&json).unwrap();
+
+        let wt = parsed.word_timestamps.expect("word_timestamps");
+        assert!(wt.enabled);
+        assert_eq!(wt.max_len, Some(100));
+
+        let tuning = parsed.insanely_fast_tuning.expect("insanely_fast_tuning");
+        assert_eq!(tuning.device_map, Some(DeviceMapStrategy::Auto));
+        assert!(tuning.disable_better_transformer);
+
+        let al = parsed.alignment.expect("alignment");
+        assert_eq!(
+            al.alignment_model.as_deref(),
+            Some("WAV2VEC2_ASR_BASE_960H")
+        );
+
+        let punct = parsed.punctuation.expect("punctuation");
+        assert!(punct.enabled);
+
+        let sep = parsed.source_separation.expect("source_separation");
+        assert!(sep.enabled);
+        assert_eq!(sep.shifts, Some(2));
+    }
 }

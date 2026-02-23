@@ -53,4 +53,24 @@ mod tests {
             .unwrap_or_else(|_| EnvFilter::new("franken_whisper=debug"));
         assert!(format!("{filter:?}").contains("franken_whisper"));
     }
+
+    #[test]
+    fn default_filter_parses_info_level() {
+        // Validates the exact filter string used in production init().
+        let filter = EnvFilter::new("franken_whisper=info");
+        let dbg = format!("{filter:?}");
+        assert!(
+            dbg.contains("franken_whisper"),
+            "default filter should target franken_whisper crate: {dbg}"
+        );
+    }
+
+    #[test]
+    fn env_filter_with_multiple_targets_does_not_panic() {
+        // Edge case: a user could set RUST_LOG to a multi-target directive.
+        // Verify that EnvFilter accepts compound directives without panicking.
+        let filter = EnvFilter::new("franken_whisper=trace,hyper=warn,tower=off");
+        let dbg = format!("{filter:?}");
+        assert!(dbg.contains("franken_whisper"));
+    }
 }

@@ -156,7 +156,10 @@ fn run() -> FwResult<()> {
             if let Some(run_id) = &args.id {
                 match store.load_run_details(run_id)? {
                     Some(details) => match args.format {
-                        RunsOutputFormat::Plain | RunsOutputFormat::Json => {
+                        RunsOutputFormat::Plain => {
+                            println!("{}", details.transcript);
+                        }
+                        RunsOutputFormat::Json => {
                             println!("{}", serde_json::to_string_pretty(&details)?);
                         }
                         RunsOutputFormat::Ndjson => {
@@ -334,8 +337,6 @@ fn run() -> FwResult<()> {
 /// - `Eof` emits an end-of-stream control frame.
 /// - `Reset` emits a stream-reset control frame.
 fn send_control_frame(kind: ControlFrameKind) -> FwResult<()> {
-    use std::io::Write;
-
     match kind {
         ControlFrameKind::Handshake => {
             tty_audio::emit_control_frame_to_stdout(&tty_audio::TtyControlFrame::Handshake {
@@ -344,19 +345,15 @@ fn send_control_frame(kind: ControlFrameKind) -> FwResult<()> {
                 supported_codecs: vec!["mulaw+zlib+b64".to_owned()],
             })
         }
-        ControlFrameKind::Eof => {
-            let frame = serde_json::json!({ "frame_type": "eof" });
-            let mut stdout = std::io::stdout().lock();
-            serde_json::to_writer(&mut stdout, &frame)?;
-            writeln!(stdout)?;
-            Ok(())
-        }
-        ControlFrameKind::Reset => {
-            let frame = serde_json::json!({ "frame_type": "reset" });
-            let mut stdout = std::io::stdout().lock();
-            serde_json::to_writer(&mut stdout, &frame)?;
-            writeln!(stdout)?;
-            Ok(())
-        }
+        ControlFrameKind::Eof => tty_audio::emit_session_close(
+            &mut std::io::stdout().lock(),
+            tty_audio::SessionCloseReason::Normal,
+            None,
+        ),
+        ControlFrameKind::Reset => tty_audio::emit_session_close(
+            &mut std::io::stdout().lock(),
+            tty_audio::SessionCloseReason::Error,
+            None,
+        ),
     }
 }
