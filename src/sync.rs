@@ -7725,4 +7725,158 @@ mod tests {
             validation.mismatched_records
         );
     }
+
+    #[test]
+    fn optional_floats_equal_zero_and_negative_values() {
+        // Zero vs zero.
+        assert!(optional_floats_equal(Some(0.0), Some(0.0)));
+        // Negative matching values.
+        assert!(optional_floats_equal(Some(-1.5), Some(-1.5)));
+        // Negative divergent values.
+        assert!(!optional_floats_equal(Some(-1.0), Some(-2.0)));
+        // Sign mismatch.
+        assert!(!optional_floats_equal(Some(-1.0), Some(1.0)));
+    }
+
+    #[test]
+    fn collect_jsonl_ids_deduplicates_repeated_ids() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("dedup.jsonl");
+        let content = [
+            r#"{"id": "run-1", "data": 1}"#,
+            r#"{"id": "run-1", "data": 2}"#,
+            r#"{"id": "run-1", "data": 3}"#,
+            r#"{"id": "run-2", "data": 4}"#,
+        ]
+        .join("\n");
+        fs::write(&path, content).expect("write");
+
+        let ids = collect_jsonl_ids(&path, "id").expect("collect");
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("run-1"));
+        assert!(ids.contains("run-2"));
+    }
+
+    #[test]
+    fn load_jsonl_run_map_skips_non_string_and_missing_ids() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("mixed.jsonl");
+        let content = [
+            r#"{"id": "valid-1", "text": "ok"}"#,
+            r#"{"id": 42, "text": "integer id"}"#,
+            r#"{"id": null, "text": "null id"}"#,
+            r#"{"text": "no id field"}"#,
+            "",
+            r#"{"id": "valid-2", "text": "also ok"}"#,
+        ]
+        .join("\n");
+        fs::write(&path, content).expect("write");
+
+        let map = load_jsonl_run_map(&path).expect("load");
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("valid-1"));
+        assert!(map.contains_key("valid-2"));
+    }
+
+    #[test]
+    fn count_jsonl_lines_skips_blanks() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("sparse.jsonl");
+        let content = [r#"{"id": "a"}"#, "", "   ", r#"{"id": "b"}"#, ""].join("\n");
+        fs::write(&path, content).expect("write");
+
+        let count = count_jsonl_lines(&path).expect("count");
+        assert_eq!(count, 2, "should skip blank/whitespace-only lines");
+    }
+
+    #[test]
+    fn count_jsonl_lines_missing_file_is_zero() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("does_not_exist.jsonl");
+        let count = count_jsonl_lines(&path).expect("count");
+        assert_eq!(count, 0);
+    }
+
+    // ── Task #211 — sync pass 2 edge-case tests ─────────────────────
+
+    #[test]
+    fn resolve_jsonl_path_neither_file_exists_returns_plain_jsonl() {
+        let dir = tempdir().expect("tempdir");
+        // Neither runs.jsonl nor runs.jsonl.gz exists.
+        let path = resolve_jsonl_path(dir.path(), "runs");
+        assert!(
+            path.ends_with("runs.jsonl"),
+            "should return .jsonl variant as fallback: {}",
+            path.display()
+        );
+        assert!(
+            !path.exists(),
+            "returned path should not exist on disk: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn load_cursor_valid_json_wrong_schema_returns_error() {
+        let dir = tempdir().expect("tempdir");
+        let cursor_path = dir.path().join("cursor.json");
+        // Valid JSON but missing required fields (last_export_rfc3339, last_run_count).
+        fs::write(&cursor_path, r#"{"wrong_field": "value", "another": 0}"#).expect("write");
+
+        let result = load_cursor(&cursor_path);
+        assert!(result.is_err(), "should fail on wrong schema");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("invalid sync cursor"),
+            "error should mention invalid sync cursor: {msg}"
+        );
+    }
+
+    #[test]
+    fn sync_lock_release_inner_double_call_is_idempotent() {
+        let dir = tempdir().expect("tempdir");
+        let mut lock = SyncLock::acquire(dir.path(), "test-double-release").unwrap();
+
+        // First release.
+        lock.release_inner().unwrap();
+        assert!(!dir.path().join("sync.lock").exists(), "lock file should be removed");
+
+        // Second release — hits the `if self.released { return Ok(()) }` guard.
+        lock.release_inner().unwrap();
+
+        // Prevent Drop from running file removal again (already released).
+        lock.released = true;
+    }
+
+    #[test]
+    fn collect_jsonl_ids_empty_file_returns_empty_set() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("empty.jsonl");
+        fs::write(&path, "").expect("write");
+
+        let ids = collect_jsonl_ids(&path, "id").expect("collect");
+        assert!(ids.is_empty(), "empty file should produce empty id set");
+    }
+
+    #[test]
+    fn load_jsonl_run_map_valid_entries_preserves_all_fields() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("runs.jsonl");
+        let line = serde_json::json!({
+            "id": "run-123",
+            "started_at": "2026-01-01T00:00:00Z",
+            "extra_field": "preserved"
+        });
+        fs::write(&path, serde_json::to_string(&line).unwrap()).expect("write");
+
+        let map = load_jsonl_run_map(&path).expect("load");
+        assert_eq!(map.len(), 1);
+        let entry = map.get("run-123").expect("should contain run-123");
+        assert_eq!(entry["started_at"].as_str(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            entry["extra_field"].as_str(),
+            Some("preserved"),
+            "extra fields should be preserved in the map"
+        );
+    }
 }

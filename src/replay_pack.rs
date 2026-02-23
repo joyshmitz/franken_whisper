@@ -815,4 +815,121 @@ mod tests {
         let repro: super::ReproLock = serde_json::from_str(&repro_json).expect("valid repro");
         assert!(repro.routing_evidence.is_empty());
     }
+
+    #[test]
+    fn tolerance_manifest_serde_round_trip() {
+        let report = fixture_report();
+        let tolerance = build_tolerance_manifest(&report);
+
+        let json = serde_json::to_string(&tolerance).expect("serialize");
+        let parsed: super::ToleranceManifest = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(parsed.schema_version, tolerance.schema_version);
+        assert_eq!(
+            parsed.timestamp_tolerance_sec,
+            tolerance.timestamp_tolerance_sec
+        );
+        assert_eq!(parsed.require_text_exact, tolerance.require_text_exact);
+        assert_eq!(
+            parsed.require_speaker_exact,
+            tolerance.require_speaker_exact
+        );
+        assert_eq!(parsed.native_rollout_stage, tolerance.native_rollout_stage);
+        assert_eq!(parsed.segment_count, tolerance.segment_count);
+        assert_eq!(parsed.event_count, tolerance.event_count);
+    }
+
+    #[test]
+    fn rollout_stage_non_string_value_falls_back_to_primary() {
+        use crate::model::RunEvent;
+
+        let mut report = fixture_report();
+        report.events.push(RunEvent {
+            seq: 1,
+            ts_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            stage: "backend_routing".to_owned(),
+            code: "backend.routing.decision_contract".to_owned(),
+            message: "routing".to_owned(),
+            payload: json!({"native_rollout_stage": 42}),
+        });
+
+        let tolerance = build_tolerance_manifest(&report);
+        assert_eq!(
+            tolerance.native_rollout_stage, "primary",
+            "non-string rollout stage should fall back to primary"
+        );
+    }
+
+    #[test]
+    fn tolerance_manifest_counts_match_report() {
+        use crate::model::RunEvent;
+
+        let mut report = fixture_report();
+        report.result.segments = (0..5)
+            .map(|i| TranscriptionSegment {
+                start_sec: Some(i as f64),
+                end_sec: Some((i + 1) as f64),
+                text: format!("s{i}"),
+                speaker: None,
+                confidence: None,
+            })
+            .collect();
+        report.events = (0..3)
+            .map(|i| RunEvent {
+                seq: i,
+                ts_rfc3339: format!("2026-01-01T00:00:{i:02}Z"),
+                stage: "test".to_owned(),
+                code: "ok".to_owned(),
+                message: String::new(),
+                payload: json!({}),
+            })
+            .collect();
+
+        let tolerance = build_tolerance_manifest(&report);
+        assert_eq!(tolerance.segment_count, 5);
+        assert_eq!(tolerance.event_count, 3);
+    }
+
+    #[test]
+    fn tolerance_manifest_require_speaker_exact_from_default() {
+        let report = fixture_report();
+        let tolerance = build_tolerance_manifest(&report);
+        // SegmentCompatibilityTolerance::default() sets require_speaker_exact to false.
+        assert!(
+            !tolerance.require_speaker_exact,
+            "default require_speaker_exact should be false"
+        );
+        // Round-trip preserves the value
+        let json = serde_json::to_string(&tolerance).expect("serialize");
+        let parsed: super::ToleranceManifest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            parsed.require_speaker_exact,
+            tolerance.require_speaker_exact
+        );
+    }
+
+    #[test]
+    fn tolerance_manifest_json_has_expected_keys() {
+        let report = fixture_report();
+        let tolerance = build_tolerance_manifest(&report);
+        let value = serde_json::to_value(&tolerance).expect("to_value");
+        let obj = value.as_object().expect("object");
+
+        let expected_keys = [
+            "schema_version",
+            "timestamp_tolerance_sec",
+            "require_text_exact",
+            "require_speaker_exact",
+            "native_rollout_stage",
+            "segment_count",
+            "event_count",
+        ];
+        assert_eq!(obj.len(), expected_keys.len());
+        for key in expected_keys {
+            assert!(
+                obj.contains_key(key),
+                "tolerance_manifest missing key `{key}`"
+            );
+        }
+    }
 }
