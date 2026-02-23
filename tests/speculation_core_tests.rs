@@ -64,6 +64,27 @@ fn wm_next_window_correct_bounds() {
 }
 
 #[test]
+fn wm_next_window_bounded_clamps_end_to_audio_limit() {
+    let mut wm = WindowManager::new("run1", 3000, 500);
+    let w = wm
+        .next_window_bounded(2500, 4000, "hash")
+        .expect("window should exist");
+    assert_eq!(w.start_ms, 2500);
+    assert_eq!(w.end_ms, 4000);
+}
+
+#[test]
+fn wm_next_window_bounded_exhausted_range_returns_none() {
+    let mut wm = WindowManager::new("run1", 3000, 500);
+    let w = wm.next_window_bounded(4000, 4000, "hash");
+    assert!(
+        w.is_none(),
+        "exhausted bounded range should not create window"
+    );
+    assert_eq!(wm.windows_pending(), 0);
+}
+
+#[test]
 fn wm_record_fast_result_updates_state() {
     let mut wm = WindowManager::new("run1", 3000, 500);
     let w = wm.next_window(0, "hash");

@@ -777,6 +777,14 @@ fn transcribe_args_rejects_no_input() {
         audio_ctx: None,
         word_threshold: None,
         suppress_regex: None,
+        speculative: false,
+        fast_model: None,
+        quality_model: None,
+        speculative_window_ms: None,
+        speculative_overlap_ms: None,
+        correction_tolerance_wer: None,
+        no_adaptive: false,
+        always_correct: false,
     };
 
     let result = args.to_request();
@@ -855,6 +863,14 @@ fn transcribe_args_rejects_multiple_inputs() {
         audio_ctx: None,
         word_threshold: None,
         suppress_regex: None,
+        speculative: false,
+        fast_model: None,
+        quality_model: None,
+        speculative_window_ms: None,
+        speculative_overlap_ms: None,
+        correction_tolerance_wer: None,
+        no_adaptive: false,
+        always_correct: false,
     };
 
     let result = args.to_request();
@@ -1559,6 +1575,14 @@ fn transcribe_args_maps_output_formats_to_backend_params() {
         audio_ctx: None,
         word_threshold: None,
         suppress_regex: None,
+        speculative: false,
+        fast_model: None,
+        quality_model: None,
+        speculative_window_ms: None,
+        speculative_overlap_ms: None,
+        correction_tolerance_wer: None,
+        no_adaptive: false,
+        always_correct: false,
     };
 
     let request = args.to_request().expect("valid request");
@@ -2163,6 +2187,14 @@ fn transcribe_args_maps_mic_line_in_envelope_into_request() {
         audio_ctx: None,
         word_threshold: None,
         suppress_regex: None,
+        speculative: false,
+        fast_model: None,
+        quality_model: None,
+        speculative_window_ms: None,
+        speculative_overlap_ms: None,
+        correction_tolerance_wer: None,
+        no_adaptive: false,
+        always_correct: false,
     };
 
     let request = args.to_request().expect("valid mic request");

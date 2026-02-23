@@ -495,6 +495,7 @@ fn robot_speculation_stats_has_required_fields() {
     let stats = SpeculationStats {
         windows_processed: 100,
         corrections_emitted: 15,
+        confirmations_emitted: 85,
         correction_rate: 0.15,
         mean_fast_latency_ms: 45.0,
         mean_quality_latency_ms: 250.0,

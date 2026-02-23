@@ -12,7 +12,9 @@ use std::collections::HashSet;
 use franken_whisper::robot::{
     BACKENDS_DISCOVERY_REQUIRED_FIELDS, HEALTH_REPORT_REQUIRED_FIELDS, ROBOT_SCHEMA_VERSION,
     RUN_COMPLETE_REQUIRED_FIELDS, RUN_ERROR_REQUIRED_FIELDS, RUN_START_REQUIRED_FIELDS,
-    STAGE_REQUIRED_FIELDS, TRANSCRIPT_PARTIAL_REQUIRED_FIELDS, robot_schema_value,
+    SPECULATION_STATS_REQUIRED_FIELDS, STAGE_REQUIRED_FIELDS, TRANSCRIPT_CONFIRM_REQUIRED_FIELDS,
+    TRANSCRIPT_CORRECT_REQUIRED_FIELDS, TRANSCRIPT_PARTIAL_REQUIRED_FIELDS,
+    TRANSCRIPT_RETRACT_REQUIRED_FIELDS, robot_schema_value,
 };
 use serde_json::Value;
 
@@ -213,6 +215,10 @@ fn event_type_strings_are_correct_in_examples() {
         "run_error",
         "backends.discovery",
         "transcript.partial",
+        "transcript.confirm",
+        "transcript.retract",
+        "transcript.correct",
+        "transcript.speculation_stats",
         "health.report",
     ];
 
@@ -239,7 +245,7 @@ fn event_type_strings_are_correct_in_examples() {
 }
 
 #[test]
-fn schema_has_exactly_seven_event_types() {
+fn schema_has_expected_event_types() {
     let schema = robot_schema_value();
     let events = schema["events"]
         .as_object()
@@ -247,8 +253,8 @@ fn schema_has_exactly_seven_event_types() {
 
     assert_eq!(
         events.len(),
-        7,
-        "schema must define exactly 7 event types, found {}",
+        11,
+        "schema must define exactly 11 event types, found {}",
         events.len()
     );
 
@@ -260,6 +266,10 @@ fn schema_has_exactly_seven_event_types() {
         "run_error",
         "backends.discovery",
         "transcript.partial",
+        "transcript.confirm",
+        "transcript.retract",
+        "transcript.correct",
+        "transcript.speculation_stats",
         "health.report",
     ] {
         assert!(
@@ -389,6 +399,10 @@ fn golden_robot_events_event_field_values_are_known() {
         "run_error",
         "backends.discovery",
         "transcript.partial",
+        "transcript.confirm",
+        "transcript.retract",
+        "transcript.correct",
+        "transcript.speculation_stats",
         "health.report",
     ]
     .into_iter()
@@ -465,6 +479,10 @@ fn robot_schema_documents_all_event_types() {
         "run_error",
         "backends.discovery",
         "transcript.partial",
+        "transcript.confirm",
+        "transcript.retract",
+        "transcript.correct",
+        "transcript.speculation_stats",
         "health.report",
     ] {
         assert!(
@@ -537,6 +555,22 @@ fn required_field_lists_are_non_empty() {
             TRANSCRIPT_PARTIAL_REQUIRED_FIELDS,
         ),
         (
+            "TRANSCRIPT_CONFIRM_REQUIRED_FIELDS",
+            TRANSCRIPT_CONFIRM_REQUIRED_FIELDS,
+        ),
+        (
+            "TRANSCRIPT_RETRACT_REQUIRED_FIELDS",
+            TRANSCRIPT_RETRACT_REQUIRED_FIELDS,
+        ),
+        (
+            "TRANSCRIPT_CORRECT_REQUIRED_FIELDS",
+            TRANSCRIPT_CORRECT_REQUIRED_FIELDS,
+        ),
+        (
+            "SPECULATION_STATS_REQUIRED_FIELDS",
+            SPECULATION_STATS_REQUIRED_FIELDS,
+        ),
+        (
             "HEALTH_REPORT_REQUIRED_FIELDS",
             HEALTH_REPORT_REQUIRED_FIELDS,
         ),
@@ -570,6 +604,22 @@ fn no_duplicate_fields_in_required_field_lists() {
         (
             "TRANSCRIPT_PARTIAL_REQUIRED_FIELDS",
             TRANSCRIPT_PARTIAL_REQUIRED_FIELDS,
+        ),
+        (
+            "TRANSCRIPT_CONFIRM_REQUIRED_FIELDS",
+            TRANSCRIPT_CONFIRM_REQUIRED_FIELDS,
+        ),
+        (
+            "TRANSCRIPT_RETRACT_REQUIRED_FIELDS",
+            TRANSCRIPT_RETRACT_REQUIRED_FIELDS,
+        ),
+        (
+            "TRANSCRIPT_CORRECT_REQUIRED_FIELDS",
+            TRANSCRIPT_CORRECT_REQUIRED_FIELDS,
+        ),
+        (
+            "SPECULATION_STATS_REQUIRED_FIELDS",
+            SPECULATION_STATS_REQUIRED_FIELDS,
         ),
         (
             "HEALTH_REPORT_REQUIRED_FIELDS",
@@ -640,6 +690,22 @@ fn all_required_field_lists_include_event_and_schema_version() {
         (
             "TRANSCRIPT_PARTIAL_REQUIRED_FIELDS",
             TRANSCRIPT_PARTIAL_REQUIRED_FIELDS,
+        ),
+        (
+            "TRANSCRIPT_CONFIRM_REQUIRED_FIELDS",
+            TRANSCRIPT_CONFIRM_REQUIRED_FIELDS,
+        ),
+        (
+            "TRANSCRIPT_RETRACT_REQUIRED_FIELDS",
+            TRANSCRIPT_RETRACT_REQUIRED_FIELDS,
+        ),
+        (
+            "TRANSCRIPT_CORRECT_REQUIRED_FIELDS",
+            TRANSCRIPT_CORRECT_REQUIRED_FIELDS,
+        ),
+        (
+            "SPECULATION_STATS_REQUIRED_FIELDS",
+            SPECULATION_STATS_REQUIRED_FIELDS,
         ),
         (
             "HEALTH_REPORT_REQUIRED_FIELDS",
