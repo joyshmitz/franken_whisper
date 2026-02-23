@@ -28,6 +28,12 @@ pub(crate) fn materialize_input_with_token(
                     path.display()
                 )));
             }
+            if !path.is_file() {
+                return Err(FwError::InvalidRequest(format!(
+                    "input path is not a file: {}",
+                    path.display()
+                )));
+            }
             Ok(path.clone())
         }
         InputSource::Stdin { hint_extension } => {
@@ -686,12 +692,10 @@ mod tests {
     }
 
     #[test]
-    fn materialize_file_directory_path_succeeds_because_exists_is_true() {
+    fn materialize_file_directory_path_returns_error() {
         use super::materialize_input;
         use crate::model::InputSource;
 
-        // materialize_input only checks path.exists(), not path.is_file().
-        // A directory satisfies exists(), so this returns Ok.
         let dir = tempfile::tempdir().expect("tempdir");
         let subdir = dir.path().join("a_directory");
         std::fs::create_dir_all(&subdir).expect("mkdir");
@@ -699,8 +703,12 @@ mod tests {
         let source = InputSource::File {
             path: subdir.clone(),
         };
-        let result = materialize_input(&source, dir.path()).expect("exists() is true for dirs");
-        assert_eq!(result, subdir);
+        let err = materialize_input(&source, dir.path()).expect_err("directory should be rejected");
+        assert!(
+            err.to_string().contains("not a file"),
+            "expected 'not a file' in: {}",
+            err
+        );
     }
 
     #[test]
