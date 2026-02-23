@@ -53,6 +53,18 @@ pub const TRANSCRIPT_PARTIAL_REQUIRED_FIELDS: &[&str] = &[
     "speaker",
 ];
 
+pub const TRANSCRIPT_CONFIRM_REQUIRED_FIELDS: &[&str] = &[
+    "event",
+    "schema_version",
+    "run_id",
+    "seq",
+    "window_id",
+    "quality_model_id",
+    "drift",
+    "latency_ms",
+    "ts",
+];
+
 pub const HEALTH_REPORT_REQUIRED_FIELDS: &[&str] = &[
     "event",
     "schema_version",
@@ -94,6 +106,7 @@ pub const SPECULATION_STATS_REQUIRED_FIELDS: &[&str] = &[
     "run_id",
     "windows_processed",
     "corrections_emitted",
+    "confirmations_emitted",
     "correction_rate",
     "mean_fast_latency_ms",
     "mean_quality_latency_ms",
@@ -222,6 +235,53 @@ pub fn emit_transcript_partials(
 // bd-qlt.2: Speculative cancel-correct streaming robot events
 // ---------------------------------------------------------------------------
 
+/// Construct a `transcript.confirm` NDJSON event value.
+#[must_use]
+pub fn transcript_confirm_value(
+    run_id: &str,
+    seq: u64,
+    window_id: u64,
+    drift: &crate::speculation::CorrectionDrift,
+    quality_latency_ms: u64,
+    quality_model_id: &str,
+) -> serde_json::Value {
+    json!({
+        "event": "transcript.confirm",
+        "schema_version": ROBOT_SCHEMA_VERSION,
+        "run_id": run_id,
+        "seq": seq,
+        "window_id": window_id,
+        "quality_model_id": quality_model_id,
+        "drift": {
+            "wer_approx": drift.wer_approx,
+            "confidence_delta": drift.confidence_delta,
+            "segment_count_delta": drift.segment_count_delta,
+            "text_edit_distance": drift.text_edit_distance,
+        },
+        "latency_ms": quality_latency_ms,
+        "ts": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+/// Emit a `transcript.confirm` NDJSON line to stdout.
+pub fn emit_transcript_confirm(
+    run_id: &str,
+    seq: u64,
+    window_id: u64,
+    drift: &crate::speculation::CorrectionDrift,
+    quality_latency_ms: u64,
+    quality_model_id: &str,
+) -> FwResult<()> {
+    emit_line(&transcript_confirm_value(
+        run_id,
+        seq,
+        window_id,
+        drift,
+        quality_latency_ms,
+        quality_model_id,
+    ))
+}
+
 /// Construct a `transcript.retract` NDJSON event value.
 #[must_use]
 pub fn transcript_retract_value(
@@ -306,6 +366,7 @@ pub fn speculation_stats_value(
         "run_id": run_id,
         "windows_processed": stats.windows_processed,
         "corrections_emitted": stats.corrections_emitted,
+        "confirmations_emitted": stats.confirmations_emitted,
         "correction_rate": stats.correction_rate,
         "mean_fast_latency_ms": stats.mean_fast_latency_ms,
         "mean_quality_latency_ms": stats.mean_quality_latency_ms,
@@ -644,6 +705,82 @@ pub fn robot_schema_value() -> serde_json::Value {
                     "speaker": "SPEAKER_00",
                 }),
             },
+            "transcript.confirm": {
+                "required": TRANSCRIPT_CONFIRM_REQUIRED_FIELDS,
+                "example": json!({
+                    "event": "transcript.confirm",
+                    "schema_version": ROBOT_SCHEMA_VERSION,
+                    "run_id": "run-123",
+                    "seq": 0,
+                    "window_id": 42,
+                    "quality_model_id": "whisper-large",
+                    "drift": {
+                        "wer_approx": 0.0,
+                        "confidence_delta": 0.05,
+                        "segment_count_delta": 0,
+                        "text_edit_distance": 0,
+                    },
+                    "latency_ms": 210,
+                    "ts": "2026-02-22T00:00:01Z",
+                }),
+            },
+            "transcript.retract": {
+                "required": TRANSCRIPT_RETRACT_REQUIRED_FIELDS,
+                "example": json!({
+                    "event": "transcript.retract",
+                    "schema_version": ROBOT_SCHEMA_VERSION,
+                    "run_id": "run-123",
+                    "retracted_seq": 0,
+                    "window_id": 42,
+                    "reason": "quality_correction",
+                    "quality_model_id": "whisper-large",
+                    "ts": "2026-02-22T00:00:01Z",
+                }),
+            },
+            "transcript.correct": {
+                "required": TRANSCRIPT_CORRECT_REQUIRED_FIELDS,
+                "example": json!({
+                    "event": "transcript.correct",
+                    "schema_version": ROBOT_SCHEMA_VERSION,
+                    "run_id": "run-123",
+                    "correction_id": 7,
+                    "replaces_seq": 0,
+                    "window_id": 42,
+                    "segments": [{
+                        "start_sec": 0.0,
+                        "end_sec": 1.5,
+                        "text": "hello world",
+                        "speaker": "SPEAKER_00",
+                        "confidence": 0.97,
+                    }],
+                    "quality_model_id": "whisper-large",
+                    "drift": {
+                        "wer_approx": 0.25,
+                        "confidence_delta": 0.12,
+                        "segment_count_delta": 0,
+                        "text_edit_distance": 2,
+                    },
+                    "latency_ms": 210,
+                    "ts": "2026-02-22T00:00:01Z",
+                }),
+            },
+            "transcript.speculation_stats": {
+                "required": SPECULATION_STATS_REQUIRED_FIELDS,
+                "example": json!({
+                    "event": "transcript.speculation_stats",
+                    "schema_version": ROBOT_SCHEMA_VERSION,
+                    "run_id": "run-123",
+                    "windows_processed": 42,
+                    "corrections_emitted": 10,
+                    "confirmations_emitted": 32,
+                    "correction_rate": 0.2381,
+                    "mean_fast_latency_ms": 48.5,
+                    "mean_quality_latency_ms": 207.4,
+                    "current_window_size_ms": 3000,
+                    "mean_drift_wer": 0.11,
+                    "ts": "2026-02-22T00:00:02Z",
+                }),
+            },
             "health.report": {
                 "required": HEALTH_REPORT_REQUIRED_FIELDS,
                 "example": json!({
@@ -748,8 +885,10 @@ mod tests {
 
     use super::{
         HEALTH_REPORT_REQUIRED_FIELDS, RUN_COMPLETE_REQUIRED_FIELDS, RUN_ERROR_REQUIRED_FIELDS,
-        RUN_START_REQUIRED_FIELDS, STAGE_REQUIRED_FIELDS, TRANSCRIPT_PARTIAL_REQUIRED_FIELDS,
-        robot_schema_value, run_complete_value, run_error_value, run_stage_value, run_start_value,
+        RUN_START_REQUIRED_FIELDS, SPECULATION_STATS_REQUIRED_FIELDS, STAGE_REQUIRED_FIELDS,
+        TRANSCRIPT_CONFIRM_REQUIRED_FIELDS, TRANSCRIPT_CORRECT_REQUIRED_FIELDS,
+        TRANSCRIPT_PARTIAL_REQUIRED_FIELDS, TRANSCRIPT_RETRACT_REQUIRED_FIELDS, robot_schema_value,
+        run_complete_value, run_error_value, run_stage_value, run_start_value,
         transcript_partial_value,
     };
 
@@ -1584,17 +1723,35 @@ mod tests {
     }
 
     #[test]
-    fn schema_has_exactly_seven_event_types() {
+    fn schema_has_expected_event_types() {
         let schema = robot_schema_value();
         let events = schema["events"]
             .as_object()
             .expect("events should be object");
         assert_eq!(
             events.len(),
-            7,
-            "expected 7 event types (run_start, stage, run_complete, run_error, backends.discovery, transcript.partial, health.report), got {}",
+            11,
+            "expected 11 event types including speculation events, got {}",
             events.len()
         );
+        for expected in [
+            "run_start",
+            "stage",
+            "run_complete",
+            "run_error",
+            "backends.discovery",
+            "transcript.partial",
+            "transcript.confirm",
+            "transcript.retract",
+            "transcript.correct",
+            "transcript.speculation_stats",
+            "health.report",
+        ] {
+            assert!(
+                events.contains_key(expected),
+                "missing schema event type `{expected}`"
+            );
+        }
     }
 
     #[test]
@@ -3373,5 +3530,129 @@ mod tests {
         let json = super::dependency_check_json(&check);
         let line = serde_json::to_string(&json).expect("serialize");
         assert!(!line.contains('\n'), "should be single line");
+    }
+
+    #[test]
+    fn transcript_confirm_value_contains_required_fields_and_drift() {
+        use crate::speculation::CorrectionDrift;
+
+        let drift = CorrectionDrift {
+            wer_approx: 0.12,
+            confidence_delta: -0.05,
+            segment_count_delta: 1,
+            text_edit_distance: 3,
+        };
+        let value = super::transcript_confirm_value("run-tc", 7, 42, &drift, 210, "whisper-large");
+        assert_eq!(value["event"], "transcript.confirm");
+        assert_eq!(value["run_id"], "run-tc");
+        assert_eq!(value["seq"], 7);
+        assert_eq!(value["window_id"], 42);
+        assert_eq!(value["quality_model_id"], "whisper-large");
+        assert_eq!(value["latency_ms"], 210);
+        assert_eq!(value["drift"]["wer_approx"], 0.12);
+        assert_eq!(value["drift"]["text_edit_distance"], 3);
+        for field in TRANSCRIPT_CONFIRM_REQUIRED_FIELDS {
+            assert!(value.get(*field).is_some(), "missing field `{field}`");
+        }
+    }
+
+    #[test]
+    fn transcript_retract_value_contains_required_fields_and_reason() {
+        let value = super::transcript_retract_value(
+            "run-ret",
+            5,
+            11,
+            "quality_correction",
+            "whisper-large",
+        );
+        assert_eq!(value["event"], "transcript.retract");
+        assert_eq!(value["retracted_seq"], 5);
+        assert_eq!(value["window_id"], 11);
+        assert_eq!(value["reason"], "quality_correction");
+        assert_eq!(value["quality_model_id"], "whisper-large");
+        assert!(value["ts"].is_string());
+        for field in TRANSCRIPT_RETRACT_REQUIRED_FIELDS {
+            assert!(value.get(*field).is_some(), "missing field `{field}`");
+        }
+    }
+
+    #[test]
+    fn transcript_correct_value_contains_required_fields_and_segments() {
+        use crate::model::TranscriptionSegment;
+        use crate::speculation::{CorrectionDrift, CorrectionEvent};
+
+        let event = CorrectionEvent {
+            correction_id: 7,
+            retracted_seq: 3,
+            window_id: 42,
+            corrected_segments: vec![TranscriptionSegment {
+                start_sec: Some(0.0),
+                end_sec: Some(1.5),
+                text: "corrected text".to_owned(),
+                speaker: Some("SPEAKER_00".to_owned()),
+                confidence: Some(0.97),
+            }],
+            quality_model_id: "whisper-large".to_owned(),
+            quality_latency_ms: 310,
+            quality_confidence_mean: 0.95,
+            drift: CorrectionDrift {
+                wer_approx: 0.25,
+                confidence_delta: 0.12,
+                segment_count_delta: 0,
+                text_edit_distance: 2,
+            },
+            corrected_at_rfc3339: "2026-02-22T00:00:01Z".to_owned(),
+        };
+        let value = super::transcript_correct_value("run-corr", &event);
+        assert_eq!(value["event"], "transcript.correct");
+        assert_eq!(value["correction_id"], 7);
+        assert_eq!(value["replaces_seq"], 3);
+        assert_eq!(value["window_id"], 42);
+        assert_eq!(value["drift"]["wer_approx"], 0.25);
+        let segs = value["segments"].as_array().expect("segments array");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0]["text"], "corrected text");
+        for field in TRANSCRIPT_CORRECT_REQUIRED_FIELDS {
+            assert!(value.get(*field).is_some(), "missing field `{field}`");
+        }
+    }
+
+    #[test]
+    fn speculation_stats_value_contains_required_fields() {
+        use crate::speculation::SpeculationStats;
+
+        let stats = SpeculationStats {
+            windows_processed: 42,
+            corrections_emitted: 10,
+            confirmations_emitted: 32,
+            correction_rate: 0.2381,
+            mean_fast_latency_ms: 48.5,
+            mean_quality_latency_ms: 207.4,
+            current_window_size_ms: 3000,
+            mean_drift_wer: 0.11,
+        };
+        let value = super::speculation_stats_value("run-stats", &stats);
+        assert_eq!(value["event"], "transcript.speculation_stats");
+        assert_eq!(value["run_id"], "run-stats");
+        assert_eq!(value["windows_processed"], 42);
+        assert_eq!(value["corrections_emitted"], 10);
+        assert_eq!(value["confirmations_emitted"], 32);
+        assert_eq!(value["current_window_size_ms"], 3000);
+        assert!(value["ts"].is_string());
+        for field in SPECULATION_STATS_REQUIRED_FIELDS {
+            assert!(value.get(*field).is_some(), "missing field `{field}`");
+        }
+    }
+
+    #[test]
+    fn snapshot_resources_memory_fields_not_swapped() {
+        let snap = super::snapshot_resources();
+        if let (Some(avail), Some(total)) = (snap.memory_available_bytes, snap.memory_total_bytes) {
+            assert!(
+                avail <= total,
+                "memory_available ({avail}) should be <= memory_total ({total})"
+            );
+            assert!(total >= 1_048_576, "total memory should be >= 1 MiB");
+        }
     }
 }

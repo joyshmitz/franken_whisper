@@ -95,6 +95,38 @@ pub fn validate_segment_invariants_with_policy(
     let mut previous_end: Option<f64> = None;
 
     for (index, segment) in segments.iter().enumerate() {
+        if let Some(start) = segment.start_sec
+            && !start.is_finite()
+        {
+            return Err(FwError::Unsupported(format!(
+                "conformance violation: segment {index} start_sec ({start}) is not finite"
+            )));
+        }
+
+        if let Some(end) = segment.end_sec
+            && !end.is_finite()
+        {
+            return Err(FwError::Unsupported(format!(
+                "conformance violation: segment {index} end_sec ({end}) is not finite"
+            )));
+        }
+
+        if let Some(start) = segment.start_sec
+            && start < 0.0
+        {
+            return Err(FwError::Unsupported(format!(
+                "conformance violation: segment {index} start_sec ({start}) is negative"
+            )));
+        }
+
+        if let Some(end) = segment.end_sec
+            && end < 0.0
+        {
+            return Err(FwError::Unsupported(format!(
+                "conformance violation: segment {index} end_sec ({end}) is negative"
+            )));
+        }
+
         if let (Some(start), Some(end)) = (segment.start_sec, segment.end_sec)
             && end + policy.timestamp_epsilon_sec < start
         {
@@ -332,10 +364,11 @@ pub struct ShadowRunReport {
 /// Compare shadow-run results from a bridge adapter and native engine on the
 /// same input. Returns a `ShadowRunReport` summarizing parity.
 ///
-/// `passes_gate` is true when:
-/// - segment comparison is `within_tolerance()`
-/// - no text mismatches
-/// - no timestamp violations
+/// `passes_gate` is true when segment comparison is `within_tolerance()`
+/// (no length mismatch, no text/speaker/timestamp violations).
+///
+/// Replay envelope comparison is informational only — different engines
+/// naturally produce different output hashes and backend identities.
 #[must_use]
 pub fn compare_shadow_run(
     primary_engine: &str,
@@ -350,9 +383,7 @@ pub fn compare_shadow_run(
         compare_segments_with_tolerance(primary_segments, shadow_segments, tolerance);
     let replay_comparison = compare_replay_envelopes(primary_replay, shadow_replay);
 
-    let passes_gate = segment_comparison.within_tolerance()
-        && segment_comparison.text_mismatches == 0
-        && segment_comparison.timestamp_violations == 0;
+    let passes_gate = segment_comparison.within_tolerance();
 
     ShadowRunReport {
         primary_engine: primary_engine.to_owned(),
@@ -804,6 +835,48 @@ mod tests {
         let err =
             validate_segment_invariants(&[seg]).expect_err("neg-infinite confidence should fail");
         assert!(err.to_string().contains("confidence"));
+    }
+
+    #[test]
+    fn rejects_nan_start_sec() {
+        let seg = segment(Some(f64::NAN), Some(1.0), "text");
+        let err = validate_segment_invariants(&[seg]).expect_err("NaN start_sec should fail");
+        assert!(err.to_string().contains("not finite"));
+    }
+
+    #[test]
+    fn rejects_nan_end_sec() {
+        let seg = segment(Some(0.0), Some(f64::NAN), "text");
+        let err = validate_segment_invariants(&[seg]).expect_err("NaN end_sec should fail");
+        assert!(err.to_string().contains("not finite"));
+    }
+
+    #[test]
+    fn rejects_infinite_start_sec() {
+        let seg = segment(Some(f64::INFINITY), Some(1.0), "text");
+        let err = validate_segment_invariants(&[seg]).expect_err("infinite start_sec should fail");
+        assert!(err.to_string().contains("not finite"));
+    }
+
+    #[test]
+    fn rejects_infinite_end_sec() {
+        let seg = segment(Some(0.0), Some(f64::INFINITY), "text");
+        let err = validate_segment_invariants(&[seg]).expect_err("infinite end_sec should fail");
+        assert!(err.to_string().contains("not finite"));
+    }
+
+    #[test]
+    fn rejects_negative_start_sec() {
+        let seg = segment(Some(-1.0), Some(1.0), "text");
+        let err = validate_segment_invariants(&[seg]).expect_err("negative start_sec should fail");
+        assert!(err.to_string().contains("negative"));
+    }
+
+    #[test]
+    fn rejects_negative_end_sec() {
+        let seg = segment(Some(0.0), Some(-0.5), "text");
+        let err = validate_segment_invariants(&[seg]).expect_err("negative end_sec should fail");
+        assert!(err.to_string().contains("negative"));
     }
 
     #[test]
@@ -1343,5 +1416,141 @@ mod tests {
             content.contains("Fallback Policy"),
             "contract must document fallback policy"
         );
+    }
+
+    // ── Task #205 — conformance edge-case tests ──────────────────────
+
+    #[test]
+    fn negative_zero_timestamps_accepted_by_validation() {
+        // IEEE 754: -0.0 == 0.0, so -0.0 < 0.0 is false.
+        // Document that -0.0 passes the negativity check.
+        let segments = vec![
+            TranscriptionSegment {
+                start_sec: Some(-0.0_f64),
+                end_sec: Some(-0.0_f64),
+                text: "neg zero".to_owned(),
+                speaker: None,
+                confidence: None,
+            },
+            TranscriptionSegment {
+                start_sec: Some(0.0),
+                end_sec: Some(1.0),
+                text: "normal".to_owned(),
+                speaker: None,
+                confidence: None,
+            },
+        ];
+        assert!(
+            validate_segment_invariants(&segments).is_ok(),
+            "negative zero should be accepted (IEEE 754: -0.0 == 0.0)"
+        );
+    }
+
+    #[test]
+    fn rollout_stage_parse_whitespace_and_mixed_case() {
+        // parse() trims and lowercases before matching — exercise that path.
+        assert_eq!(
+            NativeEngineRolloutStage::parse("  SHADOW  "),
+            Some(NativeEngineRolloutStage::Shadow)
+        );
+        assert_eq!(
+            NativeEngineRolloutStage::parse(" Primary "),
+            Some(NativeEngineRolloutStage::Primary)
+        );
+        assert_eq!(
+            NativeEngineRolloutStage::parse("\tSole\n"),
+            Some(NativeEngineRolloutStage::Sole)
+        );
+        // Whitespace-only → empty after trim → None.
+        assert_eq!(NativeEngineRolloutStage::parse("   "), None);
+    }
+
+    #[test]
+    fn compare_shadow_run_passes_replay_but_fails_segment_gate() {
+        use super::compare_shadow_run;
+
+        // Identical replays → replay_comparison.within_tolerance() is true.
+        let replay = ReplayEnvelope {
+            input_content_hash: Some("aaa".to_owned()),
+            backend_identity: Some("whisper-cpp".to_owned()),
+            backend_version: Some("1.0".to_owned()),
+            output_payload_hash: Some("bbb".to_owned()),
+        };
+
+        // Segments diverge in text → segment_comparison fails.
+        let primary = vec![segment(Some(0.0), Some(1.0), "hello world")];
+        let shadow = vec![segment(Some(0.0), Some(1.0), "goodbye world")];
+
+        let tolerance = SegmentCompatibilityTolerance {
+            require_text_exact: true,
+            require_speaker_exact: false,
+            timestamp_tolerance_sec: 0.5,
+        };
+
+        let report = compare_shadow_run(
+            "bridge", "native", &primary, &shadow, &replay, &replay, tolerance,
+        );
+
+        // Gate depends only on segment comparison, not replay comparison.
+        assert!(!report.passes_gate, "gate should fail on text mismatch");
+        assert!(
+            report.replay_comparison.within_tolerance(),
+            "replay comparison should pass (identical envelopes)"
+        );
+    }
+
+    #[test]
+    fn none_end_sec_does_not_reset_previous_end_for_overlap_check() {
+        // seg0 ends at 2.0, seg1 has end_sec=None (previous_end stays 2.0),
+        // seg2 starts at 2.0 — should NOT trigger overlap because
+        // 2.0 + epsilon < 2.0 is false.
+        let segments = vec![
+            segment(Some(0.0), Some(2.0), "first"),
+            TranscriptionSegment {
+                start_sec: Some(2.0),
+                end_sec: None,
+                text: "no end".to_owned(),
+                speaker: None,
+                confidence: None,
+            },
+            segment(Some(2.0), Some(3.0), "third"),
+        ];
+        assert!(
+            validate_segment_invariants(&segments).is_ok(),
+            "seg2 starting at previous seg0's end should not be flagged as overlap"
+        );
+    }
+
+    #[test]
+    fn compare_segments_speaker_mismatch_ignored_when_not_required() {
+        // require_speaker_exact = false with genuinely different speakers
+        // → speaker_mismatches should be 0.
+        let expected = vec![TranscriptionSegment {
+            start_sec: Some(0.0),
+            end_sec: Some(1.0),
+            text: "hello".to_owned(),
+            speaker: Some("SPEAKER_00".to_owned()),
+            confidence: None,
+        }];
+        let observed = vec![TranscriptionSegment {
+            start_sec: Some(0.0),
+            end_sec: Some(1.0),
+            text: "hello".to_owned(),
+            speaker: Some("SPEAKER_01".to_owned()),
+            confidence: None,
+        }];
+
+        let tolerance = SegmentCompatibilityTolerance {
+            require_text_exact: true,
+            require_speaker_exact: false,
+            timestamp_tolerance_sec: 0.5,
+        };
+
+        let report = compare_segments_with_tolerance(&expected, &observed, tolerance);
+        assert_eq!(
+            report.speaker_mismatches, 0,
+            "speaker mismatch should not be counted when require_speaker_exact is false"
+        );
+        assert!(report.within_tolerance());
     }
 }
