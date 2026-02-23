@@ -127,6 +127,43 @@
 - [x] Summarize deliverables and residual risks.
 - [x] Provide concrete next packets only if any required work remains.
 
+## S. Fresh-Eyes Audit Pass (2026-02-22)
+
+### S1. Audit scope and findings
+- [x] Re-read all newly written/modified speculation pipeline code (`src/streaming.rs`, `src/speculation.rs`, `src/robot.rs`) with contract focus.
+- [x] Cross-audit event contract against robot schema and required-field constants.
+- [x] Identify concrete issues:
+  - [x] `transcript.partial` payload schema mismatch in speculative pipeline events.
+  - [x] Missing robot schema docs for emitted speculation events (`confirm/retract/correct/speculation_stats`).
+  - [x] Zero-duration duration-loop path skipped cancellation checkpoint hook.
+  - [x] Evidence-ledger correction-rate string matching brittle to decision-string variants.
+  - [x] Speculation stats docs described means as “across corrections” despite all-window aggregation.
+
+### S2. Fixes applied
+- [x] Reworked speculative partial event emission to use canonical robot payload builder per segment.
+- [x] Added canonical `transcript.confirm` robot payload builder + emitter.
+- [x] Updated speculative confirm emission to use canonical builder.
+- [x] Extended robot schema to document speculation event types and required fields.
+- [x] Added `TRANSCRIPT_CONFIRM_REQUIRED_FIELDS`.
+- [x] Ensured zero-duration processing runs checkpoint exactly once before returning.
+- [x] Added zero-length bounded-window guard in duration loop.
+- [x] Hardened `WindowManager::next_window_bounded` API to return `None` on exhausted ranges (prevents zero-length window materialization at source).
+- [x] Hardened correction-ledger decision classification against common decision string variants.
+- [x] Added capacity-zero retention behavior for correction evidence ledger (count-only, no retain).
+- [x] Corrected speculation stats comments to reflect all-window aggregation semantics.
+
+### S3. Regression coverage
+- [x] Added/updated tests to validate speculative event payload required fields.
+- [x] Added zero-duration checkpoint behavior test.
+- [x] Updated robot contract tests for expanded schema event set and required-field lists.
+- [x] Added ledger capacity-zero behavior test.
+
+### S4. Quality gates
+- [x] `cargo fmt --check`
+- [x] `cargo check --all-targets`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo test`
+
 ## Blockers / Assumptions / Deferred
 - [x] Blockers: none currently blocking implementation or validation.
 - [x] Assumption: backend binaries/tools (`whisper-cli`, `insanely-fast-whisper`, diarization python stack, ffmpeg) are available in runtime environments where those backends are selected.
@@ -1072,47 +1109,123 @@
 ### R1. Orchestrator API and Contract Alignment
 - [x] R1.1 Re-audit `src/streaming.rs` current `SpeculativeStreamingPipeline` implementation.
 - [x] R1.2 Re-audit `src/speculation.rs` contracts (`WindowManager`, `CorrectionTracker`, `SpeculationStats`).
-- [~] R1.3 Design file-level processing API that preserves deterministic window advancement.
-- [ ] R1.4 Decide bounded-final-window behavior and encode deterministic rule.
-- [ ] R1.5 Define cancellation checkpoint hook strategy for per-window loop.
-- [ ] R1.6 Define event-log contract for `partial`, `confirm`, `retract`, `correct`, and stats events.
+- [x] R1.3 Design file-level processing API that preserves deterministic window advancement.
+- [x] R1.4 Decide bounded-final-window behavior and encode deterministic rule.
+- [x] R1.5 Define cancellation checkpoint hook strategy for per-window loop.
+- [x] R1.6 Define event-log contract for `partial`, `confirm`, `retract`, `correct`, and stats events.
 
 ### R2. Speculative Pipeline Core Implementation
-- [ ] R2.1 Add file-level loop method (`process_file`/equivalent) in `src/streaming.rs`.
-- [ ] R2.2 Add internal helper to process explicit precomputed windows (shared by single-window + file-loop paths).
-- [ ] R2.3 Ensure per-window fast/quality execution uses `ConcurrentTwoLaneExecutor`.
-- [ ] R2.4 Ensure `WindowManager` and `CorrectionTracker` state transitions remain coherent in all outcomes.
-- [ ] R2.5 Ensure loop advances by deterministic step (`window_size_ms - overlap_ms`) with guard against zero-progress.
-- [ ] R2.6 Ensure final output is assembled through merged corrected transcript contract.
+- [x] R2.1 Add file-level loop method (`process_file`/equivalent) in `src/streaming.rs`.
+- [x] R2.2 Add internal helper to process explicit precomputed windows (shared by single-window + file-loop paths).
+- [x] R2.3 Ensure per-window fast/quality execution uses `ConcurrentTwoLaneExecutor`.
+- [x] R2.4 Ensure `WindowManager` and `CorrectionTracker` state transitions remain coherent in all outcomes.
+- [x] R2.5 Ensure loop advances by deterministic step (`window_size_ms - overlap_ms`) with guard against zero-progress.
+- [x] R2.6 Ensure final output is assembled through merged corrected transcript contract.
 
 ### R3. Event Emission and Evidence Semantics
-- [ ] R3.1 Append deterministic `RunEvent` entries for early fast partial emissions.
-- [ ] R3.2 Append deterministic confirm events for non-corrected windows.
-- [ ] R3.3 Append retract + correct events for corrected windows.
-- [ ] R3.4 Append speculation-stats summary event at end-of-run API path.
-- [ ] R3.5 Ensure event sequence numbering is monotonic and stable.
-- [ ] R3.6 Ensure event timestamps are RFC3339 and payloads are schema-compatible with robot helpers.
+- [x] R3.1 Append deterministic `RunEvent` entries for early fast partial emissions.
+- [x] R3.2 Append deterministic confirm events for non-corrected windows.
+- [x] R3.3 Append retract + correct events for corrected windows.
+- [x] R3.4 Append speculation-stats summary event at end-of-run API path.
+- [x] R3.5 Ensure event sequence numbering is monotonic and stable.
+- [x] R3.6 Ensure event timestamps are RFC3339 and payloads are schema-compatible with robot helpers.
 
 ### R4. Stats and Robot Contract Alignment
-- [ ] R4.1 Extend `SpeculationStats` with `confirmations_emitted` to match bead contract.
-- [ ] R4.2 Populate `confirmations_emitted` from `CorrectionTracker` in streaming stats aggregation.
-- [ ] R4.3 Update robot required-fields list for `transcript.speculation_stats`.
-- [ ] R4.4 Update robot `speculation_stats_value` payload to include confirmations.
-- [ ] R4.5 Update affected tests/assertions for the revised stats schema.
+- [x] R4.1 Extend `SpeculationStats` with `confirmations_emitted` to match bead contract.
+- [x] R4.2 Populate `confirmations_emitted` from `CorrectionTracker` in streaming stats aggregation.
+- [x] R4.3 Update robot required-fields list for `transcript.speculation_stats`.
+- [x] R4.4 Update robot `speculation_stats_value` payload to include confirmations.
+- [x] R4.5 Update affected tests/assertions for the revised stats schema.
 
 ### R5. Test Coverage for `bd-qlt.6`
-- [ ] R5.1 Add focused tests for single-window confirm path.
-- [ ] R5.2 Add focused tests for single-window correct path (retract+correct state/event behavior).
-- [ ] R5.3 Add focused tests for multi-window file-loop behavior and deterministic advancement.
-- [ ] R5.4 Add focused tests for event sequencing and required payload fields.
-- [ ] R5.5 Add focused tests for stats aggregation including confirmations and correction rate.
-- [ ] R5.6 Add focused tests for cancellation-hook short-circuit behavior.
+- [x] R5.1 Add focused tests for single-window confirm path.
+- [x] R5.2 Add focused tests for single-window correct path (retract+correct state/event behavior).
+- [x] R5.3 Add focused tests for multi-window file-loop behavior and deterministic advancement.
+- [x] R5.4 Add focused tests for event sequencing and required payload fields.
+- [x] R5.5 Add focused tests for stats aggregation including confirmations and correction rate.
+- [x] R5.6 Add focused tests for cancellation-hook short-circuit behavior.
 
 ### R6. Validation, Bead Updates, and Handoff
-- [ ] R6.1 Run `cargo fmt --check`.
-- [ ] R6.2 Run `cargo check --all-targets`.
-- [ ] R6.3 Run `cargo clippy --all-targets -- -D warnings`.
-- [ ] R6.4 Run `cargo test`.
-- [ ] R6.5 Update `br` bead status/comments based on implementation completion state.
-- [ ] R6.6 Send coordination update to discovered peer agents (or document none-active state).
-- [ ] R6.7 Reconcile all `R*` rows with concrete evidence paths and residual risks.
+- [x] R6.1 Run `cargo fmt --check`.
+- [x] R6.2 Run `cargo check --all-targets`.
+- [x] R6.3 Run `cargo clippy --all-targets -- -D warnings`.
+- [x] R6.4 Run `cargo test`.
+- [x] R6.5 Update `br` bead status/comments based on implementation completion state. (`bd-qlt.6` moved `open -> in_progress -> closed`)
+- [x] R6.6 Send coordination update to discovered peer agents (or document none-active state). (Agent Mail discovery showed no active peer agents beyond current session identity.)
+- [x] R6.7 Reconcile all `R*` rows with concrete evidence paths and residual risks.
+
+## T. Cross-Project Hardening Packet — `frankensqlite` io_uring Backend + `franken_whisper` Methodology Reconciliation (2026-02-23)
+
+### T0. Session discipline and scope control
+- [x] T0.1 Re-confirm `franken_whisper/AGENTS.md` full constraints before editing.
+- [x] T0.2 Preserve non-destructive policy in both repositories (`franken_whisper`, `frankensqlite`).
+- [x] T0.3 Record cross-repo scope explicitly: io_uring backend replacement hardening in `frankensqlite` plus architecture/methodology reconciliation in `franken_whisper`.
+- [x] T0.4 Avoid reverting unrelated dirty worktree files from prior agents.
+
+### T1. `frankensqlite` io_uring backend hardening (feature precedence + fallback)
+- [x] T1.1 Audit unfinished cfg migration points in `crates/fsqlite-vfs/src/uring.rs`.
+- [x] T1.2 Remove mutual-exclusion assumption and make `linux-asupersync-uring` win when both backend features are enabled.
+- [x] T1.3 Convert all remaining `#[cfg(feature = "linux-uring-fs")]` code paths that conflict with precedence to `all(feature = "linux-uring-fs", not(feature = "linux-asupersync-uring"))`.
+- [x] T1.4 Keep compile-time guard requiring at least one Linux io_uring backend feature.
+- [x] T1.5 Validate `IoUringRuntime` debug/status/is_available behavior under each backend mode.
+- [x] T1.6 Ensure bridge fallback remains sticky-disabled after panic/poison detection.
+
+### T2. `frankensqlite` fallback correctness + tests
+- [x] T2.1 Add deterministic test hook for forced asupersync backend initialization failure (`#[cfg(test)]` gate only).
+- [x] T2.2 Add regression test asserting init-failure disables backend and falls back to unix path.
+- [x] T2.3 Ensure existing poisoned-lock fallback tests continue passing for `uring-fs` path.
+- [x] T2.4 Resolve feature-unification dead code warning by aligning `unix.rs` helper cfg gate with precedence rule.
+
+### T3. `frankensqlite` top-level feature passthrough
+- [x] T3.1 Add backend feature passthrough in `crates/fsqlite-core/Cargo.toml`.
+- [x] T3.2 Add backend feature passthrough in `crates/fsqlite/Cargo.toml`.
+- [x] T3.3 Add backend feature passthrough in `crates/fsqlite-cli/Cargo.toml`.
+- [x] T3.4 Preserve workspace dependency inheritance semantics (avoid invalid `workspace=true + default-features=false` combination).
+- [x] T3.5 Validate package-level feature selection compiles for `fsqlite-core`, `fsqlite`, `fsqlite-cli`.
+
+### T4. `frankensqlite` regression fixes surfaced by mandatory quality gates
+- [x] T4.1 Fix btree interior distribution edge case that produced `consumed trailing divider` corruption error.
+- [x] T4.2 Add unit regression test for interior distribution orphan-divider avoidance.
+- [x] T4.3 Fix UPDATE OF trigger semantics regression in `fsqlite-core` to skip unchanged listed columns.
+- [x] T4.4 Fix SSI pivot regression by aborting commit when dangerous structure (`has_in_rw && has_out_rw`) is present before FCW success path.
+- [x] T4.5 Keep SSI evidence ledger drafting intact for abort decisions introduced by early dangerous-structure abort.
+
+### T5. `frankensqlite` validation matrix (backend + package + gates)
+- [x] T5.1 `cargo check -p fsqlite-vfs` (default backend).
+- [x] T5.2 `cargo check -p fsqlite-vfs --no-default-features --features linux-asupersync-uring`.
+- [x] T5.3 `cargo check -p fsqlite-vfs --features linux-asupersync-uring` (feature-unified mode).
+- [x] T5.4 `cargo clippy -p fsqlite-vfs --all-targets -- -D warnings`.
+- [x] T5.5 `cargo clippy -p fsqlite-vfs --all-targets --no-default-features --features linux-asupersync-uring -- -D warnings`.
+- [x] T5.6 `cargo clippy -p fsqlite-vfs --all-targets --features linux-asupersync-uring -- -D warnings`.
+- [x] T5.7 `cargo test -p fsqlite-vfs uring::tests::`.
+- [x] T5.8 `cargo test -p fsqlite-vfs --no-default-features --features linux-asupersync-uring uring::tests::`.
+- [x] T5.9 `cargo test -p fsqlite-vfs --features linux-asupersync-uring uring::tests::`.
+- [x] T5.10 `cargo check -p fsqlite-core --features linux-asupersync-uring`.
+- [x] T5.11 `cargo check -p fsqlite --features linux-asupersync-uring`.
+- [x] T5.12 `cargo check -p fsqlite-cli --features linux-asupersync-uring`.
+- [x] T5.13 Re-run mandatory sequence in `frankensqlite`: `fmt --check`, `check --all-targets`, `clippy --all-targets -D warnings`, `test`.
+- [!] T5.14 Capture final `cargo test` completion snapshot after long-running SSI/correctness integration targets finish.
+- [x] T5.15 Document current gate blockers observed in this environment:
+  - `crates/fsqlite-e2e/tests/bd_3plop_5_ssi_serialization_correctness.rs::ssi_serialization_correctness_ci_scale` is extremely long-running on this host and blocks practical completion of full-suite `cargo test`.
+  - `cargo test --workspace --exclude fsqlite-e2e` fails in `fsqlite-harness` at `bd_1lsfu_2_core_sql_golden_checksums` due extensive parser/execution checksum drift tied to pre-existing dirty parser/codegen changes.
+
+### T6. `franken_whisper` mandatory reread + architecture comprehension
+- [x] T6.1 Read `AGENTS.md` fully (line-by-line).
+- [x] T6.2 Read `README.md` fully (all 1,103 lines).
+- [x] T6.3 Reconcile docs against implementation reality via explorer-agent architecture report.
+- [x] T6.4 Confirm project intent: engine-first unified schema + deterministic robot mode + sqlite/jsonl durability + optional TUI + tty audio transport.
+
+### T7. External-feedback reconciliation backlog (from peer agent critique)
+- [x] T7.1 Confirm existing code already uses engine-trait framing (not wrapper-only adapter framing) in `src/backend/mod.rs`.
+- [x] T7.2 Confirm conformance harness exists and emits bundle artifact (`tests/conformance_harness.rs`).
+- [x] T7.3 Confirm replay determinism artifacts exist (`src/replay_pack.rs`, conformance docs/tests).
+- [x] T7.4 Identify remaining real gap: orchestrator placeholder stages (VAD, separation, punctuation, diarization) still marked as placeholder implementations.
+- [ ] T7.5 Define explicit compatibility envelope doc addendum for parity targets (text/timestamp/speaker/confidence tolerances) as enforceable release gates.
+- [ ] T7.6 Add dedicated invariants/property tests for stage-order determinism and event-order replay under cancellation/failure paths.
+- [ ] T7.7 Add a focused operator-facing protocol note clarifying tty-audio replayability semantics and framing guarantees.
+
+### T8. Closeout packet requirements
+- [ ] T8.1 Publish cross-repo change summary with file-level references.
+- [ ] T8.2 Publish quality gate outcomes (pass/fail + notable long-running suites).
+- [ ] T8.3 Publish residual risks (placeholder stages in `franken_whisper`; long SSI tests runtime cost in `frankensqlite`).
+- [ ] T8.4 Publish next concrete execution packets with clear ownership and verification criteria.

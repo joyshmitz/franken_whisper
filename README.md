@@ -20,17 +20,17 @@
 
 Speech-to-text pipelines are fragmented. You need whisper.cpp for speed, insanely-fast-whisper for GPU batching, and whisper-diarization for speaker identification. Each has its own CLI, output format, error handling, and deployment story. Orchestrating them from scripts means parsing inconsistent stdout, handling timeouts manually, and losing run history.
 
-Agent workflows need structured, streaming, machine-readable output -- not human-oriented terminal decorations that break when piped.
+Agent workflows need structured, streaming, machine-readable output, not human-oriented terminal decorations that break when piped.
 
 ## The Solution
 
 franken_whisper is a single Rust binary that wraps all three backends behind a unified interface with:
 
-- **Adaptive backend routing** -- Bayesian decision contract selects the best engine per-request with explicit loss matrix, posterior calibration, and deterministic fallback
-- **Real-time NDJSON streaming** -- every pipeline stage emits sequenced, timestamped events with stable schema (v1.0.0) for agent consumption
-- **Durable run history** -- every transcription is persisted to SQLite with full event logs, replay envelopes, and JSONL export/import
-- **Graceful cancellation** -- Ctrl+C propagates through the entire pipeline via cancellation tokens with proper resource cleanup
-- **TTY audio transport** -- low-bandwidth audio relay over PTY links using mulaw+zlib+base64 NDJSON with handshake, integrity checks, and deterministic retransmission
+- **Adaptive backend routing:** Bayesian decision contract selects the best engine per-request with explicit loss matrix, posterior calibration, and deterministic fallback
+- **Real-time NDJSON streaming:** every pipeline stage emits sequenced, timestamped events with stable schema (v1.0.0) for agent consumption
+- **Durable run history:** every transcription is persisted to SQLite with full event logs, replay envelopes, and JSONL export/import
+- **Graceful cancellation:** Ctrl+C propagates through the entire pipeline via cancellation tokens with proper resource cleanup
+- **TTY audio transport:** low-bandwidth audio relay over PTY links using mulaw+zlib+base64 NDJSON with handshake, integrity checks, and deterministic retransmission
 
 ## Why franken_whisper?
 
@@ -80,7 +80,7 @@ cat frames.ndjson | cargo run -- tty-audio decode --output restored.wav
 
 ### Agent-First, Human-Optional
 
-Every command produces structured NDJSON on stdout. Human-friendly output is the exception (plain `transcribe` mode), not the rule. The `robot` subcommand is the primary interface -- it emits sequenced stage events with stable schema versioning so upstream agents can parse output without fragile regex.
+Every command produces structured NDJSON on stdout. Human-friendly output is the exception (plain `transcribe` mode), not the rule. The `robot` subcommand is the primary interface. It emits sequenced stage events with stable schema versioning so upstream agents can parse output without fragile regex.
 
 ### Deterministic by Default
 
@@ -141,11 +141,11 @@ The release profile is optimized for size (`opt-level = "z"`, LTO, single codege
 ### Prerequisites
 
 - **Rust nightly** (2024 edition)
-- **ffmpeg** -- required for audio normalization (must be on `$PATH`)
+- **ffmpeg**, required for audio normalization (must be on `$PATH`)
 - **Backend binaries** (at least one):
-  - `whisper-cli` (from whisper.cpp) -- override: `FRANKEN_WHISPER_WHISPER_CPP_BIN`
-  - `insanely-fast-whisper` (Python) -- override: `FRANKEN_WHISPER_INSANELY_FAST_BIN`
-  - `python3` with `pyannote.audio` (for diarization backend) -- override: `FRANKEN_WHISPER_PYTHON_BIN`
+  - `whisper-cli` (from whisper.cpp); override: `FRANKEN_WHISPER_WHISPER_CPP_BIN`
+  - `insanely-fast-whisper` (Python); override: `FRANKEN_WHISPER_INSANELY_FAST_BIN`
+  - `python3` with `pyannote.audio` (for diarization backend); override: `FRANKEN_WHISPER_PYTHON_BIN`
 - **HuggingFace token** (for diarization): `--hf-token` or `FRANKEN_WHISPER_HF_TOKEN` / `HF_TOKEN`
 
 ### Path Dependencies
@@ -529,35 +529,35 @@ Conformance harness enforces 50ms canonical timestamp tolerance and emits `targe
 
 ### Data Flow
 
-1. **Ingest** -- Materialize input from file, stdin, or microphone capture
-2. **Normalize** -- Convert to 16kHz mono WAV via ffmpeg subprocess
-3. **VAD** -- (Optional) Voice Activity Detection to skip silence
-4. **Source Separate** -- (Optional) Vocal isolation for cleaner transcription
-5. **Backend** -- Dispatch to selected engine (adaptive routing or explicit)
-6. **Accelerate** -- (Optional) GPU confidence normalization via frankentorch/frankenjax
-7. **Alignment** -- (Optional) Forced alignment for word-level timestamps
-8. **Punctuation** -- (Optional) Punctuation restoration
-9. **Diarization** -- (Optional) Speaker identification and labeling
-10. **Persist** -- Write run report, segments, and events to SQLite
+1. **Ingest:** Materialize input from file, stdin, or microphone capture
+2. **Normalize:** Convert to 16kHz mono WAV via ffmpeg subprocess
+3. **VAD:** (Optional) Voice Activity Detection to skip silence
+4. **Source Separate:** (Optional) Vocal isolation for cleaner transcription
+5. **Backend:** Dispatch to selected engine (adaptive routing or explicit)
+6. **Accelerate:** (Optional) GPU confidence normalization via frankentorch/frankenjax
+7. **Alignment:** (Optional) Forced alignment for word-level timestamps
+8. **Punctuation:** (Optional) Punctuation restoration
+9. **Diarization:** (Optional) Speaker identification and labeling
+10. **Persist:** Write run report, segments, and events to SQLite
 
 Each stage emits `*.start` and `*.ok` events to the NDJSON stream with timing, sequence numbers, and structured payloads.
 
 ---
 
-## How It Works: Deep Dive
+## Technical Details
 
 ### Bayesian Backend Router
 
-When `--backend auto` is selected, franken_whisper doesn't just try backends in a fixed order. It uses a formal Bayesian decision contract to choose the best engine for each request.
+When `--backend auto` is selected, franken_whisper uses a formal Bayesian decision contract to choose the best engine for each request rather than trying backends in a fixed order.
 
 **State Space (3 states):**
-- `all_available` -- all three backends found on PATH and responsive
-- `partial_available` -- 1-2 backends operational
-- `none_available` -- nothing usable
+- `all_available`: all three backends found on PATH and responsive
+- `partial_available`: 1-2 backends operational
+- `none_available`: nothing usable
 
 **Action Space (4 actions):**
 - `try_whisper_cpp`, `try_insanely_fast`, `try_diarization` (reordered per-request based on `--diarize`)
-- `fallback_error` -- return structured error when nothing is available
+- `fallback_error`: return structured error when nothing is available
 
 **Loss Matrix:**
 
@@ -628,10 +628,10 @@ Every budget is overridable via `FRANKEN_WHISPER_STAGE_BUDGET_<STAGE>_MS` enviro
 
 After each run, the orchestrator emits an `orchestration.latency_profile` stage event with per-stage timing decomposition:
 
-- **queue_ms** -- time waiting before stage starts
-- **service_ms** -- actual work time
-- **external_process_ms** -- subprocess wall time (ffmpeg, whisper-cli)
-- **p50_ms / p95_ms / p99_ms** -- quantile estimates from the current session
+- **queue_ms**: time waiting before stage starts
+- **service_ms**: actual work time
+- **external_process_ms**: subprocess wall time (ffmpeg, whisper-cli)
+- **p50_ms / p95_ms / p99_ms**: quantile estimates from the current session
 
 The profiler computes a utilization ratio (`service_ms / budget_ms`) and emits deterministic tuning recommendations:
 
@@ -656,12 +656,12 @@ Every completed run produces a `ReplayEnvelope` containing four SHA-256 hashes:
 └──────────────────────────────────────────────┘
 ```
 
-Given identical input audio and the same backend version, the output hash should be identical. If it changes between runs, something drifted -- a model update, a parameter change, or a non-determinism in the backend. The conformance harness uses replay comparison reports to flag regressions automatically:
+Given identical input audio and the same backend version, the output hash should be identical. If it changes between runs, something drifted: a model update, a parameter change, or a non-determinism in the backend. The conformance harness uses replay comparison reports to flag regressions automatically:
 
-- `input_hash_match` -- did the input change?
-- `backend_identity_match` -- same binary?
-- `backend_version_match` -- same version?
-- `output_hash_match` -- same transcription?
+- `input_hash_match`: did the input change?
+- `backend_identity_match`: same binary?
+- `backend_version_match`: same version?
+- `output_hash_match`: same transcription?
 
 All four must match for `within_tolerance()` to return true.
 
@@ -684,11 +684,11 @@ A `SegmentComparisonReport` with zero violations and matching lengths passes the
 
 **Overlap Detection:**
 
-The `SegmentConformancePolicy` can optionally reject overlapping segments -- where one segment's `end_sec` exceeds the next segment's `start_sec` beyond a configurable epsilon (default: 1 microsecond). This catches backends that produce garbled timeline output.
+The `SegmentConformancePolicy` can optionally reject overlapping segments, where one segment's `end_sec` exceeds the next segment's `start_sec` beyond a configurable epsilon (default: 1 microsecond). This catches backends that produce garbled timeline output.
 
 ### Confidence Normalization (Acceleration)
 
-The acceleration stage normalizes per-segment confidence scores into a proper probability distribution. This matters because raw backend confidences are often uncalibrated -- whisper.cpp and insanely-fast-whisper use different scoring scales.
+The acceleration stage normalizes per-segment confidence scores into a proper probability distribution. This matters because raw backend confidences are often uncalibrated; whisper.cpp and insanely-fast-whisper use different scoring scales.
 
 **Algorithm:**
 
@@ -754,7 +754,7 @@ The `persist_report` function wraps all inserts (run + segments + events) in a s
 
 - 8 retry attempts
 - Backoff delay: `5ms x (attempt + 1)` (5ms, 10ms, 15ms, ... 40ms)
-- Cancellation token checked before each COMMIT -- if the pipeline deadline expired, the transaction rolls back cleanly
+- Cancellation token checked before each COMMIT; if the pipeline deadline expired, the transaction rolls back cleanly
 
 **Cancellation-Safe Writes:**
 
@@ -821,7 +821,7 @@ The TTY audio module goes beyond simple encode/decode. The `AdaptiveBitrateContr
 
 **Critical Frame FEC (Forward Error Correction):**
 
-Control frames that are essential for protocol correctness -- handshake, session_close, ack -- are emitted multiple times based on the current link quality. Under 10% loss, every handshake frame is transmitted 3 times to ensure at least one copy arrives. This is a probabilistic reliability guarantee: with independent frame loss at rate `p`, the probability all `k` copies are lost is `p^k`.
+Control frames essential for protocol correctness (handshake, session_close, ack) are emitted multiple times based on the current link quality. Under 10% loss, every handshake frame is transmitted 3 times to ensure at least one copy arrives. This is a probabilistic reliability guarantee: with independent frame loss at rate `p`, the probability all `k` copies are lost is `p^k`.
 
 **Link Quality Assessment:**
 
@@ -862,7 +862,7 @@ FrankenWhisperEngine
 CLI exits with code 130 (128 + SIGINT)
 ```
 
-The key insight is that stages don't catch signals directly. Instead, they poll `token.checkpoint()` at safe points -- between loop iterations, before COMMIT, after subprocess completion. This cooperative cancellation model ensures:
+Stages don't catch signals directly. Instead, they poll `token.checkpoint()` at safe points: between loop iterations, before COMMIT, after subprocess completion. This cooperative cancellation model ensures:
 
 1. No half-written SQLite rows (transactions roll back)
 2. No orphaned ffmpeg/whisper-cli subprocesses (killed on token cancellation)
@@ -958,12 +958,12 @@ Another franken_whisper process is writing. The storage layer retries with expon
 
 ## Limitations
 
-- **Backend binaries required** -- franken_whisper orchestrates external ASR engines; it does not include inference runtimes. You need whisper.cpp, insanely-fast-whisper, or whisper-diarization installed.
-- **ffmpeg required** -- audio normalization depends on ffmpeg being on PATH. There is no built-in audio decoder.
-- **Path dependencies** -- the project depends on sibling Cargo workspace members (`asupersync`, `frankensqlite`, etc.) via relative paths. It is not published to crates.io as a standalone crate.
-- **Native engines are pilots** -- native Rust engine implementations are deterministic conformance pilots. They can execute in-process when `FRANKEN_WHISPER_NATIVE_EXECUTION=1` and rollout stage is `primary|sole`; otherwise bridge adapters remain active.
-- **No bidirectional sync** -- JSONL export/import is one-way. There is no merge or conflict resolution beyond the explicit `--conflict-policy` flag.
-- **Single-machine** -- designed for single-machine use with local SQLite. No distributed or multi-node support.
+- **Backend binaries required.** franken_whisper orchestrates external ASR engines; it does not include inference runtimes. You need whisper.cpp, insanely-fast-whisper, or whisper-diarization installed.
+- **ffmpeg required.** Audio normalization depends on ffmpeg being on PATH. There is no built-in audio decoder.
+- **Path dependencies.** The project depends on sibling Cargo workspace members (`asupersync`, `frankensqlite`, etc.) via relative paths. It is not published to crates.io as a standalone crate.
+- **Native engines are pilots.** Native Rust engine implementations are deterministic conformance pilots. They can execute in-process when `FRANKEN_WHISPER_NATIVE_EXECUTION=1` and rollout stage is `primary|sole`; otherwise bridge adapters remain active.
+- **No bidirectional sync.** JSONL export/import is one-way. There is no merge or conflict resolution beyond the explicit `--conflict-policy` flag.
+- **Single-machine.** Designed for single-machine use with local SQLite. No distributed or multi-node support.
 
 ---
 
@@ -994,7 +994,7 @@ cargo bench --bench pipeline_bench
 cargo bench --bench tty_bench
 cargo bench --bench sync_bench
 
-# lint (lib targets -- some test targets have pre-existing warnings from in-progress work)
+# lint (lib targets; some test targets have pre-existing warnings from in-progress work)
 cargo clippy --lib -- -D warnings
 ```
 
@@ -1029,7 +1029,7 @@ Yes. `franken_whisper` is both a library crate and a binary. The public API expo
 
 **Q: What's the "replay envelope"?**
 
-Each run produces a `ReplayEnvelope` containing SHA-256 hashes of the input content, backend identity, and output payload. This allows detecting drift when re-running the same input -- if the output hash changes, something in the pipeline changed.
+Each run produces a `ReplayEnvelope` containing SHA-256 hashes of the input content, backend identity, and output payload. This allows detecting drift when re-running the same input. If the output hash changes, something in the pipeline changed.
 
 **Q: How does cancellation work?**
 
@@ -1041,7 +1041,7 @@ It enables audio transport over constrained TTY/PTY links where binary data can'
 
 **Q: How does the Bayesian router differ from a simple priority list?**
 
-A priority list always tries backends in the same order. The Bayesian router learns from outcomes -- if whisper_cpp starts failing (bad model, corrupted binary), its posterior degrades and the router automatically shifts traffic to insanely_fast. The loss matrix also considers request-specific factors like audio duration and whether diarization was requested. When the router doesn't have enough data (< 5 observations) or its predictions are poorly calibrated (Brier score > 0.35), it falls back to the static priority list automatically. You get the upside of adaptation with the safety of deterministic fallback.
+A priority list always tries backends in the same order. The Bayesian router learns from outcomes: if whisper_cpp starts failing (bad model, corrupted binary), its posterior degrades and the router automatically shifts traffic to insanely_fast. The loss matrix also considers request-specific factors like audio duration and whether diarization was requested. When the router doesn't have enough data (< 5 observations) or its predictions are poorly calibrated (Brier score > 0.35), it falls back to the static priority list automatically. The result is adaptive routing when the model is well-calibrated, with automatic fallback to static priority when it isn't.
 
 **Q: What happens if I Ctrl+C during a long transcription?**
 
@@ -1049,7 +1049,7 @@ The shutdown controller sets a global atomic flag and propagates cancellation th
 
 **Q: What's the "alien-artifact engineering contract"?**
 
-It's a design discipline for adaptive/runtime decision systems. Every adaptive controller in franken_whisper (the backend router, the bitrate controller, the budget tuner) must declare: an explicit state space, an explicit action space, a loss matrix, posterior/confidence terms, a calibration metric, a deterministic fallback trigger, and an evidence ledger artifact. No adaptive behavior ships without a conservative fallback. This prevents the system from making unbounded bad decisions when its model is wrong.
+A design discipline for adaptive/runtime decision systems. Every adaptive controller in franken_whisper (the backend router, the bitrate controller, the budget tuner) must declare an explicit state space, action space, loss matrix, posterior/confidence terms, calibration metric, deterministic fallback trigger, and evidence ledger artifact. No adaptive behavior ships without a conservative fallback, which prevents the system from making unbounded bad decisions when its model is wrong.
 
 **Q: How are native engines different from bridge adapters?**
 
@@ -1057,15 +1057,15 @@ Bridge adapters spawn external processes (whisper-cli, python3) and parse their 
 
 **Q: Why SQLite instead of Postgres/Redis/files?**
 
-SQLite is the right choice for a single-machine CLI tool: zero configuration, no daemon, ACID transactions, concurrent reads via WAL mode, and the entire database is a single file that's easy to backup or move. The `fsqlite` crate provides a Rust-native interface without depending on the system `libsqlite3`. JSONL export/import provides the portability story -- export to files, import on another machine, share via git.
+SQLite fits a single-machine CLI tool well: zero configuration, no daemon, ACID transactions, concurrent reads via WAL mode, and the entire database is a single file that's easy to backup or move. The `fsqlite` crate provides a Rust-native interface without depending on the system `libsqlite3`. JSONL export/import covers portability: export to files, import on another machine, share via git.
 
 **Q: How does the TTY audio retransmit loop guarantee determinism?**
 
-The `RetransmitLoop` struct is fully deterministic: given the same input frames and the same loss pattern, the output and report are byte-identical across runs. There are no timing dependencies -- `timeout_ms` is advisory/reporting only, with no sleeps or waits. Frame recovery proceeds in sequence-number order. Strategy escalation follows a fixed chain (Simple -> Redundant -> Escalate). The `inject_loss()` method resets all prior recovery state, ensuring clean separation between test scenarios.
+The `RetransmitLoop` struct is fully deterministic: given the same input frames and the same loss pattern, the output and report are byte-identical across runs. There are no timing dependencies; `timeout_ms` is advisory/reporting only, with no sleeps or waits. Frame recovery proceeds in sequence-number order. Strategy escalation follows a fixed chain (Simple -> Redundant -> Escalate). The `inject_loss()` method resets all prior recovery state, ensuring clean separation between test scenarios.
 
 **Q: What's the difference between `fail_closed` and `skip_missing` recovery?**
 
-`fail_closed` (default for decode) aborts on the first violation -- any gap, duplicate, CRC mismatch, or zlib failure terminates the stream. This is the safe choice when you need guaranteed complete output. `skip_missing` (default for retransmit-plan) continues processing, recording all violations in telemetry counters (gaps, duplicates, integrity_failures, dropped_frames). This is the right choice when you need to assess damage and plan retransmission. Both policies always fail immediately on protocol-level violations (wrong version, unsupported codec, wrong sample rate).
+`fail_closed` (default for decode) aborts on the first violation: any gap, duplicate, CRC mismatch, or zlib failure terminates the stream. Use it when you need guaranteed complete output. `skip_missing` (default for retransmit-plan) continues processing, recording all violations in telemetry counters (gaps, duplicates, integrity_failures, dropped_frames). Use it when you need to assess damage and plan retransmission. Both policies always fail immediately on protocol-level violations (wrong version, unsupported codec, wrong sample rate).
 
 **Q: How do I contribute?**
 
