@@ -14,9 +14,9 @@ use flate2::write::ZlibEncoder;
 use std::io::Write;
 
 use franken_whisper::tty_audio::{
-    AdaptiveBitrateController, ControlFrameType, DecodeRecoveryPolicy, DecodeReport,
-    FixedCountMicSource, MicStreamConfig, RetransmitRange, SequenceGap, SessionCloseReason,
-    SliceMicSource, TtyAudioFrame, TtyControlFrame, UnavailableMicSource, decode_frames_to_raw,
+    AdaptiveBitrateController, DecodeRecoveryPolicy, DecodeReport, FixedCountMicSource,
+    MicStreamConfig, RetransmitRange, SequenceGap, SessionCloseReason, SliceMicSource,
+    TtyAudioFrame, TtyControlFrame, UnavailableMicSource, decode_frames_to_raw,
     decode_frames_to_raw_with_policy, emit_control_frame_to_writer,
     emit_retransmit_loop_from_reader, emit_session_close, mic_stream_event_value,
     negotiate_version, retransmit_candidates, retransmit_plan_from_reader,
@@ -439,7 +439,7 @@ fn decode_with_handshake_and_interleaved_control() {
 
 #[test]
 fn validate_session_close_matching_seq() {
-    let close = ControlFrameType::SessionClose {
+    let close = TtyControlFrame::SessionClose {
         reason: SessionCloseReason::Normal,
         last_data_seq: Some(42),
     };
@@ -448,7 +448,7 @@ fn validate_session_close_matching_seq() {
 
 #[test]
 fn validate_session_close_mismatching_seq() {
-    let close = ControlFrameType::SessionClose {
+    let close = TtyControlFrame::SessionClose {
         reason: SessionCloseReason::Normal,
         last_data_seq: Some(42),
     };
@@ -461,7 +461,7 @@ fn validate_session_close_mismatching_seq() {
 
 #[test]
 fn validate_session_close_no_data_frames_but_claimed() {
-    let close = ControlFrameType::SessionClose {
+    let close = TtyControlFrame::SessionClose {
         reason: SessionCloseReason::Error,
         last_data_seq: Some(5),
     };
@@ -474,7 +474,7 @@ fn validate_session_close_no_data_frames_but_claimed() {
 
 #[test]
 fn validate_session_close_no_data_frames_and_no_claim() {
-    let close = ControlFrameType::SessionClose {
+    let close = TtyControlFrame::SessionClose {
         reason: SessionCloseReason::Normal,
         last_data_seq: None,
     };
@@ -920,14 +920,14 @@ fn control_frame_handshake_round_trips_through_json() {
 
 #[test]
 fn session_close_round_trips_through_json() {
-    let original = ControlFrameType::SessionClose {
+    let original = TtyControlFrame::SessionClose {
         reason: SessionCloseReason::Timeout,
         last_data_seq: Some(100),
     };
     let json = serde_json::to_string(&original).expect("serialize");
-    let parsed: ControlFrameType = serde_json::from_str(&json).expect("deserialize");
+    let parsed: TtyControlFrame = serde_json::from_str(&json).expect("deserialize");
     match parsed {
-        ControlFrameType::SessionClose {
+        TtyControlFrame::SessionClose {
             reason,
             last_data_seq,
         } => {

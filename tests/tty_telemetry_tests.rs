@@ -810,7 +810,7 @@ fn retransmit_plan_ranges_are_collapsed_correctly() {
 
 #[test]
 fn session_close_validation_normal_matching() {
-    let close = ControlFrameType::SessionClose {
+    let close = TtyControlFrame::SessionClose {
         reason: SessionCloseReason::Normal,
         last_data_seq: Some(10),
     };
@@ -819,7 +819,7 @@ fn session_close_validation_normal_matching() {
 
 #[test]
 fn session_close_validation_mismatch_fails() {
-    let close = ControlFrameType::SessionClose {
+    let close = TtyControlFrame::SessionClose {
         reason: SessionCloseReason::Normal,
         last_data_seq: Some(10),
     };
@@ -829,7 +829,7 @@ fn session_close_validation_mismatch_fails() {
 
 #[test]
 fn session_close_validation_no_data_but_claimed_fails() {
-    let close = ControlFrameType::SessionClose {
+    let close = TtyControlFrame::SessionClose {
         reason: SessionCloseReason::Error,
         last_data_seq: Some(5),
     };

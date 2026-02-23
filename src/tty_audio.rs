@@ -140,10 +140,6 @@ pub enum TtyControlFrame {
     },
 }
 
-/// Backward-compatible alias for older callers/tests that still use the
-/// previous control-frame type name.
-pub type ControlFrameType = TtyControlFrame;
-
 /// Negotiate protocol version from a handshake frame.
 ///
 /// Returns `Ok(version)` if a compatible version exists within both parties'
