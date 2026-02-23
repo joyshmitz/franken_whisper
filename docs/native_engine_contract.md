@@ -163,6 +163,22 @@ A native engine may replace its bridge adapter only when ALL gates pass:
 | 12 | Engine-coverage gate: bridge/native observed for every backend family | `gate_summary.per_backend_family_coverage` |
 | 13 | Pairwise drift-cap gate: no pair exceeds fixture-declared cap thresholds | `gate_summary.pairwise_drift_caps_ok` |
 
+### 5.1.1 Compatibility-envelope gate mapping
+
+The parity envelope from `docs/engine_compatibility_spec.md` is enforced with
+the following release-gate mapping:
+
+| Envelope axis | Required result | Verification |
+|---|---|---|
+| Text parity | `length_mismatch == false` and `text_mismatches == 0` | `cargo test --test conformance_harness` |
+| Timestamp tolerance | `timestamp_violations == 0` under canonical 50ms tolerance (unless fixture override) | `cargo test --test conformance_harness` |
+| Speaker stability | Pairwise `speaker_mismatches` within fixture caps (`pair_drift_caps`) | `cargo test --test conformance_harness` |
+| Confidence comparability | All confidence values finite and in `[0,1]` (or `None`) | `cargo test --lib -- conformance::tests::rejects_confidence_` |
+| Replay determinism linkage | Replay envelope fields present and drift-comparable | `cargo test --test replay_envelope` |
+
+Native promotion claims must cite these concrete checks and their latest
+passing run.
+
 ### 5.2 Rollout Stages
 
 ```

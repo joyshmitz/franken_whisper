@@ -3400,6 +3400,49 @@ mod tests {
     }
 
     #[test]
+    fn failure_sequence_stream_has_monotonic_seq_and_timestamp_order() {
+        let (tx, rx) = mpsc::channel();
+        let mut log = EventLog::new(
+            "run-failure-monotonic".to_owned(),
+            "00000000000000000000000000000000".to_owned(),
+            Some(tx),
+        );
+        log.push(
+            "orchestration",
+            "orchestration.budgets",
+            "budgets applied",
+            json!({}),
+        );
+        log.push("ingest", "ingest.start", "begin", json!({}));
+        log.push(
+            "ingest",
+            "ingest.error",
+            "failed to materialize input",
+            json!({"error":"missing input"}),
+        );
+
+        let streamed = rx.try_iter().collect::<Vec<_>>();
+        let codes = streamed
+            .iter()
+            .map(|item| item.event.code.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            vec!["orchestration.budgets", "ingest.start", "ingest.error"]
+        );
+
+        for pair in streamed.windows(2) {
+            let prev = &pair[0].event;
+            let next = &pair[1].event;
+            assert!(next.seq > prev.seq, "event seq must be strictly increasing");
+            assert!(
+                next.ts_rfc3339 >= prev.ts_rfc3339,
+                "event timestamp must be non-decreasing"
+            );
+        }
+    }
+
+    #[test]
     fn run_pipeline_emits_ingest_error_stage_on_invalid_input() {
         let dir = tempdir().expect("tempdir should be available");
         let (tx, rx) = mpsc::channel();
@@ -3486,6 +3529,158 @@ mod tests {
         assert_eq!(
             payload["cancellation_evidence"]["reason"],
             "checkpoint deadline exceeded"
+        );
+    }
+
+    #[test]
+    fn streamed_event_order_matches_persisted_event_order_for_cancellation_sequence() {
+        let dir = tempdir().expect("tempdir should be available");
+        let db_path = dir.path().join("storage.sqlite3");
+        let store = RunStore::open(&db_path).expect("store should open");
+
+        let (tx, rx) = mpsc::channel();
+        let mut log = EventLog::new(
+            "run-ordered-cancel".to_owned(),
+            "00000000000000000000000000000000".to_owned(),
+            Some(tx),
+        );
+        log.push(
+            "orchestration",
+            "orchestration.budgets",
+            "stage budgets applied",
+            json!({}),
+        );
+        log.push(
+            "orchestration",
+            "orchestration.cancelled",
+            "pipeline cancelled by checkpoint policy",
+            json!({
+                "checkpoint": true,
+                "evidence_count": 1,
+                "cancellation_evidence": {"stage":"orchestration","reason":"checkpoint deadline exceeded"},
+            }),
+        );
+
+        let streamed = rx.try_iter().collect::<Vec<_>>();
+        let streamed_codes = streamed
+            .iter()
+            .map(|item| item.event.code.clone())
+            .collect::<Vec<_>>();
+        let streamed_seqs = streamed
+            .iter()
+            .map(|item| item.event.seq)
+            .collect::<Vec<_>>();
+
+        let report = RunReport {
+            run_id: "run-ordered-cancel".to_owned(),
+            trace_id: "00000000000000000000000000000000".to_owned(),
+            started_at_rfc3339: "2026-02-23T00:00:00Z".to_owned(),
+            finished_at_rfc3339: "2026-02-23T00:00:01Z".to_owned(),
+            input_path: "input.wav".to_owned(),
+            normalized_wav_path: String::new(),
+            request: TranscribeRequest {
+                input: InputSource::File {
+                    path: PathBuf::from("input.wav"),
+                },
+                backend: BackendKind::Auto,
+                model: None,
+                language: None,
+                translate: false,
+                diarize: false,
+                persist: true,
+                db_path: db_path.clone(),
+                timeout_ms: Some(0),
+                backend_params: BackendParams::default(),
+            },
+            result: TranscriptionResult {
+                backend: BackendKind::Auto,
+                transcript: String::new(),
+                language: None,
+                segments: vec![],
+                acceleration: None,
+                raw_output: json!({}),
+                artifact_paths: vec![],
+            },
+            events: log.events.clone(),
+            warnings: vec!["pipeline cancelled".to_owned()],
+            evidence: vec![],
+            replay: crate::model::ReplayEnvelope::default(),
+        };
+
+        store
+            .persist_report(&report)
+            .expect("report should persist successfully");
+        let loaded = store
+            .load_run_details("run-ordered-cancel")
+            .expect("load should succeed")
+            .expect("row should exist");
+
+        let persisted_codes = loaded
+            .events
+            .iter()
+            .map(|event| event.code.clone())
+            .collect::<Vec<_>>();
+        let persisted_seqs = loaded
+            .events
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            streamed_codes,
+            vec!["orchestration.budgets", "orchestration.cancelled"]
+        );
+        assert_eq!(streamed_codes, persisted_codes);
+        assert_eq!(streamed_seqs, persisted_seqs);
+    }
+
+    #[test]
+    fn checkpoint_cancellation_event_order_is_deterministic_across_runs() {
+        fn run_once(root: &std::path::Path, idx: usize) -> Vec<String> {
+            let (tx, rx) = mpsc::channel();
+            let request = TranscribeRequest {
+                input: InputSource::File {
+                    path: root.join(format!("cancel-input-{idx}.wav")),
+                },
+                backend: BackendKind::Auto,
+                model: None,
+                language: None,
+                translate: false,
+                diarize: false,
+                persist: false,
+                db_path: root.join(format!("cancel-{idx}.sqlite3")),
+                timeout_ms: Some(0),
+                backend_params: BackendParams::default(),
+            };
+
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("runtime build");
+            let result = runtime.block_on(run_pipeline(
+                request,
+                root,
+                Some(tx),
+                &PipelineConfig::default(),
+            ));
+            let error = result.expect_err("pipeline should cancel at checkpoint");
+            assert!(matches!(error, FwError::Cancelled(_)));
+
+            rx.try_iter()
+                .map(|item| item.event.code)
+                .collect::<Vec<String>>()
+        }
+
+        let dir = tempdir().expect("tempdir should be available");
+        let first = run_once(dir.path(), 1);
+        let second = run_once(dir.path(), 2);
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first,
+            vec![
+                "orchestration.budgets".to_owned(),
+                "orchestration.cancelled".to_owned()
+            ]
         );
     }
 

@@ -2,6 +2,10 @@
 
 Low-bandwidth audio transport over TTY/PTY links using NDJSON framing.
 
+Operator-focused replay/framing guarantees are documented separately in
+[`docs/tty-replay-guarantees.md`](tty-replay-guarantees.md). This protocol doc
+remains the wire-format source of truth.
+
 ---
 
 ## Version

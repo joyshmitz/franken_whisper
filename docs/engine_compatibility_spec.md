@@ -146,3 +146,60 @@ Routing recommendations remain rollout-gated:
 - `primary`, `sole`: allow adaptive recommended order.
 
 The selected rollout stage and static-order forcing status are emitted in routing evidence payloads.
+
+## 9. Compatibility Envelope (Release Gates)
+
+This section is the explicit parity envelope for cross-engine claims. A native
+engine is not considered parity-ready unless each axis below satisfies its
+release gate.
+
+### 9.1 Text parity target
+
+- Primary target: zero text drift on deterministic fixtures.
+- Gate condition:
+  - `length_mismatch == false`
+  - `text_mismatches == 0`
+- Enforcement: `compare_segments_with_tolerance()` and
+  `tests/conformance_harness.rs` fixture expectations.
+
+### 9.2 Timestamp tolerance target
+
+- Canonical tolerance: `<= 0.05s` per segment boundary
+  (`CANONICAL_TIMESTAMP_TOLERANCE_SEC`).
+- Gate condition:
+  - `timestamp_violations == 0` for canonical corpus fixtures that do not
+    declare looser fixture-specific tolerance.
+- Enforcement: `compare_segments_with_tolerance()` and
+  `tests/conformance_harness.rs`.
+
+### 9.3 Speaker-label stability target
+
+- Cross-engine identity remapping is allowed by default
+  (`require_speaker_exact = false`).
+- Same-engine regression tests may require exact speaker IDs
+  (`require_speaker_exact = true`).
+- Gate condition:
+  - cross-engine: `speaker_mismatches` must remain within fixture-declared
+    `pair_drift_caps.max_speaker_mismatches`.
+  - same-engine exact mode: `speaker_mismatches == 0`.
+- Enforcement: `tests/conformance_harness.rs` pairwise drift-cap checks.
+
+### 9.4 Confidence comparability target
+
+- Confidence is treated as a calibrated bounded signal, not an exact
+  cross-engine numeric match.
+- Gate condition:
+  - every populated confidence is finite and within `[0.0, 1.0]`;
+  - `None` confidence remains valid for engines that do not emit confidence.
+- Enforcement: `validate_segment_invariants()` and confidence-bound unit tests
+  in `src/conformance.rs`.
+
+### 9.5 Release-gate matrix
+
+| Envelope axis | Pass criteria | Enforcement artifact |
+|---|---|---|
+| Text parity | No length mismatch, zero text mismatches | `tests/conformance_harness.rs` |
+| Timestamp tolerance | Zero timestamp violations at canonical tolerance | `tests/conformance_harness.rs` |
+| Speaker stability | Within fixture pair drift caps (or zero in exact mode) | `tests/conformance_harness.rs` |
+| Confidence comparability | All confidences finite and within `[0,1]` | `src/conformance.rs` invariant/unit tests |
+| Replay determinism linkage | Replay metadata present and comparable for drift triage | `tests/replay_envelope.rs` + conformance harness replay checks |

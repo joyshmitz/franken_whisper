@@ -410,6 +410,8 @@ Simple (1 frame/round) -> Redundant (2 frames/round) -> Escalate (4 frames/round
 Each frame carries optional CRC32 and SHA-256 hashes of raw (pre-compression) audio bytes. Mismatches cause frame drops (skip_missing) or stream failure (fail_closed).
 
 See [`docs/tty-audio-protocol.md`](docs/tty-audio-protocol.md) for the full protocol specification.
+For operator replay/framing guarantees, see
+[`docs/tty-replay-guarantees.md`](docs/tty-replay-guarantees.md).
 
 ### `tui`
 
@@ -1084,6 +1086,7 @@ Please don't take this the wrong way, but I do not accept outside contributions 
 | Document | Description |
 |----------|-------------|
 | [`docs/tty-audio-protocol.md`](docs/tty-audio-protocol.md) | Complete TTY audio protocol specification |
+| [`docs/tty-replay-guarantees.md`](docs/tty-replay-guarantees.md) | Deterministic replay/framing guarantees for operators |
 | [`docs/native_engine_contract.md`](docs/native_engine_contract.md) | Native engine replacement interface contract |
 | [`docs/engine_compatibility_spec.md`](docs/engine_compatibility_spec.md) | 50ms timestamp tolerance specification |
 | [`docs/conformance-contract.md`](docs/conformance-contract.md) | Cross-engine conformance test contract |
