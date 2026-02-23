@@ -65,6 +65,11 @@ Procedure:
 - default reject
 - overwrite only with operator intent
 4. Re-run import with selected conflict policy.
+5. If error indicates child-row `UPDATE`/`DELETE` is unsupported:
+- stop in-place overwrite attempts,
+- create a fresh target DB,
+- import snapshot into that empty DB,
+- swap active DB pointer only after validation.
 
 ## Scenario D: Corrupted or Inaccessible DB
 
@@ -76,6 +81,20 @@ Procedure:
 2. Attempt recovery by replaying latest valid JSONL snapshot into fresh DB.
 3. Compare row counts + checksums against manifest.
 4. Switch active DB pointer only after validation.
+
+## Scenario F: Legacy Schema Migration Blocked
+
+Symptoms:
+- open/migration fails with legacy-schema message about unavailable automatic migration.
+
+Procedure:
+1. Preserve original DB as immutable evidence copy.
+2. Locate latest valid JSONL snapshot (`runs.jsonl`, `segments.jsonl`, `events.jsonl`, `manifest.json`).
+3. Create a fresh DB path.
+4. Import snapshot with reject policy:
+- `cargo run -- sync import-jsonl --input <snapshot_dir> --conflict-policy reject`
+5. Validate row counts/checksums and basic run queries.
+6. Switch active DB pointer only after successful validation.
 
 ## Scenario E: Backend Process Crash/Hang
 

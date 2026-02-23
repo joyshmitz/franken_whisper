@@ -62,8 +62,12 @@ Rules:
 3. Begin DB transaction.
 4. Replay JSONL in deterministic order (`runs`, `segments`, `events`).
 5. Apply conflict policy by stable keys (`reject` default, `overwrite` opt-in).
-6. Commit transaction.
-7. Release lock.
+6. Enforce overwrite safety constraints in current runtime:
+   - `runs` parent-row replacement is allowed.
+   - child-row `UPDATE`/`DELETE` on `segments`/`events` is fail-closed (import aborts with explicit error).
+   - strict replacement should target an empty DB (fresh restore/import), not in-place child mutation.
+7. Commit transaction.
+8. Release lock.
 
 ## Conflict Strategy
 
@@ -73,6 +77,10 @@ Rules:
 - same primary key + same payload: no-op.
 - same primary key + different payload: reject unless explicitly set to overwrite via
   `sync import-jsonl --conflict-policy overwrite`.
+- overwrite does **not** imply unrestricted in-place mutation:
+- if resolving a conflict requires child-row `UPDATE` (`segments`/`events` same key, different payload), import fails closed.
+- if strict replacement requires deleting stale child rows not present in import, import fails closed.
+- operator fallback for strict replacement: import snapshot into an empty target DB.
 - all conflicts logged to `sync_conflicts.jsonl`.
 
 ## Integrity

@@ -1297,19 +1297,19 @@
 - [ ] U2.8 Validate `ssi_serialization_correctness_ci_scale` and `ssi_serialization_correctness_single_writer_smoke` complete within practical envelope on this host.
 
 ### U3. `franken_whisper` architecture backlog from external feedback
-- [ ] U3.1 Add explicit compatibility-envelope doc section with crisp parity definitions:
+- [x] U3.1 Add explicit compatibility-envelope doc section with crisp parity definitions:
   - text parity target
   - timestamp tolerance bound(s)
   - diarization label stability envelope
   - confidence comparability semantics.
-- [ ] U3.2 Define release-gate criteria mapping envelope targets to pass/fail checks.
-- [ ] U3.3 Add/extend deterministic replay/event-order invariant tests covering:
+- [x] U3.2 Define release-gate criteria mapping envelope targets to pass/fail checks.
+- [x] U3.3 Add/extend deterministic replay/event-order invariant tests covering:
   - stage ordering monotonicity
   - event sequence determinism under failure path
   - event sequence determinism under cancellation path.
-- [ ] U3.4 Add or update robot schema contract assertions for any new/clarified event invariants.
-- [ ] U3.5 Add operator-facing protocol note for tty replay/framing guarantees and link it from README/docs index.
-- [ ] U3.6 Ensure added docs align with existing `docs/tty-audio-protocol.md` semantics (no contradictory claims).
+- [x] U3.4 Add or update robot schema contract assertions for any new/clarified event invariants.
+- [x] U3.5 Add operator-facing protocol note for tty replay/framing guarantees and link it from README/docs index.
+- [x] U3.6 Ensure added docs align with existing `docs/tty-audio-protocol.md` semantics (no contradictory claims).
 
 ### U4. Cross-repo quality gates and evidence capture
 - [x] U4.1 `frankensqlite`: re-run `cargo fmt --check`.
@@ -1317,7 +1317,7 @@
 - [x] U4.3 `frankensqlite`: re-run `cargo clippy --all-targets -- -D warnings`.
 - [~] U4.4 `frankensqlite`: drive `cargo test` to full completion or isolate concrete blockers with reproducible commands and logs.
 - [ ] U4.5 `frankensqlite`: after U1/U2 fixes, re-run mandatory test gates to verify blocker closure.
-- [ ] U4.6 `franken_whisper`: run mandatory gates after U3 edits (`fmt`, `check`, `clippy -D warnings`, `test`).
+- [x] U4.6 `franken_whisper`: run mandatory gates after U3 edits (`fmt`, `check`, `clippy -D warnings`, `test`).
 
 ### U5. Final reconciliation and handoff quality
 - [ ] U5.1 Mark all completed packet rows (`T`, `U`) with final statuses and evidence references.
@@ -1325,3 +1325,12 @@
 - [ ] U5.3 Summarize exact pass/fail quality-gate matrix by command.
 - [ ] U5.4 List residual risks and what remains blocked vs completed.
 - [ ] U5.5 Provide concrete next execution packets only for genuinely remaining work.
+
+### U-Live Notes (2026-02-23)
+- [x] Restored `RunStore` v2 migration behavior for legacy schemas with deterministic table-rebuild column migration and index recreation in `src/storage.rs`.
+- [x] Added deterministic event-order tests in `src/orchestrator.rs` and robot ordering-contract assertions in `tests/robot_contract_tests.rs`.
+- [x] Added compatibility-envelope/release-gate docs in `docs/engine_compatibility_spec.md` and `docs/native_engine_contract.md`.
+- [x] Added operator replay/framing note `docs/tty-replay-guarantees.md` and linked from `docs/tty-audio-protocol.md` + `README.md`.
+- [x] Reconciled stale test expectations in `src/backend/mod.rs` and `src/sync.rs` with current runtime contracts.
+- [x] Unblocked upstream path dependency compile break by patching `/data/projects/frankensqlite/crates/fsqlite-parser/src/parser.rs` (`err_here` -> `err_msg`) so `cargo test` can complete.
+- [x] Mandatory `franken_whisper` gates now pass on this host (`cargo fmt --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo test`).

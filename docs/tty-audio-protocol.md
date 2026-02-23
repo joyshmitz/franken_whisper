@@ -138,7 +138,7 @@ Sent by the decoder to signal flow control.
 
 ### Session Close
 
-Sent to signal session termination with a reason code (defined by `ControlFrameType::SessionClose`).
+Sent to signal session termination with a reason code (defined by `TtyControlFrame::SessionClose`).
 
 | Field           | Type     | Description                                         |
 |-----------------|----------|-----------------------------------------------------|
