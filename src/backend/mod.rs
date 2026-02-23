@@ -1675,6 +1675,14 @@ fn gate_recommended_order_for_rollout(
     }
 }
 
+fn routing_mode(adaptive_mode_active: bool, rollout_forced_static: bool) -> &'static str {
+    if adaptive_mode_active && !rollout_forced_static {
+        "adaptive"
+    } else {
+        "static"
+    }
+}
+
 fn auto_priority(diarize: bool) -> &'static [BackendKind] {
     if diarize {
         &[
@@ -2105,7 +2113,10 @@ pub fn evaluate_backend_selection(
     sorted_probs.sort_by(|a, b| b.total_cmp(a));
     let max_prob = sorted_probs.first().copied().unwrap_or(0.0);
     let second_prob = sorted_probs.get(1).copied().unwrap_or(0.0);
-    let calibration_score = rs_snapshot.as_ref().map(|rs| rs.calibration_score()).unwrap_or(0.5);
+    let calibration_score = rs_snapshot
+        .as_ref()
+        .map(|rs| rs.calibration_score())
+        .unwrap_or(0.5);
 
     let ts_ms = Utc::now().timestamp_millis() as u64;
     let decision_random = (uuid::Uuid::new_v4().as_u128()) & 0xFFFF_FFFF_FFFF_FFFF_FFFF;
@@ -2168,11 +2179,7 @@ pub fn evaluate_backend_selection(
     let brier_score = rs_snapshot.as_ref().and_then(|rs| rs.brier_score());
     let fallback_reason = rs_snapshot.as_ref().and_then(|rs| rs.fallback_reason());
 
-    let mode = if contract.adaptive_mode_active {
-        "adaptive"
-    } else {
-        "static"
-    };
+    let mode = routing_mode(contract.adaptive_mode_active, rollout_forced_static);
 
     let decision_id_str = outcome.audit_entry.decision_id.to_string();
 
@@ -8276,6 +8283,14 @@ mod tests {
             "Fallback+diarize should use diarize priority"
         );
         assert!(forced_f);
+    }
+
+    #[test]
+    fn routing_mode_forced_static_overrides_adaptive_mode() {
+        assert_eq!(super::routing_mode(true, false), "adaptive");
+        assert_eq!(super::routing_mode(false, false), "static");
+        assert_eq!(super::routing_mode(false, true), "static");
+        assert_eq!(super::routing_mode(true, true), "static");
     }
 
     #[test]

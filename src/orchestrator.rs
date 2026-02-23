@@ -343,6 +343,11 @@ impl PipelineCx {
     }
 
     pub(crate) fn checkpoint(&self) -> FwResult<()> {
+        if crate::cli::ShutdownController::is_shutting_down() {
+            return Err(FwError::Cancelled(
+                "pipeline cancelled via Ctrl+C".to_owned(),
+            ));
+        }
         if let Some(deadline) = self.deadline
             && Utc::now() >= deadline
         {
@@ -448,6 +453,11 @@ pub(crate) struct CancellationToken {
 
 impl CancellationToken {
     pub(crate) fn checkpoint(&self) -> FwResult<()> {
+        if crate::cli::ShutdownController::is_shutting_down() {
+            return Err(FwError::Cancelled(
+                "pipeline cancelled via Ctrl+C".to_owned(),
+            ));
+        }
         if let Some(deadline) = self.deadline
             && Utc::now() >= deadline
         {
@@ -614,7 +624,12 @@ impl FinalizerRegistry {
                         budget_ms = budget_ms,
                         "finalizer(bounded): executing custom cleanup"
                     );
-                    f();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        f();
+                        let _ = tx.send(());
+                    });
+                    let _ = rx.recv_timeout(budget);
                 }
             }
             let elapsed = start.elapsed();
@@ -1093,10 +1108,8 @@ where
     F: FnOnce() -> FwResult<T> + Send + 'static,
 {
     let wrapped = spawn_blocking(operation);
-    let timeout_fut = timeout(budget_duration(budget_ms), wrapped);
-    match timeout_fut.await {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => Err(error),
+    match timeout(wall_now(), budget_duration(budget_ms), wrapped).await {
+        Ok(result) => result,
         Err(_) => Err(FwError::StageTimeout {
             stage: stage.to_owned(),
             budget_ms,
@@ -1283,7 +1296,17 @@ async fn run_pipeline_body(
     let mut inter = PipelineIntermediate::new();
 
     for stage in pipeline_config.stages() {
-        if inter.vad_silence_only && matches!(stage, PipelineStage::Separate | PipelineStage::Backend | PipelineStage::Accelerate | PipelineStage::Align | PipelineStage::Punctuate | PipelineStage::Diarize) {
+        if inter.vad_silence_only
+            && matches!(
+                stage,
+                PipelineStage::Separate
+                    | PipelineStage::Backend
+                    | PipelineStage::Accelerate
+                    | PipelineStage::Align
+                    | PipelineStage::Punctuate
+                    | PipelineStage::Diarize
+            )
+        {
             continue;
         }
 

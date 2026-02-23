@@ -30,12 +30,37 @@ impl RunStore {
             fs::create_dir_all(parent)?;
         }
 
-        let connection = Connection::open(db_path.display().to_string())
-            .map_err(|error| FwError::Storage(error.to_string()))?;
-
-        let store = Self { connection };
-        store.initialize_schema()?;
-        Ok(store)
+        for attempt in 0..=PERSIST_BUSY_RETRY_ATTEMPTS {
+            let connection_result = Connection::open(db_path.display().to_string());
+            match connection_result {
+                Ok(connection) => {
+                    let store = Self { connection };
+                    match store.initialize_schema() {
+                        Ok(()) => return Ok(store),
+                        Err(error)
+                            if is_busy_storage_error(&error)
+                                && attempt < PERSIST_BUSY_RETRY_ATTEMPTS =>
+                        {
+                            let delay_ms = PERSIST_BUSY_BASE_BACKOFF_MS * (attempt as u64 + 1);
+                            std::thread::sleep(Duration::from_millis(delay_ms));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => {
+                    let fw_err = FwError::Storage(error.to_string());
+                    if is_busy_storage_error(&fw_err) && attempt < PERSIST_BUSY_RETRY_ATTEMPTS {
+                        let delay_ms = PERSIST_BUSY_BASE_BACKOFF_MS * (attempt as u64 + 1);
+                        std::thread::sleep(Duration::from_millis(delay_ms));
+                    } else {
+                        return Err(fw_err);
+                    }
+                }
+            }
+        }
+        Err(FwError::Storage(
+            "open retry loop exhausted unexpectedly".to_owned(),
+        ))
     }
 
     pub fn persist_report(&self, report: &RunReport) -> FwResult<()> {

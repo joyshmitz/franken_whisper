@@ -382,10 +382,10 @@ pub struct IncrementalExportManifest {
 
 const CURSOR_FILENAME: &str = "sync_cursor.json";
 
-/// Perform an incremental export: only records whose `finished_at` is
-/// strictly greater than the cursor timestamp are emitted.  When no cursor
-/// file exists inside `state_root`, all records are exported (equivalent to
-/// a full export) and a new cursor file is written.
+/// Perform an incremental export: only records whose `(finished_at, id)` tuple
+/// is strictly greater than the cursor position are emitted. When no cursor
+/// file exists inside `state_root`, all records are exported (equivalent to a
+/// full export) and a new cursor file is written.
 pub fn export_incremental(
     db_path: &Path,
     output_dir: &Path,
@@ -439,13 +439,14 @@ fn export_incremental_inner(
 
     // Determine the new cursor: the maximum `(finished_at, id)` tuple among
     // exported runs, or retain the prior cursor when nothing was exported.
-    let (new_cursor_ts, new_cursor_run_id) = match max_export_position(&connection, cursor_used.as_ref())? {
-        Some((ts, run_id)) => (ts, Some(run_id)),
-        None => cursor_used
-            .as_ref()
-            .map(|c| (c.last_export_rfc3339.clone(), c.last_export_run_id.clone()))
-            .unwrap_or_else(|| (Utc::now().to_rfc3339(), None)),
-    };
+    let (new_cursor_ts, new_cursor_run_id) =
+        match max_export_position(&connection, cursor_used.as_ref())? {
+            Some((ts, run_id)) => (ts, Some(run_id)),
+            None => cursor_used
+                .as_ref()
+                .map(|c| (c.last_export_rfc3339.clone(), c.last_export_run_id.clone()))
+                .unwrap_or_else(|| (Utc::now().to_rfc3339(), None)),
+        };
 
     let cursor_after = SyncCursor {
         last_export_rfc3339: new_cursor_ts,
@@ -503,20 +504,25 @@ fn save_cursor(path: &Path, cursor: &SyncCursor) -> FwResult<()> {
 fn export_table_runs_incremental(
     connection: &Connection,
     path: &Path,
-    after_ts: Option<&str>,
+    cursor: Option<&SyncCursor>,
 ) -> FwResult<u64> {
-    let (sql, params) = match after_ts {
-        Some(ts) => (
+    let (sql, params) = match cursor {
+        Some(c) => (
             "SELECT id, started_at, finished_at, backend, input_path, \
              normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json \
-             FROM runs WHERE finished_at > ?1 ORDER BY finished_at ASC"
+             FROM runs \
+             WHERE finished_at > ?1 OR (finished_at = ?1 AND id > ?2) \
+             ORDER BY finished_at ASC, id ASC"
                 .to_owned(),
-            vec![SqliteValue::Text(ts.to_owned())],
+            vec![
+                SqliteValue::Text(c.last_export_rfc3339.clone()),
+                SqliteValue::Text(c.last_export_run_id.clone().unwrap_or_default()),
+            ],
         ),
         None => (
             "SELECT id, started_at, finished_at, backend, input_path, \
              normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json \
-             FROM runs ORDER BY finished_at ASC"
+             FROM runs ORDER BY finished_at ASC, id ASC"
                 .to_owned(),
             vec![],
         ),
@@ -562,15 +568,21 @@ fn export_table_runs_incremental(
 /// segments and events to those runs.
 fn collect_exported_run_ids(
     connection: &Connection,
-    after_ts: Option<&str>,
+    cursor: Option<&SyncCursor>,
 ) -> FwResult<Vec<String>> {
-    let (sql, params) = match after_ts {
-        Some(ts) => (
-            "SELECT id FROM runs WHERE finished_at > ?1 ORDER BY finished_at ASC".to_owned(),
-            vec![SqliteValue::Text(ts.to_owned())],
+    let (sql, params) = match cursor {
+        Some(c) => (
+            "SELECT id FROM runs \
+             WHERE finished_at > ?1 OR (finished_at = ?1 AND id > ?2) \
+             ORDER BY finished_at ASC, id ASC"
+                .to_owned(),
+            vec![
+                SqliteValue::Text(c.last_export_rfc3339.clone()),
+                SqliteValue::Text(c.last_export_run_id.clone().unwrap_or_default()),
+            ],
         ),
         None => (
-            "SELECT id FROM runs ORDER BY finished_at ASC".to_owned(),
+            "SELECT id FROM runs ORDER BY finished_at ASC, id ASC".to_owned(),
             vec![],
         ),
     };
@@ -667,14 +679,28 @@ fn export_table_events_for_runs(
     Ok(count)
 }
 
-/// Find the maximum `finished_at` among runs matching the incremental filter.
-fn max_finished_at(connection: &Connection, after_ts: Option<&str>) -> FwResult<Option<String>> {
-    let (sql, params) = match after_ts {
-        Some(ts) => (
-            "SELECT MAX(finished_at) FROM runs WHERE finished_at > ?1".to_owned(),
-            vec![SqliteValue::Text(ts.to_owned())],
+/// Find the maximum `(finished_at, id)` tuple among runs matching the
+/// incremental filter.
+fn max_export_position(
+    connection: &Connection,
+    cursor: Option<&SyncCursor>,
+) -> FwResult<Option<(String, String)>> {
+    let (sql, params) = match cursor {
+        Some(c) => (
+            "SELECT finished_at, id FROM runs \
+             WHERE finished_at > ?1 OR (finished_at = ?1 AND id > ?2) \
+             ORDER BY finished_at DESC, id DESC LIMIT 1"
+                .to_owned(),
+            vec![
+                SqliteValue::Text(c.last_export_rfc3339.clone()),
+                SqliteValue::Text(c.last_export_run_id.clone().unwrap_or_default()),
+            ],
         ),
-        None => ("SELECT MAX(finished_at) FROM runs".to_owned(), vec![]),
+        None => (
+            "SELECT finished_at, id FROM runs ORDER BY finished_at DESC, id DESC LIMIT 1"
+                .to_owned(),
+            vec![],
+        ),
     };
 
     let rows = if params.is_empty() {
@@ -687,16 +713,16 @@ fn max_finished_at(connection: &Connection, after_ts: Option<&str>) -> FwResult<
             .map_err(|error| FwError::Storage(error.to_string()))?
     };
 
-    match rows.first() {
-        Some(row) => {
-            let value = value_to_string_sqlite(row.get(0));
-            if value.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(value))
-            }
-        }
-        None => Ok(None),
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+
+    let ts = value_to_string_sqlite(row.get(0));
+    let run_id = value_to_string_sqlite(row.get(1));
+    if ts.is_empty() || run_id.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some((ts, run_id)))
     }
 }
 
@@ -1295,6 +1321,9 @@ fn verify_schema_exists(connection: &Connection) -> FwResult<()> {
 // ---------------------------------------------------------------------------
 
 fn atomic_rename(from: &Path, to: &Path) -> FwResult<()> {
+    if to.exists() {
+        fs::remove_file(to)?;
+    }
     fs::rename(from, to)?;
     sync_parent_dir(to)?;
     Ok(())
@@ -1307,6 +1336,9 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> FwResult<()> {
         file.write_all(bytes)?;
         file.flush()?;
         file.sync_all()?;
+    }
+    if path.exists() {
+        fs::remove_file(path)?;
     }
     fs::rename(tmp, path)?;
     sync_parent_dir(path)?;
@@ -2916,6 +2948,20 @@ mod tests {
         assert!(!src.exists());
         assert!(dst.exists());
         assert_eq!(fs::read_to_string(&dst).expect("read"), "payload");
+    }
+
+    #[test]
+    fn atomic_rename_overwrites_existing_destination_file() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        fs::write(&src, b"new").expect("write src");
+        fs::write(&dst, b"old").expect("write dst");
+
+        atomic_rename(&src, &dst).expect("rename");
+
+        assert!(!src.exists(), "source should be moved");
+        assert_eq!(fs::read_to_string(&dst).expect("read"), "new");
     }
 
     #[test]
@@ -6735,11 +6781,22 @@ mod tests {
     fn sync_cursor_serde_round_trip() {
         let cursor = SyncCursor {
             last_export_rfc3339: "2026-06-15T12:00:00Z".to_owned(),
+            last_export_run_id: Some("run-42".to_owned()),
             last_run_count: 42,
         };
         let json = serde_json::to_string_pretty(&cursor).expect("serialize");
         let parsed: SyncCursor = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.last_export_rfc3339, "2026-06-15T12:00:00Z");
+        assert_eq!(parsed.last_export_run_id.as_deref(), Some("run-42"));
+        assert_eq!(parsed.last_run_count, 42);
+    }
+
+    #[test]
+    fn sync_cursor_deserializes_legacy_shape_without_run_id() {
+        let legacy = r#"{"last_export_rfc3339":"2026-06-15T12:00:00Z","last_run_count":42}"#;
+        let parsed: SyncCursor = serde_json::from_str(legacy).expect("deserialize legacy cursor");
+        assert_eq!(parsed.last_export_rfc3339, "2026-06-15T12:00:00Z");
+        assert!(parsed.last_export_run_id.is_none());
         assert_eq!(parsed.last_run_count, 42);
     }
 
@@ -6763,10 +6820,12 @@ mod tests {
             },
             cursor_used: Some(SyncCursor {
                 last_export_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+                last_export_run_id: Some("run-5".to_owned()),
                 last_run_count: 5,
             }),
             cursor_after: SyncCursor {
                 last_export_rfc3339: "2026-06-15T12:00:00Z".to_owned(),
+                last_export_run_id: Some("run-6".to_owned()),
                 last_run_count: 1,
             },
         };
@@ -6793,11 +6852,13 @@ mod tests {
         let path = dir.path().join("cursor_rt.json");
         let cursor = SyncCursor {
             last_export_rfc3339: "2026-03-15T08:30:00Z".to_owned(),
+            last_export_run_id: Some("run-7".to_owned()),
             last_run_count: 7,
         };
         save_cursor(&path, &cursor).expect("save");
         let loaded = load_cursor(&path).expect("load").expect("should exist");
         assert_eq!(loaded.last_export_rfc3339, "2026-03-15T08:30:00Z");
+        assert_eq!(loaded.last_export_run_id.as_deref(), Some("run-7"));
         assert_eq!(loaded.last_run_count, 7);
     }
 
@@ -6840,6 +6901,45 @@ mod tests {
         let export_dir_2 = dir.path().join("export2");
         let m2 = export_incremental(&db_path, &export_dir_2, &state_root).expect("export 2");
         assert_eq!(m2.row_counts.runs, 0);
+    }
+
+    #[test]
+    fn incremental_export_same_timestamp_new_run_after_cursor_is_exported() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("incr_same_ts_new.sqlite3");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store open");
+
+        let mut first = fixture_report("same-ts-a", &db_path);
+        first.finished_at_rfc3339 = "2026-01-01T00:00:05Z".to_owned();
+        store.persist_report(&first).expect("persist first");
+
+        let export_dir_1 = dir.path().join("export1");
+        let first_manifest =
+            export_incremental(&db_path, &export_dir_1, &state_root).expect("export 1");
+        assert_eq!(first_manifest.row_counts.runs, 1);
+
+        let mut second = fixture_report("same-ts-z", &db_path);
+        second.finished_at_rfc3339 = "2026-01-01T00:00:05Z".to_owned();
+        store.persist_report(&second).expect("persist second");
+
+        let export_dir_2 = dir.path().join("export2");
+        let second_manifest =
+            export_incremental(&db_path, &export_dir_2, &state_root).expect("export 2");
+
+        assert_eq!(
+            second_manifest.row_counts.runs, 1,
+            "new run with identical finished_at should still be exported"
+        );
+        let runs = fs::read_to_string(export_dir_2.join("runs.jsonl")).expect("read runs");
+        let lines: Vec<&str> = runs
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert_eq!(lines.len(), 1);
+        let row: serde_json::Value = serde_json::from_str(lines[0]).expect("parse");
+        assert_eq!(row["id"].as_str(), Some("same-ts-z"));
     }
 
     #[test]
@@ -6942,6 +7042,7 @@ mod tests {
 
         let cursor = SyncCursor {
             last_export_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            last_export_run_id: Some("run-a".to_owned()),
             last_run_count: 7,
         };
         save_cursor(&nested, &cursor).expect("save should create dirs");
@@ -6951,6 +7052,7 @@ mod tests {
             .expect("load")
             .expect("should have content");
         assert_eq!(loaded.last_export_rfc3339, "2026-01-01T00:00:00Z");
+        assert_eq!(loaded.last_export_run_id.as_deref(), Some("run-a"));
         assert_eq!(loaded.last_run_count, 7);
     }
 
