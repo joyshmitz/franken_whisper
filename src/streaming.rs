@@ -595,10 +595,8 @@ mod tests {
 
     #[test]
     fn event_seq_numbers_are_contiguous_across_windows() {
-        let mut pipeline = SpeculativeStreamingPipeline::new(
-            SpeculativeConfig::default(),
-            "test-seq".to_owned(),
-        );
+        let mut pipeline =
+            SpeculativeStreamingPipeline::new(SpeculativeConfig::default(), "test-seq".to_owned());
         // Process two windows.
         for i in 0..2 {
             let s = vec![seg("word", Some(0.0), Some(1.0), Some(0.9))];
@@ -610,7 +608,11 @@ mod tests {
                 .unwrap();
         }
         let events = pipeline.events();
-        assert!(events.len() >= 4, "expected at least 4 events, got {}", events.len());
+        assert!(
+            events.len() >= 4,
+            "expected at least 4 events, got {}",
+            events.len()
+        );
         // Verify seq values are 0, 1, 2, 3, ...
         for (idx, event) in events.iter().enumerate() {
             assert_eq!(event.seq, idx as u64, "event {idx} has wrong seq");
@@ -622,8 +624,7 @@ mod tests {
         let mut config = SpeculativeConfig::default();
         config.emit_events = false;
 
-        let mut pipeline =
-            SpeculativeStreamingPipeline::new(config, "test-no-events".to_owned());
+        let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-no-events".to_owned());
 
         let s = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
         let f = s.clone();
@@ -643,8 +644,7 @@ mod tests {
         let mut config = SpeculativeConfig::default();
         config.tolerance.always_correct = true; // force correction
 
-        let mut pipeline =
-            SpeculativeStreamingPipeline::new(config, "test-correct".to_owned());
+        let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-correct".to_owned());
 
         let fast = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
         let quality = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
@@ -670,10 +670,8 @@ mod tests {
 
     #[test]
     fn build_result_joins_segments_with_space() {
-        let mut pipeline = SpeculativeStreamingPipeline::new(
-            SpeculativeConfig::default(),
-            "test-join".to_owned(),
-        );
+        let mut pipeline =
+            SpeculativeStreamingPipeline::new(SpeculativeConfig::default(), "test-join".to_owned());
 
         let result = pipeline
             .process_duration_with_models_no_checkpoint(
@@ -686,7 +684,10 @@ mod tests {
             )
             .unwrap();
 
-        assert!(!result.transcript.is_empty(), "transcript should not be empty");
+        assert!(
+            !result.transcript.is_empty(),
+            "transcript should not be empty"
+        );
         assert!(!result.segments.is_empty(), "segments should not be empty");
         assert_eq!(result.language, Some("en".to_owned()));
         assert_eq!(result.backend, BackendKind::Auto);

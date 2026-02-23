@@ -164,6 +164,45 @@
 - [x] `cargo clippy --all-targets -- -D warnings`
 - [x] `cargo test`
 
+## T. Randomized Deep Audit Pass (2026-02-23)
+
+### T0. Execution Control
+- [x] Create granular audit checklist for this pass before code changes.
+- [~] Keep checklist updated after each material sub-task.
+- [ ] Reconcile checklist completion against concrete code/test evidence before handoff.
+
+### T1. Random Sampling + Flow Mapping
+- [x] Generate randomized source-file sample from `src/**/*.rs`.
+- [ ] Select representative audit targets across backend/orchestrator/storage/robot/TTY layers.
+- [ ] Map outbound dependencies (`use`/called modules) for each selected target.
+- [ ] Map inbound callsites (`rg` references) for each selected target.
+- [ ] Build per-target execution-flow notes (entrypoints, side effects, invariants).
+
+### T2. Fresh-Eyes Critical Review
+- [ ] Audit sampled target #1 for correctness and edge-case safety.
+- [ ] Audit sampled target #2 for correctness and edge-case safety.
+- [ ] Audit sampled target #3 for correctness and edge-case safety.
+- [ ] Audit sampled target #4 for correctness and edge-case safety.
+- [ ] Audit sampled target #5 for correctness and edge-case safety.
+- [ ] Trace adjacent imported/importing files for each discovered risk.
+
+### T3. Bug Confirmation + Fixes
+- [ ] Confirm each issue with direct code-path reasoning (and repro where applicable).
+- [ ] Implement deterministic, minimal fixes for confirmed defects only.
+- [ ] Avoid broad refactors not required for bug correction.
+- [ ] Preserve API contracts unless a bug requires contract correction.
+
+### T4. Test Reinforcement
+- [ ] Add/update unit tests covering each fixed bug path.
+- [ ] Add/update integration tests if bug spans module boundaries.
+- [ ] Ensure new assertions check invariant and failure behavior.
+
+### T5. Mandatory Quality Gates
+- [ ] `cargo fmt --check`
+- [ ] `cargo check --all-targets`
+- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `cargo test`
+
 ## Blockers / Assumptions / Deferred
 - [x] Blockers: none currently blocking implementation or validation.
 - [x] Assumption: backend binaries/tools (`whisper-cli`, `insanely-fast-whisper`, diarization python stack, ffmpeg) are available in runtime environments where those backends are selected.

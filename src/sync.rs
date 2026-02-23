@@ -341,8 +341,14 @@ fn export_table_events(connection: &Connection, path: &Path) -> FwResult<u64> {
 /// only emit records that appeared after the cursor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncCursor {
-    /// RFC-3339 timestamp of the last export (inclusive upper bound).
+    /// RFC-3339 `finished_at` timestamp of the last exported run.
     pub last_export_rfc3339: String,
+    /// Stable run-id tie-breaker for `last_export_rfc3339`.
+    ///
+    /// This allows incremental export to include runs that share the same
+    /// timestamp without re-exporting prior rows indefinitely.
+    #[serde(default)]
+    pub last_export_run_id: Option<String>,
     /// Number of runs exported in the last batch.
     pub last_run_count: u64,
 }
@@ -352,8 +358,8 @@ pub struct SyncCursor {
 pub enum ExportMode {
     /// Export every record in the database.
     Full,
-    /// Export only records whose `started_at` is strictly greater than the
-    /// cursor timestamp, or all records when no cursor exists.
+    /// Export only records whose `(finished_at, id)` tuple is strictly greater
+    /// than the cursor position, or all records when no cursor exists.
     Incremental,
 }
 
@@ -403,17 +409,14 @@ fn export_incremental_inner(
     let cursor_path = state_root.join(CURSOR_FILENAME);
     let cursor_used = load_cursor(&cursor_path)?;
 
-    // Build the WHERE clause.  When there is no prior cursor we export everything.
-    let after_ts = cursor_used.as_ref().map(|c| c.last_export_rfc3339.clone());
-
     // --- runs ---
     let runs_tmp = output_dir.join("runs.jsonl.tmp");
     let runs_final = output_dir.join("runs.jsonl");
-    let runs_count = export_table_runs_incremental(&connection, &runs_tmp, after_ts.as_deref())?;
+    let runs_count = export_table_runs_incremental(&connection, &runs_tmp, cursor_used.as_ref())?;
     atomic_rename(&runs_tmp, &runs_final)?;
 
     // Collect the run_ids that were exported so segments/events can be scoped.
-    let run_ids = collect_exported_run_ids(&connection, after_ts.as_deref())?;
+    let run_ids = collect_exported_run_ids(&connection, cursor_used.as_ref())?;
 
     // --- segments ---
     let segments_tmp = output_dir.join("segments.jsonl.tmp");
@@ -434,17 +437,19 @@ fn export_incremental_inner(
         events_jsonl_sha256: sha256_file(&events_final)?,
     };
 
-    // Determine the new cursor: the maximum finished_at of the exported runs,
-    // or the previous cursor if nothing was exported.
-    let new_cursor_ts = max_finished_at(&connection, after_ts.as_deref())?.unwrap_or_else(|| {
-        cursor_used
+    // Determine the new cursor: the maximum `(finished_at, id)` tuple among
+    // exported runs, or retain the prior cursor when nothing was exported.
+    let (new_cursor_ts, new_cursor_run_id) = match max_export_position(&connection, cursor_used.as_ref())? {
+        Some((ts, run_id)) => (ts, Some(run_id)),
+        None => cursor_used
             .as_ref()
-            .map(|c| c.last_export_rfc3339.clone())
-            .unwrap_or_else(|| Utc::now().to_rfc3339())
-    });
+            .map(|c| (c.last_export_rfc3339.clone(), c.last_export_run_id.clone()))
+            .unwrap_or_else(|| (Utc::now().to_rfc3339(), None)),
+    };
 
     let cursor_after = SyncCursor {
         last_export_rfc3339: new_cursor_ts,
+        last_export_run_id: new_cursor_run_id,
         last_run_count: runs_count,
     };
 
@@ -703,6 +708,7 @@ fn max_finished_at(connection: &Connection, after_ts: Option<&str>) -> FwResult<
 pub enum ConflictPolicy {
     Reject,
     Overwrite,
+    Skip,
 }
 
 #[derive(Debug)]
@@ -905,6 +911,10 @@ fn import_runs(
                     count += 1;
                     continue;
                 }
+                ConflictPolicy::Skip => {
+                    count += 1;
+                    continue;
+                }
                 ConflictPolicy::Overwrite => {
                     // Cascade-delete associated segments and events before
                     // removing the run to prevent orphaned rows.
@@ -1023,6 +1033,10 @@ fn import_segments(
                     count += 1;
                     continue;
                 }
+                ConflictPolicy::Skip => {
+                    count += 1;
+                    continue;
+                }
                 ConflictPolicy::Overwrite => {
                     connection
                         .execute_with_params(
@@ -1110,6 +1124,10 @@ fn import_events(
                         key: key.clone(),
                         reason: "duplicate composite key".to_owned(),
                     });
+                    count += 1;
+                    continue;
+                }
+                ConflictPolicy::Skip => {
                     count += 1;
                     continue;
                 }
@@ -4404,8 +4422,7 @@ mod tests {
         let runs_path = export_dir.join("runs.jsonl");
         let content = fs::read_to_string(&runs_path).expect("read");
         let first_line = content.lines().next().expect("has line");
-        let mut mutated: serde_json::Value =
-            serde_json::from_str(first_line).expect("valid run");
+        let mut mutated: serde_json::Value = serde_json::from_str(first_line).expect("valid run");
         mutated["transcript"] = json!("cascade-overwritten");
         fs::write(
             &runs_path,
@@ -7978,7 +7995,10 @@ mod tests {
 
         // First release.
         lock.release_inner().unwrap();
-        assert!(!dir.path().join("sync.lock").exists(), "lock file should be removed");
+        assert!(
+            !dir.path().join("sync.lock").exists(),
+            "lock file should be removed"
+        );
 
         // Second release — hits the `if self.released { return Ok(()) }` guard.
         lock.release_inner().unwrap();

@@ -649,13 +649,11 @@ mod tests {
         .expect("run should succeed");
 
         assert_eq!(
-            result.raw_output["telemetry"]["batch_size_effective"],
-            1,
+            result.raw_output["telemetry"]["batch_size_effective"], 1,
             "batch_size 0 should be coerced to 1 via .max(1)"
         );
         assert_eq!(
-            result.raw_output["telemetry"]["batch_size_requested"],
-            0,
+            result.raw_output["telemetry"]["batch_size_requested"], 0,
             "original requested value should be recorded as 0"
         );
     }

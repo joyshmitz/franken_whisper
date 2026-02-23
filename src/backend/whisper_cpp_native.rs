@@ -632,7 +632,10 @@ mod tests {
     #[test]
     fn to_transcription_segments_empty_input_returns_empty() {
         let result = to_transcription_segments(&[], None).unwrap();
-        assert!(result.is_empty(), "empty pilot segments should produce empty output");
+        assert!(
+            result.is_empty(),
+            "empty pilot segments should produce empty output"
+        );
     }
 
     #[test]
@@ -703,18 +706,13 @@ mod tests {
         std::fs::write(&wav, &header).unwrap();
 
         let req = native_request();
-        let result = run(
-            &req,
-            &wav,
-            tmp.path(),
-            Duration::from_secs(5),
-            None,
-        )
-        .expect("silence run should succeed");
+        let result = run(&req, &wav, tmp.path(), Duration::from_secs(5), None)
+            .expect("silence run should succeed");
 
         // Silence should produce an empty or minimal transcript.
         assert!(
-            result.segments.is_empty() || result.transcript.is_empty()
+            result.segments.is_empty()
+                || result.transcript.is_empty()
                 || result.transcript.trim().is_empty(),
             "silence should produce empty/minimal transcript, got: {:?}",
             result.transcript

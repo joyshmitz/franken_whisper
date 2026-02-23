@@ -131,6 +131,13 @@ pub enum TtyControlFrame {
         model_id: String,
         drift_wer: f64,
     },
+    /// Session close with a reason code.
+    #[serde(rename = "session_close")]
+    SessionClose {
+        reason: SessionCloseReason,
+        /// The highest data-frame sequence number that was sent before close.
+        last_data_seq: Option<u64>,
+    },
 }
 
 /// Negotiate protocol version from a handshake frame.
@@ -306,12 +313,16 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
     reader: &mut R,
     policy: DecodeRecoveryPolicy,
 ) -> FwResult<(DecodeReport, Vec<u8>)> {
-    let frames = parse_audio_frames_for_decode(reader)?;
+    let mut frames = parse_audio_frames_for_decode(reader)?;
     if frames.is_empty() {
         return Err(FwError::InvalidRequest(
             "no tty-audio frames were provided on stdin".to_owned(),
         ));
     }
+
+    // Sort frames by sequence number so that retransmitted and out-of-order frames
+    // are placed in their correct chronological position before decoding.
+    frames.sort_by_key(|f| f.seq);
 
     let mut gaps = Vec::new();
     let mut duplicates = Vec::new();
@@ -591,9 +602,8 @@ fn parse_audio_frames_for_decode<R: Read>(reader: &mut R) -> FwResult<Vec<TtyAud
                         ));
                     }
                     if handshake_seen {
-                        return Err(FwError::InvalidRequest(
-                            "duplicate tty-audio handshake frame".to_owned(),
-                        ));
+                        // Allow duplicate handshakes for FEC redundancy.
+                        continue;
                     }
 
                     let negotiated = negotiate_version(
@@ -641,7 +651,8 @@ fn parse_audio_frames_for_decode<R: Read>(reader: &mut R) -> FwResult<Vec<TtyAud
                 | TtyControlFrame::Backpressure { .. }
                 | TtyControlFrame::TranscriptPartial { .. }
                 | TtyControlFrame::TranscriptRetract { .. }
-                | TtyControlFrame::TranscriptCorrect { .. } => {
+                | TtyControlFrame::TranscriptCorrect { .. }
+                | TtyControlFrame::SessionClose { .. } => {
                     if !handshake_seen && !audio_started {
                         return Err(FwError::InvalidRequest(
                             "tty-audio control frame received before handshake".to_owned(),
@@ -1059,8 +1070,11 @@ impl TtyAudioPipelineAdapter {
             ));
         }
 
+        let mut sorted_frames = frames.to_vec();
+        sorted_frames.sort_by_key(|f| f.seq);
+
         let mut count: u64 = 0;
-        for frame in frames {
+        for frame in &sorted_frames {
             let compressed = STANDARD_NO_PAD
                 .decode(&frame.payload_b64)
                 .map_err(|e| FwError::InvalidRequest(format!("invalid base64 payload: {e}")))?;
@@ -1294,26 +1308,13 @@ pub enum SessionCloseReason {
     PeerRequested,
 }
 
-/// Control frame type for session management, extending `TtyControlFrame`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "frame_type")]
-pub enum ControlFrameType {
-    /// Session close with a reason code.
-    #[serde(rename = "session_close")]
-    SessionClose {
-        reason: SessionCloseReason,
-        /// The highest data-frame sequence number that was sent before close.
-        last_data_seq: Option<u64>,
-    },
-}
-
 /// Emit a `session_close` control frame to the given writer.
 pub fn emit_session_close<W: Write>(
     writer: &mut W,
     reason: SessionCloseReason,
     last_data_seq: Option<u64>,
 ) -> FwResult<()> {
-    let frame = ControlFrameType::SessionClose {
+    let frame = TtyControlFrame::SessionClose {
         reason,
         last_data_seq,
     };
@@ -1327,10 +1328,10 @@ pub fn emit_session_close<W: Write>(
 /// returns `Ok(())` if they are consistent, or an error otherwise.
 pub fn validate_session_close(
     observed_last_seq: Option<u64>,
-    close_frame: &ControlFrameType,
+    close_frame: &TtyControlFrame,
 ) -> FwResult<()> {
     match close_frame {
-        ControlFrameType::SessionClose {
+        TtyControlFrame::SessionClose {
             last_data_seq,
             reason: _,
         } => {
@@ -1340,7 +1341,7 @@ pub fn validate_session_close(
                         "session_close last_data_seq mismatch: observed {observed}, claimed {claimed}"
                     )));
                 }
-                (None, Some(claimed)) if *claimed > 0 => {
+                (None, Some(claimed)) => {
                     return Err(FwError::InvalidRequest(format!(
                         "session_close claims last_data_seq={claimed} but no data frames were observed"
                     )));

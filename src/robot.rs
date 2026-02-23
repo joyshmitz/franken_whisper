@@ -37,6 +37,7 @@ pub const RUN_COMPLETE_REQUIRED_FIELDS: &[&str] = &[
     "acceleration",
     "warnings",
     "evidence",
+    "replay",
 ];
 pub const BACKENDS_DISCOVERY_REQUIRED_FIELDS: &[&str] = &["event", "schema_version", "backends"];
 
@@ -663,6 +664,7 @@ pub fn robot_schema_value() -> serde_json::Value {
                     "acceleration": {"backend": "none", "normalized_confidences": true},
                     "warnings": [],
                     "evidence": [],
+                    "replay": {},
                 }),
             },
             "run_error": {
@@ -874,6 +876,7 @@ fn run_complete_value(report: &RunReport) -> serde_json::Value {
         "acceleration": report.result.acceleration,
         "warnings": report.warnings,
         "evidence": report.evidence,
+        "replay": report.replay,
     })
 }
 

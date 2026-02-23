@@ -1911,10 +1911,10 @@ impl BackendSelectionContract {
                 if action_idx >= action_backends.len() {
                     // fallback_error: correct when nothing available, wasteful otherwise.
                     values.push(match state_idx {
-                        0 => 100.0,
-                        1 => 50.0,
+                        0 => 1000.0,
+                        1 => 500.0,
                         2 => 5.0,
-                        _ => 100.0,
+                        _ => 1000.0,
                     });
                 } else {
                     let backend = action_backends[action_idx];
@@ -2101,13 +2101,11 @@ pub fn evaluate_backend_selection(
     contract.update_posterior(&mut posterior, observed_state);
 
     let probs = posterior.probs();
-    let max_prob = probs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let second_prob = probs
-        .iter()
-        .copied()
-        .filter(|&p| p < max_prob - 1e-12)
-        .fold(0.0, f64::max);
-    let calibration_score = (max_prob - second_prob).clamp(0.0, 1.0);
+    let mut sorted_probs = probs.to_vec();
+    sorted_probs.sort_by(|a, b| b.total_cmp(a));
+    let max_prob = sorted_probs.first().copied().unwrap_or(0.0);
+    let second_prob = sorted_probs.get(1).copied().unwrap_or(0.0);
+    let calibration_score = rs_snapshot.as_ref().map(|rs| rs.calibration_score()).unwrap_or(0.5);
 
     let ts_ms = Utc::now().timestamp_millis() as u64;
     let decision_random = (uuid::Uuid::new_v4().as_u128()) & 0xFFFF_FFFF_FFFF_FFFF_FFFF;
@@ -2383,8 +2381,8 @@ pub fn extract_segments_from_json(root: &Value) -> Vec<TranscriptionSegment> {
     if let Some(items) = root.get("chunks").and_then(Value::as_array) {
         // Word-level timestamps: chunks may contain nested "words" arrays.
         let has_words = items
-            .first()
-            .is_some_and(|item| item.get("words").and_then(Value::as_array).is_some());
+            .iter()
+            .any(|item| item.get("words").and_then(Value::as_array).is_some());
         if has_words {
             return extract_word_level_segments(items);
         }
@@ -8187,5 +8185,154 @@ mod tests {
         );
         let bs = cal_bad.brier_score().unwrap();
         assert!((bs - 1.0).abs() < 1e-9, "Brier should be 1.0, got {bs}");
+    }
+
+    #[test]
+    fn router_state_fallback_reason_brier_score_branch() {
+        // Exercises the Branch 3 path of fallback_reason(): sufficient data,
+        // accuracy above threshold, but Brier score above threshold.
+        let mut state = RouterState::new();
+        // Record enough outcomes and correct predictions so has_sufficient_data
+        // is true and calibration_score >= ADAPTIVE_FALLBACK_CALIBRATION_THRESHOLD.
+        for _ in 0..ADAPTIVE_MIN_SAMPLES {
+            state.record_outcome(make_outcome(BackendKind::WhisperCpp, true, 100));
+            state.record_prediction_outcome(true); // 100% accuracy
+        }
+        // Poison the Brier calibration with maximally wrong predictions:
+        // predict 0.0 but outcome is true → Brier = 1.0 >> 0.35 threshold.
+        for _ in 0..ADAPTIVE_MIN_SAMPLES {
+            state.record_calibration_observation(0.0, true);
+        }
+        assert!(state.has_sufficient_data(), "should have sufficient data");
+        assert!(
+            state.calibration_score() >= ADAPTIVE_FALLBACK_CALIBRATION_THRESHOLD,
+            "accuracy should be above threshold"
+        );
+        let reason = state.fallback_reason().unwrap();
+        assert!(
+            reason.contains("brier_score_above_threshold"),
+            "expected Brier fallback, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn calibration_state_record_clamps_out_of_range_probability() {
+        let mut cal = CalibrationState::new(10);
+        // Below range: -0.5 should clamp to 0.0; outcome=true → Brier = (0.0 - 1.0)^2 = 1.0
+        cal.record(-0.5, true);
+        let bs = cal.brier_score().unwrap();
+        assert!(
+            (bs - 1.0).abs() < 1e-9,
+            "negative prob should clamp to 0.0, Brier should be 1.0, got {bs}"
+        );
+
+        let mut cal2 = CalibrationState::new(10);
+        // Above range: 1.5 should clamp to 1.0; outcome=false → Brier = (1.0 - 0.0)^2 = 1.0
+        cal2.record(1.5, false);
+        let bs2 = cal2.brier_score().unwrap();
+        assert!(
+            (bs2 - 1.0).abs() < 1e-9,
+            "excess prob should clamp to 1.0, Brier should be 1.0, got {bs2}"
+        );
+    }
+
+    #[test]
+    fn gate_recommended_order_diarize_true_shadow_returns_diarize_priority() {
+        use crate::conformance::NativeEngineRolloutStage;
+        // diarize=true through Shadow/Validated/Fallback should return the
+        // diarize-specific priority order (InsanelyFast first).
+        let custom_order = vec![BackendKind::WhisperCpp];
+        let expected = auto_priority(true).to_vec();
+
+        let (order, forced) = super::gate_recommended_order_for_rollout(
+            true,
+            custom_order.clone(),
+            NativeEngineRolloutStage::Shadow,
+        );
+        assert_eq!(
+            order, expected,
+            "Shadow+diarize should use diarize priority"
+        );
+        assert!(forced);
+
+        let (order_v, forced_v) = super::gate_recommended_order_for_rollout(
+            true,
+            custom_order.clone(),
+            NativeEngineRolloutStage::Validated,
+        );
+        assert_eq!(
+            order_v, expected,
+            "Validated+diarize should use diarize priority"
+        );
+        assert!(forced_v);
+
+        let (order_f, forced_f) = super::gate_recommended_order_for_rollout(
+            true,
+            custom_order,
+            NativeEngineRolloutStage::Fallback,
+        );
+        assert_eq!(
+            order_f, expected,
+            "Fallback+diarize should use diarize priority"
+        );
+        assert!(forced_f);
+    }
+
+    #[test]
+    fn routing_evidence_ledger_empty_diagnostics_zero_division_safe() {
+        let ledger = RoutingEvidenceLedger::new(10);
+        let diag = ledger.diagnostics();
+        assert_eq!(diag["total_entries"], 0);
+        assert_eq!(diag["fallback_count"], 0);
+        // Division guards should produce 0.0 instead of NaN/panic.
+        let fallback_rate = diag["fallback_rate"].as_f64().unwrap();
+        assert!(
+            (fallback_rate - 0.0).abs() < 1e-9,
+            "fallback_rate should be 0.0"
+        );
+        let success_rate = diag["resolved_success_rate"].as_f64().unwrap();
+        assert!(
+            (success_rate - 0.0).abs() < 1e-9,
+            "resolved_success_rate should be 0.0"
+        );
+        assert!(
+            diag["avg_brier_score"].is_null(),
+            "avg_brier_score should be null when empty"
+        );
+    }
+
+    #[test]
+    fn two_lane_executor_speculative_correct_always_picks_secondary() {
+        let executor = TwoLaneExecutor::new(QualitySelector::SpeculativeCorrect);
+        let result = executor.execute(
+            || {
+                // Primary returns high-confidence segments.
+                vec![TranscriptSegment {
+                    text: "primary".to_owned(),
+                    start: 0.0,
+                    end: 1.0,
+                    confidence: Some(0.99),
+                    speaker: None,
+                }]
+            },
+            || {
+                // Secondary returns lower-confidence segments.
+                vec![TranscriptSegment {
+                    text: "secondary".to_owned(),
+                    start: 0.0,
+                    end: 1.0,
+                    confidence: Some(0.50),
+                    speaker: None,
+                }]
+            },
+        );
+        // SpeculativeCorrect unconditionally picks secondary.
+        assert_eq!(result.selected, "secondary");
+        assert!(
+            result.selection_reason.contains("speculative-correct"),
+            "reason should mention speculative-correct, got: {}",
+            result.selection_reason
+        );
+        assert_eq!(result.secondary_result[0].text, "secondary");
     }
 }

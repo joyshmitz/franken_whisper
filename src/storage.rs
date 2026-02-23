@@ -5412,14 +5412,8 @@ mod tests {
     #[test]
     fn value_to_string_negative_float() {
         use super::value_to_string;
-        assert_eq!(
-            value_to_string(Some(&SqliteValue::Float(-1.5))),
-            "-1.5"
-        );
-        assert_eq!(
-            value_to_string(Some(&SqliteValue::Float(-0.001))),
-            "-0.001"
-        );
+        assert_eq!(value_to_string(Some(&SqliteValue::Float(-1.5))), "-1.5");
+        assert_eq!(value_to_string(Some(&SqliteValue::Float(-0.001))), "-0.001");
         // Verify it parses back correctly.
         let s = value_to_string(Some(&SqliteValue::Float(-99.99)));
         let parsed: f64 = s.parse().expect("should parse back to f64");
@@ -5483,8 +5477,14 @@ mod tests {
         let diag = store.diagnostics().expect("diagnostics should succeed");
         assert!(diag.page_count >= 0, "page_count should be non-negative");
         assert!(diag.page_size > 0, "page_size should be positive");
-        assert_eq!(diag.freelist_count, 0, "fresh db should have no freelist pages");
-        assert_eq!(diag.integrity_check, "ok", "fresh db should pass integrity check");
+        assert_eq!(
+            diag.freelist_count, 0,
+            "fresh db should have no freelist pages"
+        );
+        assert_eq!(
+            diag.integrity_check, "ok",
+            "fresh db should pass integrity check"
+        );
         // WAL mode check.
         assert!(
             diag.journal_mode == "wal" || diag.journal_mode == "delete",

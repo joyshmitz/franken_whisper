@@ -1093,8 +1093,10 @@ where
     F: FnOnce() -> FwResult<T> + Send + 'static,
 {
     let wrapped = spawn_blocking(operation);
-    match timeout(wall_now(), budget_duration(budget_ms), wrapped).await {
-        Ok(result) => result,
+    let timeout_fut = timeout(budget_duration(budget_ms), wrapped);
+    match timeout_fut.await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(error),
         Err(_) => Err(FwError::StageTimeout {
             stage: stage.to_owned(),
             budget_ms,
@@ -1281,12 +1283,22 @@ async fn run_pipeline_body(
     let mut inter = PipelineIntermediate::new();
 
     for stage in pipeline_config.stages() {
+        if inter.vad_silence_only && matches!(stage, PipelineStage::Separate | PipelineStage::Backend | PipelineStage::Accelerate | PipelineStage::Align | PipelineStage::Punctuate | PipelineStage::Diarize) {
+            continue;
+        }
+
         match stage {
             PipelineStage::Ingest => {
                 execute_ingest(pcx, log, request, run_tmp_dir, stage_budgets, &mut inter).await?;
             }
             PipelineStage::Normalize => {
                 execute_normalize(pcx, log, stage_budgets, run_tmp_dir, &mut inter).await?;
+            }
+            PipelineStage::Vad => {
+                execute_vad(pcx, log, stage_budgets, &mut inter).await?;
+            }
+            PipelineStage::Separate => {
+                execute_separate(pcx, log, stage_budgets, &mut inter).await?;
             }
             // NOTE: When speculative mode is active (TranscribeArgs.speculative),
             // the caller should use SpeculativeStreamingPipeline instead of this
@@ -1310,11 +1322,11 @@ async fn run_pipeline_body(
             PipelineStage::Align => {
                 execute_align(pcx, log, stage_budgets, &mut inter).await?;
             }
-            PipelineStage::Vad
-            | PipelineStage::Separate
-            | PipelineStage::Punctuate
-            | PipelineStage::Diarize => {
-                // Placeholder stages (bd-qla.1/2/4/5) — not yet implemented.
+            PipelineStage::Punctuate => {
+                execute_punctuate(pcx, log, stage_budgets, &mut inter).await?;
+            }
+            PipelineStage::Diarize => {
+                execute_diarize(pcx, log, stage_budgets, &mut inter).await?;
             }
             PipelineStage::Persist => {
                 // Persist is handled specially during report assembly below.
@@ -2007,6 +2019,7 @@ fn ctc_forced_align(
         if start_drift > config.max_drift_sec || end_drift > config.max_drift_sec {
             // Drift exceeds tolerance -- keep original timestamps.
             fallback += 1;
+            cursor = orig_end.unwrap_or(aligned_end).max(aligned_end);
             continue;
         }
 
@@ -2018,6 +2031,7 @@ fn ctc_forced_align(
                  below minimum {:.3}s; falling back",
                 config.min_segment_duration_sec
             ));
+            cursor = orig_end.unwrap_or(aligned_end).max(aligned_end);
             continue;
         }
 
@@ -8359,7 +8373,10 @@ mod tests {
         assert_eq!(report.segments_total, 3);
         assert_eq!(report.segments_modified, 0);
         assert!(
-            report.notes.iter().any(|n| n.contains("no segments required punctuation changes")),
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("no segments required punctuation changes")),
             "expected 'no changes' note, got: {:?}",
             report.notes
         );
@@ -8385,10 +8402,7 @@ mod tests {
         // uncancel() → new token passes again.
         pcx.uncancel();
         let token3 = pcx.cancellation_token();
-        assert!(
-            token3.checkpoint().is_ok(),
-            "should pass after uncancel"
-        );
+        assert!(token3.checkpoint().is_ok(), "should pass after uncancel");
     }
 
     #[test]
@@ -8425,7 +8439,10 @@ mod tests {
             "voice_ratio {:.3} should be below min_voice_ratio 0.50",
             report.voice_ratio
         );
-        assert!(!report.regions.is_empty(), "should still have a voiced region");
+        assert!(
+            !report.regions.is_empty(),
+            "should still have a voiced region"
+        );
     }
 
     #[test]
