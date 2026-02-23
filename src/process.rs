@@ -61,8 +61,12 @@ pub fn run_command_with_timeout(
 
         loop {
             if let Some(status) = child.try_wait()? {
-                let stdout = stdout_rx.recv().unwrap_or_default();
-                let stderr = stderr_rx.recv().unwrap_or_default();
+                let stdout = stdout_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .unwrap_or_default();
+                let stderr = stderr_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .unwrap_or_default();
                 return validate_command_output(
                     &rendered,
                     Output {
@@ -76,7 +80,9 @@ pub fn run_command_with_timeout(
             if started_at.elapsed() >= limit {
                 let _ = child.kill();
                 let _ = child.wait();
-                let stderr = stderr_rx.recv().unwrap_or_default();
+                let stderr = stderr_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .unwrap_or_default();
                 let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
                 return Err(FwError::from_command_timeout(
                     rendered,
@@ -146,8 +152,12 @@ pub(crate) fn run_command_cancellable(
 
     loop {
         if let Some(status) = child.try_wait()? {
-            let stdout = stdout_rx.recv().unwrap_or_default();
-            let stderr = stderr_rx.recv().unwrap_or_default();
+            let stdout = stdout_rx
+                .recv_timeout(Duration::from_millis(100))
+                .unwrap_or_default();
+            let stderr = stderr_rx
+                .recv_timeout(Duration::from_millis(100))
+                .unwrap_or_default();
             return validate_command_output(
                 &rendered,
                 Output {
@@ -171,7 +181,9 @@ pub(crate) fn run_command_cancellable(
         {
             let _ = child.kill();
             let _ = child.wait();
-            let stderr = stderr_rx.recv().unwrap_or_default();
+            let stderr = stderr_rx
+                .recv_timeout(Duration::from_millis(100))
+                .unwrap_or_default();
             let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
             return Err(FwError::from_command_timeout(
                 rendered,

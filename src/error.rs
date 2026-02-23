@@ -869,4 +869,85 @@ mod tests {
             "special chars preserved: {text}"
         );
     }
+
+    #[test]
+    fn from_command_failure_empty_command_string_still_displays() {
+        let err = FwError::from_command_failure(String::new(), 127, "not found".to_owned());
+        let text = err.to_string();
+        assert!(text.contains("status: 127"), "status present: {text}");
+        assert!(text.contains("stderr: not found"), "stderr present: {text}");
+        assert_eq!(err.error_code(), "FW-CMD-FAILED");
+    }
+
+    #[test]
+    fn from_command_timeout_zero_timeout_displays() {
+        let err = FwError::from_command_timeout("fast".to_owned(), 0, String::new());
+        let text = err.to_string();
+        assert!(text.contains("0ms"), "zero timeout shown: {text}");
+        assert!(text.contains("fast"), "command shown: {text}");
+        assert_eq!(err.error_code(), "FW-CMD-TIMEOUT");
+    }
+
+    #[test]
+    fn missing_artifact_empty_path() {
+        let err = FwError::MissingArtifact(std::path::PathBuf::new());
+        let text = err.to_string();
+        assert!(
+            text.contains("missing expected artifact"),
+            "prefix present: {text}"
+        );
+        assert_eq!(err.error_code(), "FW-MISSING-ARTIFACT");
+    }
+
+    #[test]
+    fn stage_timeout_empty_stage_string() {
+        let err = FwError::StageTimeout {
+            stage: String::new(),
+            budget_ms: u64::MAX,
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains(&u64::MAX.to_string()),
+            "large budget displayed: {text}"
+        );
+        assert_eq!(err.robot_error_code(), "FW-ROBOT-TIMEOUT");
+    }
+
+    #[test]
+    fn source_returns_none_for_all_struct_variants() {
+        use std::error::Error;
+
+        let variants: Vec<FwError> = vec![
+            FwError::CommandMissing {
+                command: "x".to_owned(),
+            },
+            FwError::CommandFailed {
+                command: "x".to_owned(),
+                status: 1,
+                stderr_suffix: String::new(),
+            },
+            FwError::CommandTimedOut {
+                command: "x".to_owned(),
+                timeout_ms: 1,
+                stderr_suffix: String::new(),
+            },
+            FwError::BackendUnavailable("x".to_owned()),
+            FwError::InvalidRequest("x".to_owned()),
+            FwError::Unsupported("x".to_owned()),
+            FwError::MissingArtifact(std::path::PathBuf::from("x")),
+            FwError::Cancelled("x".to_owned()),
+            FwError::StageTimeout {
+                stage: "x".to_owned(),
+                budget_ms: 1,
+            },
+        ];
+
+        for variant in &variants {
+            assert!(
+                variant.source().is_none(),
+                "{:?} should have no chained source",
+                variant
+            );
+        }
+    }
 }

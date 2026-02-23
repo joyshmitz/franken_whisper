@@ -4400,4 +4400,101 @@ mod tests {
             super::jit_cache_key(&spec_different_label)
         );
     }
+
+    // -- bd-247: accelerate.rs edge-case tests pass 2 --
+
+    #[test]
+    fn apply_with_token_cancelled_returns_none_backend() {
+        use crate::orchestrator::CancellationToken;
+        use std::time::Duration;
+
+        let mut result = TranscriptionResult {
+            backend: BackendKind::WhisperCpp,
+            transcript: "hello".to_owned(),
+            language: Some("en".to_owned()),
+            segments: vec![TranscriptionSegment {
+                start_sec: Some(0.0),
+                end_sec: Some(1.0),
+                text: "hello".to_owned(),
+                confidence: Some(0.8),
+                speaker: None,
+            }],
+            acceleration: None,
+            raw_output: json!({}),
+            artifact_paths: vec![],
+        };
+        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(5));
+        let report = super::apply_with_token(&mut result, Some(&token));
+        assert_eq!(report.backend, AccelerationBackend::None);
+        assert_eq!(report.input_values, 0);
+        assert!(!report.normalized_confidences);
+        assert!(report.notes[0].contains("cancelled"));
+        // Side effect: result.acceleration should be set.
+        assert!(result.acceleration.is_some());
+    }
+
+    #[test]
+    fn normalize_cpu_single_value_at_epsilon_boundary() {
+        // f64::EPSILON ≈ 2.22e-16, which is > 0.0 and finite, so it passes the filter.
+        // But safe_sum = f64::EPSILON ≈ 2.22e-16 <= f64::EPSILON, so uniform branch fires.
+        let result = super::normalize_cpu(&[f64::EPSILON]);
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0] - 1.0).abs() < 1e-9,
+            "single epsilon value should produce uniform [1.0], got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn layer_norm_cpu_zero_epsilon_constant_input_produces_nan() {
+        // All values identical + epsilon=0 → variance=0, std_dev=0, division by zero → NaN.
+        let values = vec![5.0, 5.0, 5.0];
+        let gamma = vec![1.0, 1.0, 1.0];
+        let beta = vec![0.0, 0.0, 0.0];
+        let result = super::layer_norm_cpu(&values, &gamma, &beta, 0.0);
+        assert!(!result.gpu_accelerated);
+        // With zero epsilon and constant input, (v - mean) / 0.0 = NaN or 0/0 = NaN.
+        for v in &result.normalized {
+            assert!(v.is_nan(), "expected NaN from zero-epsilon constant input, got {v}");
+        }
+    }
+
+    #[test]
+    fn benchmark_attention_d_model_exceeds_seq_len() {
+        let mut harness = super::BenchmarkHarness::new();
+        let result = harness.benchmark_attention(16, 128);
+        assert!(
+            result.operation.contains("seq_len=16"),
+            "operation should mention seq_len=16, got: {}",
+            result.operation
+        );
+        assert!(
+            result.operation.contains("d_model=128"),
+            "operation should mention d_model=128, got: {}",
+            result.operation
+        );
+        assert!(result.cpu_time_us > 0 || result.cpu_time_us == 0); // just exercises the path
+    }
+
+    #[test]
+    fn benchmark_report_with_gpu_result_omits_gpu_unavailable_note() {
+        let mut harness = super::BenchmarkHarness::new();
+        // Manually insert a result that simulates GPU availability.
+        harness.results.push(super::BenchmarkResult {
+            operation: "softmax(n=64)".to_owned(),
+            cpu_time_us: 100,
+            gpu_time_us: Some(50),
+            speedup_ratio: 2.0,
+            recommendation: super::AccelRecommendation::UseGpu,
+        });
+        let report = harness.report();
+        for note in &report.notes {
+            assert!(
+                !note.contains("GPU backend not available"),
+                "report with GPU results should not include GPU-unavailable note"
+            );
+        }
+    }
 }

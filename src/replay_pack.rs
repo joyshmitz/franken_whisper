@@ -106,6 +106,13 @@ fn rollout_stage_from_report(report: &RunReport) -> String {
         .iter()
         .find(|event| event.code == "backend.routing.decision_contract")
         .and_then(|event| event.payload.get("native_rollout_stage"))
+        .or_else(|| {
+            report
+                .events
+                .iter()
+                .find(|event| event.code == "backend.ok")
+                .and_then(|event| event.payload.get("native_rollout_stage"))
+        })
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| NativeEngineRolloutStage::Primary.as_str().to_owned())

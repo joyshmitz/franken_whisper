@@ -3671,4 +3671,67 @@ mod tests {
             assert!(total >= 1_048_576, "total memory should be >= 1 MiB");
         }
     }
+
+    // -- bd-251: robot.rs edge-case tests --
+
+    #[test]
+    fn parse_meminfo_kb_suffix_only_returns_none() {
+        use super::parse_meminfo_kb;
+        // " kB" → strip suffix → "" → parse fails → None
+        assert_eq!(parse_meminfo_kb(" kB"), None);
+        // "kB" → strip suffix → "" → parse fails → None
+        assert_eq!(parse_meminfo_kb("kB"), None);
+    }
+
+    #[test]
+    fn parse_meminfo_kb_valid_with_and_without_suffix() {
+        use super::parse_meminfo_kb;
+        // Normal case with kB suffix.
+        assert_eq!(parse_meminfo_kb("16384 kB"), Some(16384 * 1024));
+        // No suffix.
+        assert_eq!(parse_meminfo_kb("8192"), Some(8192 * 1024));
+        // Whitespace only → None.
+        assert_eq!(parse_meminfo_kb("   "), None);
+    }
+
+    #[test]
+    fn check_database_nonexistent_parent_reports_issue() {
+        use std::path::Path;
+        let dep = super::check_database(Path::new("/nonexistent_xyzzy_dir/test.db"));
+        assert!(!dep.available, "should be unavailable for nonexistent parent");
+        assert!(
+            !dep.issues.is_empty(),
+            "should have issues for nonexistent parent"
+        );
+        assert!(
+            dep.issues[0].contains("parent directory does not exist"),
+            "issue should mention parent directory"
+        );
+    }
+
+    #[test]
+    fn check_database_current_dir_is_available() {
+        use std::path::Path;
+        let dep = super::check_database(Path::new("test.db"));
+        // Parent is "" which maps to current dir — should be available.
+        assert!(
+            dep.available,
+            "database in current directory should be available"
+        );
+        assert!(dep.issues.is_empty(), "should have no issues");
+    }
+
+    #[test]
+    fn check_ffmpeg_result_has_correct_name() {
+        let dep = super::check_ffmpeg();
+        assert_eq!(dep.name, "ffmpeg");
+        if dep.available {
+            assert!(dep.path.is_some(), "path should be Some when available");
+            assert!(dep.issues.is_empty(), "no issues when available");
+        } else {
+            assert!(dep.path.is_none(), "path should be None when unavailable");
+            assert!(!dep.issues.is_empty(), "issues when unavailable");
+            assert!(dep.issues[0].contains("not found"));
+        }
+    }
 }

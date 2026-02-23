@@ -2331,4 +2331,98 @@ mod tests {
         assert!(sep.enabled);
         assert_eq!(sep.shifts, Some(2));
     }
+
+    #[test]
+    fn speaker_constraints_zero_values_round_trip() {
+        let sc = SpeakerConstraints {
+            num_speakers: Some(0),
+            min_speakers: Some(0),
+            max_speakers: Some(0),
+        };
+        let json = serde_json::to_string(&sc).unwrap();
+        let parsed: SpeakerConstraints = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.num_speakers, Some(0));
+        assert_eq!(parsed.min_speakers, Some(0));
+        assert_eq!(parsed.max_speakers, Some(0));
+    }
+
+    #[test]
+    fn transcribe_request_stdin_full_round_trip() {
+        let request = TranscribeRequest {
+            input: InputSource::Stdin {
+                hint_extension: Some("mp3".to_owned()),
+            },
+            backend: BackendKind::WhisperDiarization,
+            model: None,
+            language: None,
+            translate: false,
+            diarize: true,
+            persist: false,
+            db_path: PathBuf::from("/tmp/test.sqlite3"),
+            timeout_ms: Some(60_000),
+            backend_params: BackendParams {
+                batch_size: Some(8),
+                ..BackendParams::default()
+            },
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: TranscribeRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed.input,
+            InputSource::Stdin {
+                hint_extension: Some(ref ext)
+            } if ext == "mp3"
+        ));
+        assert_eq!(parsed.backend, BackendKind::WhisperDiarization);
+        assert!(parsed.diarize);
+        assert_eq!(parsed.timeout_ms, Some(60_000));
+        assert_eq!(parsed.backend_params.batch_size, Some(8));
+    }
+
+    #[test]
+    fn punctuation_config_enabled_without_model_round_trip() {
+        let pc = PunctuationConfig {
+            enabled: true,
+            model: None,
+        };
+        let json = serde_json::to_string(&pc).unwrap();
+        let parsed: PunctuationConfig = serde_json::from_str(&json).unwrap();
+        assert!(parsed.enabled);
+        assert!(parsed.model.is_none());
+    }
+
+    #[test]
+    fn source_separation_overlap_boundary_values_round_trip() {
+        for overlap in [0.0_f32, 1.0_f32] {
+            let sc = SourceSeparationConfig {
+                enabled: true,
+                model: None,
+                shifts: None,
+                overlap: Some(overlap),
+            };
+            let json = serde_json::to_string(&sc).unwrap();
+            let parsed: SourceSeparationConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.overlap, Some(overlap), "overlap={overlap}");
+        }
+    }
+
+    #[test]
+    fn run_report_diverse_evidence_entries_round_trip() {
+        let mut report = make_test_run_report();
+        report.evidence = vec![
+            json!(null),
+            json!("plain string evidence"),
+            json!(42),
+            json!({"nested": {"key": [1, 2, 3]}}),
+            json!([true, false, null]),
+        ];
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: RunReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.evidence.len(), 5);
+        assert!(parsed.evidence[0].is_null());
+        assert_eq!(parsed.evidence[1], "plain string evidence");
+        assert_eq!(parsed.evidence[2], 42);
+        assert_eq!(parsed.evidence[3]["nested"]["key"][1], 2);
+        assert_eq!(parsed.evidence[4][0], true);
+    }
 }

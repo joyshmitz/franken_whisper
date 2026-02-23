@@ -8705,4 +8705,248 @@ mod tests {
             "no stage profiles should exist for terminal-only events"
         );
     }
+
+    // -- bd-250: orchestrator.rs edge-case tests --
+
+    #[test]
+    fn acceleration_fence_payload_tripped_when_expired() {
+        let mut pcx = PipelineCx::new(Some(1)); // 1ms timeout
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // Force cancellation.
+        pcx.cancel_now();
+        let payload = acceleration_cancellation_fence_payload(&pcx);
+        assert_eq!(payload["status"], "tripped");
+        assert!(payload["error"].is_string(), "should have error string");
+        assert!(
+            !payload["error_code"].is_null(),
+            "should have error_code"
+        );
+    }
+
+    #[test]
+    fn recommended_budget_tiny_budget_max_guard() {
+        // service=1, budget=1 → utilization=1.0 ≥ 0.90
+        // uplift = ceil(1 * 1.25) = 2, budget+1 = 2 → max(2, 2) = 2
+        let (budget, action, _reason, utilization) = recommended_budget(1, 1);
+        assert_eq!(action, "increase_budget");
+        assert!((utilization - 1.0).abs() < f64::EPSILON);
+        assert_eq!(budget, 2, "should select max(uplift=2, budget+1=2) = 2");
+    }
+
+    #[test]
+    fn pipeline_cx_cancel_uncancel_with_original_deadline() {
+        let mut pcx = PipelineCx::new(Some(60_000));
+        // Should be fine — 60 second deadline is in the future.
+        assert!(pcx.checkpoint().is_ok());
+        // Force cancel.
+        pcx.cancel_now();
+        assert!(pcx.checkpoint().is_err(), "should be cancelled");
+        // Uncancel — should clear deadline entirely.
+        pcx.uncancel();
+        assert!(
+            pcx.checkpoint().is_ok(),
+            "should pass after uncancel even though original deadline existed"
+        );
+    }
+
+    #[test]
+    fn cancellation_token_with_no_deadline_always_passes() {
+        let pcx = PipelineCx::new(None);
+        let token = pcx.cancellation_token();
+        // Should pass many times.
+        for _ in 0..100 {
+            assert!(token.checkpoint().is_ok());
+        }
+    }
+
+    #[test]
+    fn stage_latency_profile_external_process_total_ms_is_normalize_plus_backend() {
+        // Create events for normalize and backend stages.
+        let events = vec![
+            RunEvent {
+                seq: 0,
+                ts_rfc3339: "2026-01-01T00:00:00.000Z".to_owned(),
+                stage: "normalize".to_owned(),
+                code: "normalize.start".to_owned(),
+                message: "start".to_owned(),
+                payload: json!({}),
+            },
+            RunEvent {
+                seq: 1,
+                ts_rfc3339: "2026-01-01T00:00:00.370Z".to_owned(),
+                stage: "normalize".to_owned(),
+                code: "normalize.complete".to_owned(),
+                message: "done".to_owned(),
+                payload: json!({"elapsed_ms": 370}),
+            },
+            RunEvent {
+                seq: 2,
+                ts_rfc3339: "2026-01-01T00:00:00.400Z".to_owned(),
+                stage: "backend".to_owned(),
+                code: "backend.start".to_owned(),
+                message: "start".to_owned(),
+                payload: json!({}),
+            },
+            RunEvent {
+                seq: 3,
+                ts_rfc3339: "2026-01-01T00:00:01.490Z".to_owned(),
+                stage: "backend".to_owned(),
+                code: "backend.complete".to_owned(),
+                message: "done".to_owned(),
+                payload: json!({"elapsed_ms": 1090}),
+            },
+        ];
+        let budgets = StageBudgetPolicy {
+            ingest_ms: 1_000,
+            normalize_ms: 1_000,
+            probe_ms: 1_000,
+            vad_ms: 1_000,
+            separate_ms: 1_000,
+            backend_ms: 5_000,
+            acceleration_ms: 1_000,
+            align_ms: 1_000,
+            punctuate_ms: 1_000,
+            diarize_ms: 1_000,
+            persist_ms: 1_000,
+            cleanup_budget_ms: 1_000,
+        };
+        let profile = stage_latency_profile(&events, budgets);
+        let ext_total = profile["summary"]["external_process_total_ms"]
+            .as_u64()
+            .expect("should have external_process_total_ms");
+        assert_eq!(
+            ext_total,
+            370 + 1090,
+            "external_process_total_ms should be normalize + backend service_ms"
+        );
+    }
+
+    // ── Task #313 — orchestrator edge-case tests pass 7 ──────────────────
+
+    #[test]
+    fn finalizer_process_via_run_all_does_not_panic() {
+        // Finalizer::Process(pid) arm in run_all() is exercised here.
+        // Use a PID that almost certainly does not exist so the kill is a
+        // harmless no-op (best-effort, errors ignored).
+        let mut registry = FinalizerRegistry::new();
+        registry.register("bogus_proc", Finalizer::Process(u32::MAX));
+        assert_eq!(registry.len(), 1);
+        registry.run_all(); // should not panic
+        assert_eq!(registry.len(), 0, "Process finalizer should drain the entry");
+    }
+
+    #[test]
+    fn finalizer_process_via_run_all_bounded_does_not_panic() {
+        // Same as above but through the bounded path.
+        let mut registry = FinalizerRegistry::new();
+        registry.register("bogus_proc_bounded", Finalizer::Process(u32::MAX));
+        assert_eq!(registry.len(), 1);
+        registry.run_all_bounded(5_000);
+        assert_eq!(registry.len(), 0, "Process finalizer should drain the entry");
+    }
+
+    #[test]
+    fn run_all_bounded_slow_custom_exceeds_budget_continues_to_next() {
+        // A slow Custom finalizer sleeps longer than the budget, triggering
+        // the "exceeded cleanup budget" warning (line 636).  Verify the
+        // *next* finalizer still executes despite the budget breach.
+        use std::sync::{Arc, Mutex};
+
+        let second_ran = Arc::new(Mutex::new(false));
+        let second_ran_clone = Arc::clone(&second_ran);
+
+        let mut registry = FinalizerRegistry::new();
+
+        // Register the slow one first (runs second due to LIFO).
+        registry.register(
+            "slow",
+            Finalizer::Custom(Box::new(|| {
+                std::thread::sleep(Duration::from_millis(150));
+            })),
+        );
+
+        // This finalizer runs first (LIFO) — it records that it ran.
+        // Wait, LIFO means last-registered runs first.  We want slow to
+        // run first, so register it second (so it pops first).
+        // Actually: entries.pop() pops the LAST element → LIFO.
+        // So register "marker" first, "slow" second → slow runs first,
+        // then marker.  But we want to prove the marker *after* the slow
+        // one still runs.  So register them the other way:
+        //   - Register slow first  (index 0)
+        //   - Register marker second (index 1) → pops first
+        //
+        // Actually the test is: slow finalizer exceeds budget but the
+        // *next* finalizer still runs.  So we want:
+        //   pop order: marker (index 1) → slow (index 0)
+        // That doesn't trigger exceeded budget before marker.  Instead:
+        //   Register marker first (index 0), slow second (index 1)
+        //   pop order: slow (index 1) → marker (index 0)
+        // slow runs, exceeds budget → warning → continues → marker runs.
+        // That's what we want.
+
+        // Reset: re-create from scratch.
+        let mut registry = FinalizerRegistry::new();
+
+        // Index 0: marker (will execute second, after slow).
+        registry.register(
+            "marker",
+            Finalizer::Custom(Box::new(move || {
+                *second_ran_clone.lock().unwrap() = true;
+            })),
+        );
+
+        // Index 1: slow (pops first, exceeds budget).
+        registry.register(
+            "slow",
+            Finalizer::Custom(Box::new(|| {
+                std::thread::sleep(Duration::from_millis(150));
+            })),
+        );
+
+        assert_eq!(registry.len(), 2);
+
+        // Budget of 10ms — the slow finalizer (150ms) will exceed this.
+        registry.run_all_bounded(10);
+
+        assert_eq!(registry.len(), 0);
+        assert!(
+            *second_ran.lock().unwrap(),
+            "marker finalizer must still run even after slow one exceeds budget"
+        );
+    }
+
+    #[test]
+    fn run_all_bounded_empty_registry_does_not_panic() {
+        let mut registry = FinalizerRegistry::new();
+        assert_eq!(registry.len(), 0);
+        registry.run_all_bounded(1_000);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn punctuate_segments_capitalizes_after_question_mark_mid_text() {
+        // Rule 3 in punctuate_segments capitalizes after sentence-ending
+        // punctuation.  Existing tests cover period (`.`), but not `?`
+        // within a segment.  Verify `? w` → `? W`.
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![make_segment(0.0, 3.0, "is it done? well maybe")];
+        let report = punctuate_segments(&mut segments, &token).unwrap();
+        assert_eq!(report.segments_modified, 1);
+        assert!(
+            segments[0].text.contains("? Well"),
+            "should capitalize 'w' after '?', got: {}",
+            segments[0].text
+        );
+        // Also verify first-char cap and trailing period from rules 1 & 2.
+        assert!(
+            segments[0].text.starts_with("Is"),
+            "first char should be capitalized, got: {}",
+            segments[0].text
+        );
+        assert!(
+            segments[0].text.ends_with('.'),
+            "should add trailing period, got: {}",
+            segments[0].text
+        );
+    }
 }
