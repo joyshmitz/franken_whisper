@@ -242,7 +242,7 @@ fn export_table_runs(connection: &Connection, path: &Path) -> FwResult<u64> {
     let rows = connection
         .query(
             "SELECT id, started_at, finished_at, backend, input_path, \
-             normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json \
+             normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json, acceleration_json \
              FROM runs ORDER BY started_at ASC",
         )
         .map_err(|error| FwError::Storage(error.to_string()))?;
@@ -263,6 +263,7 @@ fn export_table_runs(connection: &Connection, path: &Path) -> FwResult<u64> {
             "warnings_json": value_to_json(row.get(8)),
             "transcript": value_to_json(row.get(9)),
             "replay_json": value_to_json(row.get(10)),
+            "acceleration_json": value_to_json(row.get(11)),
         });
         writeln!(file, "{}", serde_json::to_string(&obj)?)?;
         count += 1;
@@ -509,7 +510,7 @@ fn export_table_runs_incremental(
     let (sql, params) = match cursor {
         Some(c) => (
             "SELECT id, started_at, finished_at, backend, input_path, \
-             normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json \
+             normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json, acceleration_json \
              FROM runs \
              WHERE finished_at > ?1 OR (finished_at = ?1 AND id > ?2) \
              ORDER BY finished_at ASC, id ASC"
@@ -521,7 +522,7 @@ fn export_table_runs_incremental(
         ),
         None => (
             "SELECT id, started_at, finished_at, backend, input_path, \
-             normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json \
+             normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json, acceleration_json \
              FROM runs ORDER BY finished_at ASC, id ASC"
                 .to_owned(),
             vec![],
@@ -554,6 +555,7 @@ fn export_table_runs_incremental(
             "warnings_json": value_to_json(row.get(8)),
             "transcript": value_to_json(row.get(9)),
             "replay_json": value_to_json(row.get(10)),
+            "acceleration_json": value_to_json(row.get(11)),
         });
         writeln!(file, "{}", serde_json::to_string(&obj)?)?;
         count += 1;
@@ -930,7 +932,7 @@ fn import_runs(
         // Check for existing row
         let existing = connection
             .query_with_params(
-                "SELECT id, started_at, finished_at, backend, input_path, normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json FROM runs WHERE id = ?1",
+                "SELECT id, started_at, finished_at, backend, input_path, normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json, acceleration_json FROM runs WHERE id = ?1",
                 &[SqliteValue::Text(id.clone())],
             )
             .map_err(|error| FwError::Storage(format!("query runs existing `{id}` failed: {error}")))?;
@@ -950,7 +952,9 @@ fn import_runs(
                 && value_to_string_sqlite(existing_row.get(8)) == json_str(&row, "warnings_json")?
                 && value_to_string_sqlite(existing_row.get(9)) == json_str(&row, "transcript")?
                 && value_to_string_sqlite(existing_row.get(10))
-                    == json_string_or_default(&row, "replay_json", "{}");
+                    == json_string_or_default(&row, "replay_json", "{}")
+                && value_to_string_sqlite(existing_row.get(11))
+                    == json_string_or_default(&row, "acceleration_json", "{}");
 
             if identical {
                 count += 1;
@@ -972,8 +976,8 @@ fn import_runs(
                     continue;
                 }
                 ConflictPolicy::Overwrite => {
-                    let existing_segment_idxs =
-                        query_segment_idxs_for_run(connection, &id).map_err(|error| {
+                    let existing_segment_idxs = query_segment_idxs_for_run(connection, &id)
+                        .map_err(|error| {
                             FwError::Storage(format!(
                                 "overwrite capture segments `{id}` failed: {error}"
                             ))
@@ -1033,8 +1037,8 @@ fn import_runs(
         connection
             .execute_with_params(
                 "INSERT INTO runs (id, started_at, finished_at, backend, input_path, \
-                 normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json, acceleration_json) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 &[
                     SqliteValue::Text(id.clone()),
                     SqliteValue::Text(json_str(&row, "started_at")?),
@@ -1047,6 +1051,7 @@ fn import_runs(
                     SqliteValue::Text(json_str(&row, "warnings_json")?),
                     SqliteValue::Text(json_str(&row, "transcript")?),
                     SqliteValue::Text(json_string_or_default(&row, "replay_json", "{}")),
+                    SqliteValue::Text(json_string_or_default(&row, "acceleration_json", "{}")),
                 ],
             )
             .map_err(|error| FwError::Storage(format!("insert runs `{id}` failed: {error}")))?;
@@ -1941,7 +1946,7 @@ pub fn validate_sync(db_path: &Path, jsonl_dir: &Path) -> FwResult<SyncValidatio
             .query_with_params(
                 "SELECT id, started_at, finished_at, backend, input_path, \
                  normalized_wav_path, request_json, result_json, warnings_json, \
-                 transcript FROM runs WHERE id = ?1",
+                 transcript, replay_json, acceleration_json FROM runs WHERE id = ?1",
                 &[SqliteValue::Text((*id).clone())],
             )
             .map_err(|error| FwError::Storage(error.to_string()))?;
@@ -1956,7 +1961,11 @@ pub fn validate_sync(db_path: &Path, jsonl_dir: &Path) -> FwResult<SyncValidatio
                 && value_to_string_sqlite(db_row.get(3))
                     == json_str_or_empty(jsonl_value, "backend")
                 && value_to_string_sqlite(db_row.get(9))
-                    == json_str_or_empty(jsonl_value, "transcript");
+                    == json_str_or_empty(jsonl_value, "transcript")
+                && value_to_string_sqlite(db_row.get(10))
+                    == json_string_or_default(jsonl_value, "replay_json", "{}")
+                && value_to_string_sqlite(db_row.get(11))
+                    == json_string_or_default(jsonl_value, "acceleration_json", "{}");
             if !matches {
                 mismatched_records.push((*id).clone());
             }
@@ -4847,9 +4856,9 @@ mod tests {
     }
 
     #[test]
-    fn overwrite_run_preserves_segments_and_events_in_compat_mode() {
-        // When a run is overwritten, its old segments and events must be
-        // cascade-deleted to prevent orphaned rows in the database.
+    fn overwrite_run_with_missing_children_fails_closed() {
+        // Overwrite imports that remove existing child rows must fail closed in
+        // this runtime because child-row DELETE/UPDATE are intentionally blocked.
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("source.sqlite3");
         let export_dir = dir.path().join("export");
@@ -4870,9 +4879,8 @@ mod tests {
         )
         .expect("first import");
 
-        // Now mutate the transcript in runs.jsonl (creating a conflict) and
-        // clear the segments/events (no segments/events in new import). In
-        // compatibility mode, existing child rows are preserved.
+        // Mutate the run transcript and clear segments/events from the import.
+        // This requires deleting stale child rows in target DB.
         let runs_path = export_dir.join("runs.jsonl");
         let content = fs::read_to_string(&runs_path).expect("read");
         let first_line = content.lines().next().expect("has line");
@@ -4912,59 +4920,19 @@ mod tests {
         )
         .expect("write manifest");
 
-        // Second import with Overwrite.
-        import(
+        // Second overwrite import should fail closed with explicit guidance.
+        let error = import(
             &target_db,
             &export_dir,
             &state_root,
             ConflictPolicy::Overwrite,
         )
-        .expect("overwrite import");
-
-        // Compatibility fallback: child rows are preserved.
-        let conn = Connection::open(target_db.display().to_string()).expect("open");
-        let seg_count_after = conn
-            .query_with_params(
-                "SELECT COUNT(*) FROM segments WHERE run_id = ?1",
-                &[SqliteValue::Text("cascade-1".to_owned())],
-            )
-            .expect("query segments after");
-
-        let seg_after = match seg_count_after[0].get(0) {
-            Some(SqliteValue::Integer(n)) => *n,
-            _ => panic!("expected integer count"),
-        };
-
-        assert_eq!(
-            seg_after, 2,
-            "segments should be preserved in fallback mode"
+        .expect_err("overwrite import should fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("child-row DELETE is unsupported"),
+            "should explain fail-closed overwrite behavior: {message}"
         );
-
-        // Compatibility fallback: child rows are preserved.
-        let evt_count_after = conn
-            .query_with_params(
-                "SELECT COUNT(*) FROM events WHERE run_id = ?1",
-                &[SqliteValue::Text("cascade-1".to_owned())],
-            )
-            .expect("query events after");
-
-        let evt_after = match evt_count_after[0].get(0) {
-            Some(SqliteValue::Integer(n)) => *n,
-            _ => panic!("expected integer count"),
-        };
-
-        assert_eq!(evt_after, 2, "events should be preserved in fallback mode");
-
-        // Verify the run itself was overwritten.
-        let run_rows = conn
-            .query_with_params(
-                "SELECT transcript FROM runs WHERE id = ?1",
-                &[SqliteValue::Text("cascade-1".to_owned())],
-            )
-            .expect("query run");
-        assert!(!run_rows.is_empty(), "run should exist after overwrite");
-        let transcript = value_to_string_sqlite(run_rows[0].get(0));
-        assert_eq!(transcript, "cascade-overwritten");
     }
 
     #[test]
@@ -5500,6 +5468,7 @@ mod tests {
             "warnings_json",
             "transcript",
             "replay_json",
+            "acceleration_json",
         ];
         for key in &expected_keys {
             assert!(
@@ -8803,6 +8772,1916 @@ mod tests {
         assert_eq!(
             restored, "",
             "round-trip of empty file should produce empty file"
+        );
+    }
+
+    // ── Task #256 — sync edge-case tests ────────────────────────────
+
+    #[test]
+    fn ensure_runs_replay_column_also_adds_acceleration_json() {
+        // The existing test only checks for replay_json.  This verifies that
+        // acceleration_json is also added when starting from a legacy schema
+        // that has neither column.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("accel_check.sqlite3");
+        let conn = Connection::open(db_path.display().to_string()).expect("open");
+
+        conn.execute(
+            "CREATE TABLE runs (
+                id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                input_path TEXT NOT NULL,
+                normalized_wav_path TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                warnings_json TEXT NOT NULL,
+                transcript TEXT NOT NULL
+            );",
+        )
+        .expect("create old schema");
+
+        ensure_runs_replay_column(&conn).expect("migration");
+
+        let rows = conn.query("PRAGMA table_info(runs);").expect("pragma");
+        let has_acceleration = rows
+            .iter()
+            .any(|row| value_to_string_sqlite(row.get(1)) == "acceleration_json");
+        assert!(
+            has_acceleration,
+            "acceleration_json column should exist after migration from legacy schema"
+        );
+    }
+
+    #[test]
+    fn ensure_runs_replay_column_adds_only_acceleration_to_partially_migrated_schema() {
+        // Schema already has replay_json but NOT acceleration_json.
+        // The function should skip adding replay_json and only add acceleration_json.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("partial_migrate.sqlite3");
+        let conn = Connection::open(db_path.display().to_string()).expect("open");
+
+        conn.execute(
+            "CREATE TABLE runs (
+                id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                input_path TEXT NOT NULL,
+                normalized_wav_path TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                warnings_json TEXT NOT NULL,
+                transcript TEXT NOT NULL,
+                replay_json TEXT NOT NULL DEFAULT '{}'
+            );",
+        )
+        .expect("create partially-migrated schema");
+
+        // Insert a row to prove data survives the migration.
+        conn.execute(
+            "INSERT INTO runs (id, started_at, finished_at, backend, input_path, \
+             normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json) \
+             VALUES ('r1', '2026-01-01', '2026-01-02', 'auto', 'in.wav', 'norm.wav', '{}', '{}', '[]', 'hello', '{}')",
+        )
+        .expect("insert test row");
+
+        ensure_runs_replay_column(&conn).expect("migration");
+
+        let rows = conn.query("PRAGMA table_info(runs);").expect("pragma");
+        let has_acceleration = rows
+            .iter()
+            .any(|row| value_to_string_sqlite(row.get(1)) == "acceleration_json");
+        assert!(
+            has_acceleration,
+            "acceleration_json should be added to partially-migrated schema"
+        );
+
+        // Verify existing data survived.
+        let data = conn
+            .query("SELECT transcript FROM runs WHERE id = 'r1'")
+            .expect("query");
+        assert_eq!(
+            value_to_string_sqlite(data[0].get(0)),
+            "hello",
+            "existing row data should survive migration"
+        );
+    }
+
+    #[test]
+    fn import_skip_policy_with_conflicting_run_preserves_original_transcript() {
+        // The existing Skip test re-imports identical data, which never actually
+        // reaches the Skip branch (it takes the identical→noop shortcut).
+        // This test mutates the transcript to force a true payload conflict.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("skip_run.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store");
+        let report = fixture_report("run-skip-conflict", &db_path);
+        store.persist_report(&report).expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // First import into a fresh target.
+        let target_db = dir.path().join("target.sqlite3");
+        import(&target_db, &export_dir, &state_root, ConflictPolicy::Skip).expect("import 1");
+
+        // Mutate the transcript in runs.jsonl.
+        let runs_path = export_dir.join("runs.jsonl");
+        let original_line = fs::read_to_string(&runs_path)
+            .expect("read")
+            .lines()
+            .next()
+            .expect("at least one line")
+            .to_owned();
+        let mut mutated: serde_json::Value =
+            serde_json::from_str(&original_line).expect("parse");
+        mutated["transcript"] = json!("MUTATED TRANSCRIPT FOR SKIP TEST");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("ser")),
+        )
+        .expect("write mutated");
+
+        // Update manifest checksum.
+        let manifest_path = export_dir.join("manifest.json");
+        let mut manifest_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read"))
+                .expect("parse");
+        manifest_value["checksums"]["runs_jsonl_sha256"] =
+            json!(sha256_file(&runs_path).expect("checksum"));
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest_value).expect("ser"),
+        )
+        .expect("write manifest");
+
+        // Re-import with Skip — should silently skip the conflicting run.
+        let result2 =
+            import(&target_db, &export_dir, &state_root, ConflictPolicy::Skip).expect("import 2");
+        assert!(
+            result2.conflicts.is_empty(),
+            "Skip policy should not produce conflicts"
+        );
+
+        // Verify original transcript is preserved.
+        let conn = Connection::open(target_db.display().to_string()).expect("open target");
+        let rows = conn
+            .query_with_params(
+                "SELECT transcript FROM runs WHERE id = ?1",
+                &[SqliteValue::Text("run-skip-conflict".to_owned())],
+            )
+            .expect("query");
+        let transcript = value_to_string_sqlite(rows[0].get(0));
+        assert_eq!(
+            transcript, "hello world from sync test",
+            "Skip should preserve original transcript, not overwrite with mutated"
+        );
+    }
+
+    #[test]
+    fn import_skip_policy_with_conflicting_segment_preserves_original_text() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("skip_seg.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store");
+        let report = fixture_report("run-seg-skip", &db_path);
+        store.persist_report(&report).expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // First import into fresh target.
+        let target_db = dir.path().join("target.sqlite3");
+        import(&target_db, &export_dir, &state_root, ConflictPolicy::Skip).expect("import 1");
+
+        // Mutate a segment's text in segments.jsonl.
+        let seg_path = export_dir.join("segments.jsonl");
+        let original = fs::read_to_string(&seg_path).expect("read");
+        let mutated = original.replace("hello world", "SKIP SEGMENT MUTATED");
+        assert_ne!(original, mutated, "mutation should change the content");
+        fs::write(&seg_path, &mutated).expect("write mutated segments");
+
+        // Update manifest checksum.
+        let manifest_path = export_dir.join("manifest.json");
+        let mut manifest_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read"))
+                .expect("parse");
+        manifest_value["checksums"]["segments_jsonl_sha256"] =
+            json!(sha256_file(&seg_path).expect("checksum"));
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest_value).expect("ser"),
+        )
+        .expect("write manifest");
+
+        // Re-import with Skip.
+        let result2 =
+            import(&target_db, &export_dir, &state_root, ConflictPolicy::Skip).expect("import 2");
+        assert!(
+            result2.conflicts.is_empty(),
+            "Skip should produce no conflicts"
+        );
+
+        // Verify original segment text preserved.
+        let conn = Connection::open(target_db.display().to_string()).expect("open");
+        let rows = conn
+            .query_with_params(
+                "SELECT text FROM segments WHERE run_id = ?1 AND idx = 0",
+                &[SqliteValue::Text("run-seg-skip".to_owned())],
+            )
+            .expect("query");
+        let text = value_to_string_sqlite(rows[0].get(0));
+        assert_eq!(
+            text, "hello world",
+            "Skip should preserve original segment text"
+        );
+    }
+
+    #[test]
+    fn import_skip_policy_with_conflicting_event_preserves_original_message() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("skip_evt.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store");
+        let report = fixture_report("run-evt-skip", &db_path);
+        store.persist_report(&report).expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // First import into fresh target.
+        let target_db = dir.path().join("target.sqlite3");
+        import(&target_db, &export_dir, &state_root, ConflictPolicy::Skip).expect("import 1");
+
+        // Mutate an event's message in events.jsonl.
+        let evt_path = export_dir.join("events.jsonl");
+        let original = fs::read_to_string(&evt_path).expect("read");
+        let mutated = original.replace("input materialized", "SKIP EVENT MUTATED");
+        assert_ne!(original, mutated, "mutation should change the content");
+        fs::write(&evt_path, &mutated).expect("write mutated events");
+
+        // Update manifest checksum.
+        let manifest_path = export_dir.join("manifest.json");
+        let mut manifest_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read"))
+                .expect("parse");
+        manifest_value["checksums"]["events_jsonl_sha256"] =
+            json!(sha256_file(&evt_path).expect("checksum"));
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest_value).expect("ser"),
+        )
+        .expect("write manifest");
+
+        // Re-import with Skip.
+        let result2 =
+            import(&target_db, &export_dir, &state_root, ConflictPolicy::Skip).expect("import 2");
+        assert!(
+            result2.conflicts.is_empty(),
+            "Skip should produce no conflicts"
+        );
+
+        // Verify original event message preserved.
+        let conn = Connection::open(target_db.display().to_string()).expect("open");
+        let rows = conn
+            .query_with_params(
+                "SELECT message FROM events WHERE run_id = ?1 AND seq = 1",
+                &[SqliteValue::Text("run-evt-skip".to_owned())],
+            )
+            .expect("query");
+        let message = value_to_string_sqlite(rows[0].get(0));
+        assert_eq!(
+            message, "input materialized",
+            "Skip should preserve original event message"
+        );
+    }
+
+    // ── Task #264 — sync.rs pass 12 edge-case tests ──────────────
+
+    #[test]
+    fn validate_sync_detects_mismatched_started_at_field() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("val_started.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("started-mismatch", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // Mutate only the started_at field in runs.jsonl.
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read");
+        let first_line = content.lines().next().expect("has line");
+        let mut mutated: serde_json::Value = serde_json::from_str(first_line).expect("valid run");
+        mutated["started_at"] = json!("1999-01-01T00:00:00Z");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("ser")),
+        )
+        .expect("write");
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(!validation.is_valid, "should detect started_at mismatch");
+        assert!(
+            validation
+                .mismatched_records
+                .contains(&"started-mismatch".to_owned()),
+            "started-mismatch should be in mismatched_records: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn validate_sync_detects_mismatched_finished_at_field() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("val_finished.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("finished-mismatch", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // Mutate only the finished_at field in runs.jsonl.
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read");
+        let first_line = content.lines().next().expect("has line");
+        let mut mutated: serde_json::Value = serde_json::from_str(first_line).expect("valid run");
+        mutated["finished_at"] = json!("1999-12-31T23:59:59Z");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("ser")),
+        )
+        .expect("write");
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(
+            !validation.is_valid,
+            "should detect finished_at mismatch"
+        );
+        assert!(
+            validation
+                .mismatched_records
+                .contains(&"finished-mismatch".to_owned()),
+            "finished-mismatch should be in mismatched_records: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn incremental_export_no_new_records_retains_cursor_values_exactly() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("incr_retain.sqlite3");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("retain-cursor", &db_path))
+            .expect("persist");
+
+        // First export captures the run.
+        let export_dir_1 = dir.path().join("export1");
+        let m1 =
+            export_incremental(&db_path, &export_dir_1, &state_root).expect("first export");
+        assert_eq!(m1.row_counts.runs, 1);
+        let first_cursor_ts = m1.cursor_after.last_export_rfc3339.clone();
+        let first_cursor_run_id = m1.cursor_after.last_export_run_id.clone();
+
+        // Second export: no new records.
+        let export_dir_2 = dir.path().join("export2");
+        let m2 =
+            export_incremental(&db_path, &export_dir_2, &state_root).expect("second export");
+        assert_eq!(m2.row_counts.runs, 0);
+
+        // Cursor values should be EXACTLY retained from the first export.
+        assert_eq!(
+            m2.cursor_after.last_export_rfc3339, first_cursor_ts,
+            "cursor timestamp should be retained when no new records exist"
+        );
+        assert_eq!(
+            m2.cursor_after.last_export_run_id, first_cursor_run_id,
+            "cursor run_id should be retained when no new records exist"
+        );
+    }
+
+    #[test]
+    fn incremental_export_with_legacy_none_run_id_cursor_works() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("incr_legacy.sqlite3");
+        let state_root = dir.path().join("state");
+        fs::create_dir_all(&state_root).expect("create state dir");
+
+        let store = RunStore::open(&db_path).expect("store open");
+        let mut report = fixture_report("legacy-run", &db_path);
+        report.finished_at_rfc3339 = "2026-06-15T12:00:00Z".to_owned();
+        store.persist_report(&report).expect("persist");
+
+        // Manually write a legacy cursor with last_export_run_id = None.
+        let legacy_cursor = r#"{"last_export_rfc3339":"2026-01-01T00:00:00Z","last_run_count":0}"#;
+        fs::write(state_root.join(CURSOR_FILENAME), legacy_cursor).expect("write legacy cursor");
+
+        // Export should work — the cursor has None run_id, which is
+        // deserialized via #[serde(default)].
+        let export_dir = dir.path().join("export");
+        let manifest =
+            export_incremental(&db_path, &export_dir, &state_root).expect("export with legacy cursor");
+
+        // The run finished_at 2026-06-15 > cursor 2026-01-01, so it should be exported.
+        assert_eq!(
+            manifest.row_counts.runs, 1,
+            "run after legacy cursor timestamp should be exported"
+        );
+        // cursor_used should reflect the legacy cursor with None run_id.
+        assert!(
+            manifest.cursor_used.is_some(),
+            "cursor_used should be populated"
+        );
+        assert!(
+            manifest.cursor_used.as_ref().unwrap().last_export_run_id.is_none(),
+            "legacy cursor should have None run_id"
+        );
+        // cursor_after should now have a run_id (upgraded from legacy).
+        assert!(
+            manifest.cursor_after.last_export_run_id.is_some(),
+            "cursor_after should have a run_id after export"
+        );
+    }
+
+    #[test]
+    fn value_to_i64_sqlite_negative_integer_and_negative_text() {
+        // Negative integer via Integer variant.
+        assert_eq!(
+            value_to_i64_sqlite(Some(&SqliteValue::Integer(-42))),
+            -42,
+            "negative Integer should be returned directly"
+        );
+
+        // Negative integer as text.
+        assert_eq!(
+            value_to_i64_sqlite(Some(&SqliteValue::Text("-99".to_owned()))),
+            -99,
+            "negative text should parse correctly"
+        );
+
+        // Blob variant → wildcard → 0.
+        assert_eq!(
+            value_to_i64_sqlite(Some(&SqliteValue::Blob(vec![1, 2, 3]))),
+            0,
+            "Blob variant should fall through to 0"
+        );
+    }
+
+    // ── Task #267 — sync.rs pass 13 edge-case tests ──────────────────
+
+    #[test]
+    fn validate_sync_detects_mismatched_replay_json_field() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("val_replay.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("replay-mismatch", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // Mutate only the replay_json field in runs.jsonl.
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read");
+        let first_line = content.lines().next().expect("has line");
+        let mut mutated: serde_json::Value = serde_json::from_str(first_line).expect("valid run");
+        mutated["replay_json"] = json!("{\"injected\":true}");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("ser")),
+        )
+        .expect("write");
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(!validation.is_valid, "should detect replay_json mismatch");
+        assert!(
+            validation
+                .mismatched_records
+                .contains(&"replay-mismatch".to_owned()),
+            "replay-mismatch should be in mismatched_records: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn validate_sync_detects_mismatched_acceleration_json_field() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("val_accel.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("accel-mismatch", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // Mutate only the acceleration_json field in runs.jsonl.
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read");
+        let first_line = content.lines().next().expect("has line");
+        let mut mutated: serde_json::Value = serde_json::from_str(first_line).expect("valid run");
+        mutated["acceleration_json"] = json!("{\"gpu\":\"a100\"}");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("ser")),
+        )
+        .expect("write");
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(
+            !validation.is_valid,
+            "should detect acceleration_json mismatch"
+        );
+        assert!(
+            validation
+                .mismatched_records
+                .contains(&"accel-mismatch".to_owned()),
+            "accel-mismatch should be in mismatched_records: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn validate_sync_returns_error_for_db_without_schema() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("bare.sqlite3");
+        let export_dir = dir.path().join("export");
+
+        // Create a bare SQLite file with no tables.
+        let _conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("create bare db");
+
+        // Create empty JSONL files so validate_sync doesn't fail on missing files.
+        fs::create_dir_all(&export_dir).expect("mkdir");
+        for name in ["runs.jsonl", "segments.jsonl", "events.jsonl"] {
+            fs::write(export_dir.join(name), "").expect("write empty file");
+        }
+
+        let err = validate_sync(&db_path, &export_dir).expect_err("should fail on no-schema DB");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing table"),
+            "error should mention missing table, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn json_optional_text_returns_null_for_explicit_json_null_value() {
+        let value = json!({"name": "alice", "gone": null, "flag": true});
+        // Explicit null value → Null (not panicking on the Some(Value::Null) arm).
+        assert!(matches!(
+            json_optional_text(&value, "gone"),
+            SqliteValue::Null
+        ));
+        // Boolean value → Null.
+        assert!(matches!(
+            json_optional_text(&value, "flag"),
+            SqliteValue::Null
+        ));
+    }
+
+    #[test]
+    fn json_to_optional_f64_returns_none_for_explicit_null_and_boolean() {
+        let value = json!({"score": 42.5, "empty": null, "flag": true, "nested": {"a": 1}});
+        // Explicit null → None.
+        assert_eq!(json_to_optional_f64(&value, "empty"), None);
+        // Boolean → None (as_f64 returns None for booleans).
+        assert_eq!(json_to_optional_f64(&value, "flag"), None);
+        // Object → None.
+        assert_eq!(json_to_optional_f64(&value, "nested"), None);
+    }
+
+    // ── Task #270 — sync.rs pass 14 edge-case tests ──────────────────
+
+    #[test]
+    fn optional_floats_equal_nan_vs_finite_returns_false() {
+        // NaN minus a finite value is NaN; NaN <= 1e-9 is false.
+        assert!(
+            !optional_floats_equal(Some(f64::NAN), Some(0.0)),
+            "NaN vs 0.0 should not be equal"
+        );
+        assert!(
+            !optional_floats_equal(Some(42.0), Some(f64::NAN)),
+            "42.0 vs NaN should not be equal"
+        );
+        assert!(
+            !optional_floats_equal(Some(f64::NAN), None),
+            "Some(NaN) vs None should not be equal"
+        );
+    }
+
+    #[test]
+    fn json_to_optional_text_returns_none_for_explicit_null_and_non_string() {
+        let value = json!({"name": "alice", "gone": null, "count": 42, "flag": true});
+        // Explicit null → None.
+        assert_eq!(json_to_optional_text(&value, "gone"), None);
+        // Number → None.
+        assert_eq!(json_to_optional_text(&value, "count"), None);
+        // Boolean → None.
+        assert_eq!(json_to_optional_text(&value, "flag"), None);
+    }
+
+    #[test]
+    fn validate_sync_cross_missing_runs_both_directions() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("cross_missing.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        // DB has run-a but NOT run-b.
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("run-a", &db_path))
+            .expect("persist run-a");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // Now add run-b to DB but remove run-a.
+        store
+            .persist_report(&fixture_report("run-b", &db_path))
+            .expect("persist run-b");
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
+        conn.execute_with_params(
+            "DELETE FROM runs WHERE id = ?1",
+            &[SqliteValue::Text("run-a".to_owned())],
+        )
+        .expect("delete run-a from DB");
+        drop(conn);
+
+        // JSONL has run-a (from export), DB has run-b. Both directions missing.
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(!validation.is_valid, "cross-missing runs should be invalid");
+        assert!(
+            !validation.missing_from_jsonl.is_empty(),
+            "run-b should be in missing_from_jsonl"
+        );
+        assert!(
+            !validation.missing_from_db.is_empty(),
+            "run-a should be in missing_from_db"
+        );
+    }
+
+    #[test]
+    fn save_and_load_cursor_round_trip_preserves_run_id() {
+        let dir = tempdir().expect("tempdir");
+        let cursor_path = dir.path().join("nested/deep/cursor.json");
+        let cursor = SyncCursor {
+            last_export_rfc3339: "2026-06-15T12:00:00Z".to_owned(),
+            last_export_run_id: Some("run-xyz-123".to_owned()),
+            last_run_count: 42,
+        };
+        save_cursor(&cursor_path, &cursor).expect("save");
+        let loaded = load_cursor(&cursor_path).expect("load").expect("should be Some");
+        assert_eq!(loaded.last_export_rfc3339, "2026-06-15T12:00:00Z");
+        assert_eq!(
+            loaded.last_export_run_id,
+            Some("run-xyz-123".to_owned()),
+            "last_export_run_id should round-trip through save/load"
+        );
+        assert_eq!(loaded.last_run_count, 42);
+    }
+
+    #[test]
+    fn collect_exported_run_ids_cursor_with_none_run_id_uses_empty_tiebreaker() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("none_run_id.sqlite3");
+        let store = RunStore::open(&db_path).expect("open");
+
+        // Two runs with the same timestamp but different IDs.
+        let mut r1 = fixture_report("run-a", &db_path);
+        r1.finished_at_rfc3339 = "2026-06-01T00:00:05Z".to_owned();
+        store.persist_report(&r1).expect("persist r1");
+
+        let mut r2 = fixture_report("run-b", &db_path);
+        r2.finished_at_rfc3339 = "2026-06-01T00:00:05Z".to_owned();
+        store.persist_report(&r2).expect("persist r2");
+
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
+
+        // Cursor with None run_id → unwrap_or_default() = "".
+        // Both runs have finished_at == cursor ts, and id > "" for any real id.
+        // So both should be included.
+        let cursor = test_cursor("2026-06-01T00:00:05Z", None);
+        let ids = collect_exported_run_ids(&conn, Some(&cursor)).expect("collect");
+        assert_eq!(
+            ids.len(),
+            2,
+            "cursor with None run_id should include all runs at same timestamp (id > empty)"
+        );
+        assert!(ids.contains(&"run-a".to_owned()));
+        assert!(ids.contains(&"run-b".to_owned()));
+    }
+
+    // ── Task #273 — sync.rs pass 15 edge-case tests ──────────────────
+
+    #[test]
+    fn collect_jsonl_ids_reads_from_compressed_gz_file() {
+        let dir = tempdir().expect("tempdir");
+        let plain = dir.path().join("runs.jsonl");
+        let gz = dir.path().join("runs.jsonl.gz");
+        let content = r#"{"id":"gz-1","text":"first"}
+{"id":"gz-2","text":"second"}
+{"id":"gz-3","text":"third"}
+"#;
+        fs::write(&plain, content).expect("write plain");
+        compress_jsonl(&plain, &gz).expect("compress");
+
+        // collect_jsonl_ids should transparently decompress via open_jsonl_reader.
+        let ids = collect_jsonl_ids(&gz, "id").expect("collect from gz");
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains("gz-1"));
+        assert!(ids.contains("gz-2"));
+        assert!(ids.contains("gz-3"));
+    }
+
+    #[test]
+    fn load_jsonl_run_map_duplicate_id_last_entry_wins() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("dup.jsonl");
+        let content = [
+            r#"{"id": "dup-1", "version": "first"}"#,
+            r#"{"id": "dup-1", "version": "second"}"#,
+            r#"{"id": "dup-2", "version": "only"}"#,
+        ]
+        .join("\n");
+        fs::write(&path, content).expect("write");
+
+        let map = load_jsonl_run_map(&path).expect("load");
+        assert_eq!(map.len(), 2, "should have 2 unique IDs");
+        assert_eq!(
+            map["dup-1"]["version"].as_str(),
+            Some("second"),
+            "last entry with same id should overwrite earlier"
+        );
+        assert_eq!(map["dup-2"]["version"].as_str(), Some("only"));
+    }
+
+    #[test]
+    fn validate_sync_detects_mismatched_transcript_field() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("transcript_mm.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("txn-1", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // Tamper with transcript field in runs.jsonl
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read runs");
+        let tampered = content.replace(
+            "hello world from sync test",
+            "TAMPERED TRANSCRIPT",
+        );
+        assert_ne!(content, tampered, "sanity: content should have changed");
+        fs::write(&runs_path, tampered).expect("write tampered");
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(
+            !validation.is_valid,
+            "tampered transcript should make validation fail"
+        );
+        assert!(
+            validation.mismatched_records.contains(&"txn-1".to_owned()),
+            "txn-1 should be in mismatched_records: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn sync_cursor_deserialize_missing_run_id_defaults_to_none() {
+        // SyncCursor has #[serde(default)] on last_export_run_id.
+        // Older cursors without this field should deserialize to None.
+        let json = r#"{"last_export_rfc3339":"2026-01-01T00:00:00Z","last_run_count":5}"#;
+        let cursor: SyncCursor = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cursor.last_export_rfc3339, "2026-01-01T00:00:00Z");
+        assert_eq!(cursor.last_export_run_id, None, "missing field should default to None");
+        assert_eq!(cursor.last_run_count, 5);
+
+        // With the field present: should deserialize normally.
+        let json_with = r#"{"last_export_rfc3339":"2026-06-01T00:00:00Z","last_export_run_id":"run-42","last_run_count":10}"#;
+        let cursor2: SyncCursor = serde_json::from_str(json_with).expect("deserialize");
+        assert_eq!(cursor2.last_export_run_id, Some("run-42".to_owned()));
+    }
+
+    #[test]
+    fn count_jsonl_lines_from_compressed_gz_file() {
+        let dir = tempdir().expect("tempdir");
+        let plain = dir.path().join("events.jsonl");
+        let gz = dir.path().join("events.jsonl.gz");
+        let content = r#"{"seq":1}
+{"seq":2}
+
+{"seq":3}
+"#;
+        fs::write(&plain, content).expect("write plain");
+        compress_jsonl(&plain, &gz).expect("compress");
+
+        // count_jsonl_lines should transparently decompress gz.
+        let count = count_jsonl_lines(&gz).expect("count from gz");
+        assert_eq!(count, 3, "should count 3 non-empty lines from gz file");
+    }
+
+    // ── Task #275 — sync.rs pass 16 edge-case tests ──────────────────
+
+    #[test]
+    fn validate_sync_legacy_jsonl_without_replay_json_key_matches_db_default() {
+        // When JSONL row lacks "replay_json" key, json_string_or_default returns "{}",
+        // matching the DB's default value. Should NOT be flagged as a mismatch.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("legacy_replay.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("legacy-1", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // Strip "replay_json" and "acceleration_json" from the JSONL to simulate legacy.
+        let runs_path = export_dir.join("runs.jsonl");
+        let original = fs::read_to_string(&runs_path).expect("read");
+        let mut parsed: serde_json::Value =
+            serde_json::from_str(original.trim()).expect("parse");
+        parsed.as_object_mut().unwrap().remove("replay_json");
+        parsed
+            .as_object_mut()
+            .unwrap()
+            .remove("acceleration_json");
+        fs::write(&runs_path, serde_json::to_string(&parsed).unwrap()).expect("write");
+
+        // Update the DB to have default "{}" for both columns.
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
+        conn.execute_with_params(
+            "UPDATE runs SET replay_json = '{}', acceleration_json = '{}' WHERE id = ?1",
+            &[SqliteValue::Text("legacy-1".to_owned())],
+        )
+        .expect("reset to defaults");
+        drop(conn);
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(
+            validation.mismatched_records.is_empty(),
+            "legacy JSONL without replay_json should match DB default: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn load_jsonl_run_map_reads_from_compressed_gz_file() {
+        let dir = tempdir().expect("tempdir");
+        let plain = dir.path().join("runs.jsonl");
+        let gz = dir.path().join("runs.jsonl.gz");
+        let content = r#"{"id":"gz-a","backend":"whisper"}
+{"id":"gz-b","backend":"insanely-fast"}
+"#;
+        fs::write(&plain, content).expect("write plain");
+        compress_jsonl(&plain, &gz).expect("compress");
+
+        let map = load_jsonl_run_map(&gz).expect("load from gz");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["gz-a"]["backend"].as_str(), Some("whisper"));
+        assert_eq!(map["gz-b"]["backend"].as_str(), Some("insanely-fast"));
+    }
+
+    #[test]
+    fn ensure_run_reference_exists_caches_known_run_id_for_second_call() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("ref_cache.sqlite3");
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("cached-run", &db_path))
+            .expect("persist");
+        drop(store);
+
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
+
+        let mut known = HashSet::new();
+        // First call: queries DB, inserts into known_run_ids.
+        ensure_run_reference_exists(&conn, "cached-run", "segments", "key-1", &mut known)
+            .expect("first call should succeed");
+        assert!(
+            known.contains("cached-run"),
+            "run_id should be cached after first successful lookup"
+        );
+
+        // Second call: should return Ok from cache without DB query.
+        // (We can't prove no query happened, but we can verify it succeeds
+        // and the cache still contains the id.)
+        ensure_run_reference_exists(&conn, "cached-run", "events", "key-2", &mut known)
+            .expect("second call should succeed from cache");
+        assert_eq!(known.len(), 1, "should still have exactly 1 cached id");
+    }
+
+    #[test]
+    fn count_table_with_populated_data_returns_correct_count() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("populated.sqlite3");
+        let store = RunStore::open(&db_path).expect("open");
+
+        // Persist two runs so `runs` has 2 rows and `segments`/`events` get populated.
+        let r1 = fixture_report("run-a", &db_path);
+        let r2 = fixture_report("run-b", &db_path);
+        store.persist_report(&r1).expect("persist r1");
+        store.persist_report(&r2).expect("persist r2");
+        drop(store);
+
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
+        let run_count = count_table(&conn, "runs").expect("count runs");
+        assert_eq!(run_count, 2, "should count 2 runs");
+
+        // segments table should be populated from fixture_report's segments.
+        let seg_count = count_table(&conn, "segments").expect("count segments");
+        assert!(seg_count > 0, "fixture_report adds at least one segment");
+    }
+
+    #[test]
+    fn export_table_runs_incremental_no_matching_runs_produces_empty_file() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("inc_empty.sqlite3");
+        let store = RunStore::open(&db_path).expect("open");
+
+        // Persist a run with an old timestamp.
+        let mut r = fixture_report("old-run", &db_path);
+        r.finished_at_rfc3339 = "2020-01-01T00:00:00Z".to_owned();
+        store.persist_report(&r).expect("persist");
+        drop(store);
+
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
+        let output_path = dir.path().join("runs.jsonl");
+
+        // Cursor with a future timestamp — no runs should match.
+        let cursor = test_cursor("2099-01-01T00:00:00Z", Some("zzz"));
+        let count = export_table_runs_incremental(&conn, &output_path, Some(&cursor)).expect("export");
+        assert_eq!(count, 0, "no runs should match a far-future cursor");
+
+        let content = fs::read_to_string(&output_path).expect("read");
+        assert!(
+            content.trim().is_empty(),
+            "file should be empty when no runs match"
+        );
+    }
+
+    #[test]
+    fn json_str_returns_error_for_array_and_boolean_values() {
+        let obj = json!({"list": [1,2,3], "flag": true});
+        let err_list = json_str(&obj, "list").expect_err("array should not be a string");
+        assert!(err_list.to_string().contains("missing string field"));
+        let err_flag = json_str(&obj, "flag").expect_err("boolean should not be a string");
+        assert!(err_flag.to_string().contains("missing string field"));
+    }
+
+    #[test]
+    fn json_str_returns_error_message_includes_key_name() {
+        let obj = json!({"x": 1});
+        let err = json_str(&obj, "my_special_key").expect_err("missing key");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("my_special_key"),
+            "error message should include the key name, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn sqlite_to_optional_text_returns_none_for_non_text_variants() {
+        assert_eq!(
+            sqlite_to_optional_text(Some(&SqliteValue::Integer(42))),
+            None
+        );
+        assert_eq!(
+            sqlite_to_optional_text(Some(&SqliteValue::Float(3.14))),
+            None
+        );
+        assert_eq!(
+            sqlite_to_optional_text(Some(&SqliteValue::Blob(vec![1, 2]))),
+            None
+        );
+        assert_eq!(sqlite_to_optional_text(Some(&SqliteValue::Null)), None);
+        assert_eq!(sqlite_to_optional_text(None), None);
+        // Text returns Some.
+        assert_eq!(
+            sqlite_to_optional_text(Some(&SqliteValue::Text("hello".to_owned()))),
+            Some("hello".to_owned())
+        );
+    }
+
+    #[test]
+    fn sync_validation_report_serde_round_trip_with_mismatches() {
+        let report = SyncValidationReport {
+            db_run_count: 5,
+            jsonl_run_count: 4,
+            db_segment_count: 10,
+            jsonl_segment_count: 10,
+            db_event_count: 20,
+            jsonl_event_count: 18,
+            missing_from_jsonl: vec!["run-extra".to_owned()],
+            missing_from_db: vec![],
+            mismatched_records: vec!["run-001".to_owned(), "run-002".to_owned()],
+            is_valid: false,
+        };
+        let json = serde_json::to_string(&report).expect("serialize");
+        let parsed: SyncValidationReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.db_run_count, 5);
+        assert_eq!(parsed.jsonl_run_count, 4);
+        assert_eq!(parsed.db_event_count, 20);
+        assert_eq!(parsed.jsonl_event_count, 18);
+        assert_eq!(parsed.missing_from_jsonl, vec!["run-extra"]);
+        assert!(parsed.missing_from_db.is_empty());
+        assert_eq!(parsed.mismatched_records.len(), 2);
+        assert!(!parsed.is_valid);
+    }
+
+    #[test]
+    fn validate_checksums_detects_tampered_file() {
+        let dir = tempdir().expect("tempdir");
+        let runs = dir.path().join("runs.jsonl");
+        let segments = dir.path().join("segments.jsonl");
+        let events = dir.path().join("events.jsonl");
+        fs::write(&runs, "original\n").expect("write runs");
+        fs::write(&segments, "").expect("write segments");
+        fs::write(&events, "").expect("write events");
+        let manifest = SyncManifest {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            export_format_version: EXPORT_FORMAT_VERSION.to_owned(),
+            created_at_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            source_db_path: "test.db".to_owned(),
+            row_counts: RowCounts { runs: 1, segments: 0, events: 0 },
+            checksums: FileChecksums {
+                runs_jsonl_sha256: sha256_file(&runs).expect("sha"),
+                segments_jsonl_sha256: sha256_file(&segments).expect("sha"),
+                events_jsonl_sha256: sha256_file(&events).expect("sha"),
+            },
+        };
+        // Valid checksums should pass.
+        assert!(validate_checksums(&manifest, dir.path()).is_ok());
+        // Tamper with runs.jsonl.
+        fs::write(&runs, "tampered\n").expect("tamper");
+        let err = validate_checksums(&manifest, dir.path()).expect_err("should fail");
+        match err {
+            FwError::Storage(msg) => assert!(
+                msg.contains("checksum mismatch"),
+                "error should mention checksum mismatch, got: {msg}"
+            ),
+            other => panic!("expected FwError::Storage, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_cursor_returns_none_for_nonexistent_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("missing_cursor.json");
+        let result = load_cursor(&path).expect("should not error");
+        assert!(result.is_none(), "nonexistent cursor file should return None");
+    }
+
+    #[test]
+    fn save_cursor_then_load_cursor_preserves_all_fields() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("cursor_rt2.json");
+        let cursor = SyncCursor {
+            last_export_rfc3339: "2026-02-15T10:00:00Z".to_owned(),
+            last_export_run_id: Some("run-42".to_owned()),
+            last_run_count: 7,
+        };
+        save_cursor(&path, &cursor).expect("save");
+        let loaded = load_cursor(&path)
+            .expect("load should not error")
+            .expect("cursor should exist after save");
+        assert_eq!(loaded.last_export_rfc3339, "2026-02-15T10:00:00Z");
+        assert_eq!(loaded.last_export_run_id.as_deref(), Some("run-42"));
+        assert_eq!(loaded.last_run_count, 7);
+    }
+
+    #[test]
+    fn load_cursor_returns_error_for_invalid_json() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("bad_cursor.json");
+        fs::write(&path, "this is not json").expect("write");
+        let err = load_cursor(&path).expect_err("should error on invalid JSON");
+        match err {
+            FwError::Storage(msg) => assert!(
+                msg.contains("invalid sync cursor"),
+                "error should mention invalid sync cursor, got: {msg}"
+            ),
+            other => panic!("expected FwError::Storage, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn atomic_write_bytes_creates_file_and_removes_tmp() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("output.txt");
+        let tmp = path.with_extension("tmp");
+        atomic_write_bytes(&path, b"hello world").expect("write");
+        assert!(path.exists(), "target file should exist");
+        assert!(!tmp.exists(), "tmp file should be cleaned up");
+        let content = fs::read_to_string(&path).expect("read");
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn validate_checksums_detects_missing_file() {
+        let dir = tempdir().expect("tempdir");
+        // Create segments and events but NOT runs.
+        fs::write(dir.path().join("segments.jsonl"), "").expect("write");
+        fs::write(dir.path().join("events.jsonl"), "").expect("write");
+        let manifest = SyncManifest {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            export_format_version: EXPORT_FORMAT_VERSION.to_owned(),
+            created_at_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            source_db_path: "test.db".to_owned(),
+            row_counts: RowCounts { runs: 0, segments: 0, events: 0 },
+            checksums: FileChecksums {
+                runs_jsonl_sha256: "deadbeef".to_owned(),
+                segments_jsonl_sha256: sha256_file(&dir.path().join("segments.jsonl")).expect("sha"),
+                events_jsonl_sha256: sha256_file(&dir.path().join("events.jsonl")).expect("sha"),
+            },
+        };
+        let err = validate_checksums(&manifest, dir.path()).expect_err("should fail");
+        match err {
+            FwError::Storage(msg) => assert!(
+                msg.contains("missing export file"),
+                "error should mention missing file, got: {msg}"
+            ),
+            other => panic!("expected FwError::Storage, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_export_position_no_cursor_returns_latest_run() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+        let mut report1 = fixture_report("run-a", &db_path);
+        report1.finished_at_rfc3339 = "2026-01-01T00:00:01Z".to_owned();
+        store.persist_report(&report1).expect("persist");
+        let mut report2 = fixture_report("run-b", &db_path);
+        report2.finished_at_rfc3339 = "2026-01-01T00:00:05Z".to_owned();
+        store.persist_report(&report2).expect("persist");
+
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let pos = max_export_position(&conn, None).expect("max_export_position");
+        let (ts, run_id) = pos.expect("should be Some");
+        assert_eq!(ts, "2026-01-01T00:00:05Z");
+        assert_eq!(run_id, "run-b");
+    }
+
+    #[test]
+    fn max_export_position_with_cursor_filters_older_runs() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+        let mut r1 = fixture_report("run-x", &db_path);
+        r1.finished_at_rfc3339 = "2026-01-01T00:00:01Z".to_owned();
+        store.persist_report(&r1).expect("persist");
+        let mut r2 = fixture_report("run-y", &db_path);
+        r2.finished_at_rfc3339 = "2026-01-01T00:00:10Z".to_owned();
+        store.persist_report(&r2).expect("persist");
+
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let cursor = test_cursor("2026-01-01T00:00:05Z", None);
+        let pos = max_export_position(&conn, Some(&cursor)).expect("max_export_position");
+        let (ts, run_id) = pos.expect("should find run-y after cursor");
+        assert_eq!(ts, "2026-01-01T00:00:10Z");
+        assert_eq!(run_id, "run-y");
+    }
+
+    #[test]
+    fn max_export_position_empty_db_returns_none() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("empty.sqlite3");
+        let _store = RunStore::open(&db_path).expect("store open");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let pos = max_export_position(&conn, None).expect("max_export_position");
+        assert!(pos.is_none(), "empty db should return None");
+    }
+
+    #[test]
+    fn ensure_schema_idempotent_on_existing_db() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("schema_idem.sqlite3");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        ensure_schema(&conn).expect("first ensure_schema");
+        // Calling again should not error (IF NOT EXISTS).
+        ensure_schema(&conn).expect("second ensure_schema should be idempotent");
+        // Verify tables still queryable.
+        let runs_rows = conn.query("SELECT COUNT(*) FROM runs").expect("runs");
+        assert!(!runs_rows.is_empty(), "runs table should exist");
+    }
+
+    #[test]
+    fn atomic_write_bytes_creates_parent_dirs_not_needed() {
+        // atomic_write_bytes writes to a file within an existing directory.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("data.bin");
+        atomic_write_bytes(&path, &[0xDE, 0xAD, 0xBE, 0xEF]).expect("write");
+        let bytes = fs::read(&path).expect("read");
+        assert_eq!(bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn query_segment_idxs_for_run_returns_correct_indices() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("seg_idx.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("run-seg-idx", &db_path))
+            .expect("persist");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let idxs = query_segment_idxs_for_run(&conn, "run-seg-idx").expect("query");
+        // fixture_report produces 2 segments (idx 0 and 1).
+        assert_eq!(idxs.len(), 2);
+        assert!(idxs.contains(&0));
+        assert!(idxs.contains(&1));
+    }
+
+    #[test]
+    fn query_event_seqs_for_run_returns_correct_seqs() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("evt_seq.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("run-evt-seq", &db_path))
+            .expect("persist");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let seqs = query_event_seqs_for_run(&conn, "run-evt-seq").expect("query");
+        // fixture_report produces 2 events (seq 1 and 2).
+        assert_eq!(seqs.len(), 2);
+        assert!(seqs.contains(&1));
+        assert!(seqs.contains(&2));
+    }
+
+    #[test]
+    fn query_segment_idxs_for_run_returns_empty_for_unknown_run() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("seg_empty.sqlite3");
+        let _store = RunStore::open(&db_path).expect("store open");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let idxs =
+            query_segment_idxs_for_run(&conn, "nonexistent-run").expect("query");
+        assert!(idxs.is_empty(), "unknown run_id should yield empty set");
+    }
+
+    #[test]
+    fn verify_schema_exists_rejects_missing_events_table() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("no_events.sqlite3");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        // Create runs and segments but NOT events.
+        conn.execute(
+            "CREATE TABLE runs (id TEXT PRIMARY KEY); \
+             CREATE TABLE segments (run_id TEXT, idx INTEGER, PRIMARY KEY(run_id, idx));",
+        )
+        .expect("create partial schema");
+        let err = verify_schema_exists(&conn).expect_err("missing events should fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("events"),
+            "error should mention missing events table, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_run_reference_exists_succeeds_for_existing_run() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("ref_ok.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("ref-run", &db_path))
+            .expect("persist");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let mut known = std::collections::HashSet::new();
+        ensure_run_reference_exists(&conn, "ref-run", "segments", "key-1", &mut known)
+            .expect("existing run should succeed");
+        // After the first call, the run_id should be cached in `known`.
+        assert!(known.contains("ref-run"), "run_id should be cached");
+    }
+
+    #[test]
+    fn query_event_seqs_for_run_returns_empty_for_unknown_run() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("evt_empty.sqlite3");
+        let _store = RunStore::open(&db_path).expect("store open");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let seqs =
+            query_event_seqs_for_run(&conn, "nonexistent-run").expect("query");
+        assert!(seqs.is_empty(), "unknown run_id should yield empty set");
+    }
+
+    #[test]
+    fn verify_schema_exists_succeeds_after_ensure_schema_with_data() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("full_schema.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("pop-run", &db_path))
+            .expect("persist");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        // Should succeed: all three tables exist and have data.
+        verify_schema_exists(&conn).expect("schema with data should pass");
+    }
+
+    #[test]
+    fn count_table_returns_nonzero_after_insert() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("count_test.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("count-r1", &db_path))
+            .expect("persist r1");
+        store
+            .persist_report(&fixture_report("count-r2", &db_path))
+            .expect("persist r2");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let run_count = count_table(&conn, "runs").expect("count runs");
+        assert_eq!(run_count, 2, "should have 2 runs");
+        // Each fixture_report has 2 segments.
+        let seg_count = count_table(&conn, "segments").expect("count segments");
+        assert_eq!(seg_count, 4, "should have 4 segments (2 per run)");
+        // Each fixture_report has 2 events.
+        let evt_count = count_table(&conn, "events").expect("count events");
+        assert_eq!(evt_count, 4, "should have 4 events (2 per run)");
+    }
+
+    #[test]
+    fn sync_lock_release_allows_reacquisition() {
+        let dir = tempdir().expect("tempdir");
+        let lock = SyncLock::acquire(dir.path(), "first_op").expect("first acquire");
+        // Release explicitly.
+        lock.release().expect("release");
+        // Now we should be able to acquire again.
+        let lock2 = SyncLock::acquire(dir.path(), "second_op").expect("second acquire");
+        drop(lock2);
+    }
+
+    #[test]
+    fn ensure_run_reference_exists_error_message_includes_table_and_key() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("ref_err.sqlite3");
+        let _store = RunStore::open(&db_path).expect("store open");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let mut known = std::collections::HashSet::new();
+        let err = ensure_run_reference_exists(
+            &conn, "missing-run", "segments", "seg-key-42", &mut known,
+        )
+        .expect_err("should fail for missing run");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("segments"),
+            "error should mention table name, got: {msg}"
+        );
+        assert!(
+            msg.contains("seg-key-42"),
+            "error should mention key, got: {msg}"
+        );
+        assert!(
+            msg.contains("missing-run"),
+            "error should mention run_id, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn export_table_runs_produces_valid_jsonl() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("ex_runs.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("run-exp-1", &db_path))
+            .expect("persist");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let out = dir.path().join("runs.jsonl");
+        let count = export_table_runs(&conn, &out).expect("export");
+        assert_eq!(count, 1, "should export 1 run");
+        let content = fs::read_to_string(&out).expect("read");
+        let parsed: serde_json::Value = serde_json::from_str(content.trim()).expect("parse");
+        assert_eq!(parsed["id"], "run-exp-1");
+        assert!(parsed.get("transcript").is_some(), "should have transcript field");
+    }
+
+    #[test]
+    fn export_table_segments_produces_valid_jsonl() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("ex_segs.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("run-exp-s", &db_path))
+            .expect("persist");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let out = dir.path().join("segments.jsonl");
+        let count = export_table_segments(&conn, &out).expect("export");
+        assert_eq!(count, 2, "fixture has 2 segments");
+        let content = fs::read_to_string(&out).expect("read");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("parse");
+        assert_eq!(first["run_id"], "run-exp-s");
+        assert_eq!(first["idx"], 0);
+    }
+
+    #[test]
+    fn export_table_events_produces_valid_jsonl() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("ex_evts.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("run-exp-e", &db_path))
+            .expect("persist");
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        let out = dir.path().join("events.jsonl");
+        let count = export_table_events(&conn, &out).expect("export");
+        assert_eq!(count, 2, "fixture has 2 events");
+        let content = fs::read_to_string(&out).expect("read");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("parse");
+        assert_eq!(first["run_id"], "run-exp-e");
+        assert!(first.get("stage").is_some(), "should have stage field");
+    }
+
+    #[test]
+    fn conflict_policy_skip_equals_itself() {
+        assert_eq!(ConflictPolicy::Skip, ConflictPolicy::Skip);
+        assert_ne!(ConflictPolicy::Skip, ConflictPolicy::Reject);
+        assert_ne!(ConflictPolicy::Skip, ConflictPolicy::Overwrite);
+        let _ = format!("{:?}", ConflictPolicy::Skip);
+    }
+
+    #[test]
+    fn archive_stale_lock_renames_with_reason_in_filename() {
+        let dir = tempdir().expect("tempdir");
+        let locks_dir = dir.path().join("locks");
+        fs::create_dir_all(&locks_dir).expect("create locks dir");
+        let lock_path = locks_dir.join("sync.lock");
+        fs::write(&lock_path, b"test lock content").expect("write lock");
+        assert!(lock_path.exists(), "lock file should exist before archive");
+        archive_stale_lock(&lock_path, "stale").expect("archive");
+        assert!(!lock_path.exists(), "lock file should be moved");
+        // Find the archived file.
+        let entries: Vec<_> = fs::read_dir(&locks_dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1, "should have exactly one archived file");
+        let name = entries[0].file_name().to_string_lossy().to_string();
+        assert!(
+            name.contains("stale"),
+            "archived filename should contain reason, got: {name}"
+        );
+        assert!(
+            name.starts_with("sync.lock.stale."),
+            "archived filename should follow expected format, got: {name}"
+        );
+    }
+
+    #[test]
+    fn assert_no_stale_segments_passes_when_all_indices_replaced() {
+        let mut overwritten = HashSet::new();
+        overwritten.insert("run-1".to_owned());
+
+        let mut existing: HashMap<String, HashSet<i64>> = HashMap::new();
+        existing.insert("run-1".to_owned(), HashSet::from([0, 1, 2]));
+
+        let mut imported: HashMap<String, HashSet<i64>> = HashMap::new();
+        imported.insert("run-1".to_owned(), HashSet::from([0, 1, 2]));
+
+        assert!(
+            assert_no_stale_segments_for_overwritten_runs(&overwritten, &existing, &imported)
+                .is_ok(),
+            "should pass when all existing indices are in imported set"
+        );
+    }
+
+    #[test]
+    fn assert_no_stale_segments_errors_on_missing_imported_index() {
+        let mut overwritten = HashSet::new();
+        overwritten.insert("run-1".to_owned());
+
+        let mut existing: HashMap<String, HashSet<i64>> = HashMap::new();
+        existing.insert("run-1".to_owned(), HashSet::from([0, 1, 2]));
+
+        let mut imported: HashMap<String, HashSet<i64>> = HashMap::new();
+        // Only import indices 0 and 1, leaving index 2 stale.
+        imported.insert("run-1".to_owned(), HashSet::from([0, 1]));
+
+        let err = assert_no_stale_segments_for_overwritten_runs(
+            &overwritten,
+            &existing,
+            &imported,
+        )
+        .expect_err("should fail when a stale segment exists");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stale segment"),
+            "error should mention stale segment: {msg}"
+        );
+        assert!(
+            msg.contains("run-1"),
+            "error should mention run id: {msg}"
+        );
+    }
+
+    #[test]
+    fn assert_no_stale_events_errors_on_missing_imported_seq() {
+        let mut overwritten = HashSet::new();
+        overwritten.insert("run-a".to_owned());
+
+        let mut existing: HashMap<String, HashSet<i64>> = HashMap::new();
+        existing.insert("run-a".to_owned(), HashSet::from([1, 2, 3]));
+
+        let mut imported: HashMap<String, HashSet<i64>> = HashMap::new();
+        // Only import seqs 1 and 2, leaving seq 3 stale.
+        imported.insert("run-a".to_owned(), HashSet::from([1, 2]));
+
+        let err = assert_no_stale_events_for_overwritten_runs(
+            &overwritten,
+            &existing,
+            &imported,
+        )
+        .expect_err("should fail when a stale event exists");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stale event"),
+            "error should mention stale event: {msg}"
+        );
+        assert!(
+            msg.contains("run-a"),
+            "error should mention run id: {msg}"
+        );
+    }
+
+    #[test]
+    fn table_columns_sync_returns_columns_for_known_table() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("cols_sync.sqlite3");
+        // Open via RunStore to initialize schema, then use raw connection.
+        let _store = RunStore::open(&db_path).expect("store");
+
+        let conn =
+            Connection::open(db_path.display().to_string()).expect("open");
+        let columns = table_columns_sync(&conn, "segments").expect("table_columns_sync");
+        // segments table has 7 columns: run_id, idx, start_sec, end_sec,
+        // speaker, text, confidence.
+        assert_eq!(
+            columns.len(),
+            7,
+            "segments table should have 7 columns"
+        );
+    }
+
+    #[test]
+    fn reconstruct_column_definition_sync_produces_defs_for_events_table() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("reconstr_sync.sqlite3");
+        let _store = RunStore::open(&db_path).expect("store");
+
+        let conn =
+            Connection::open(db_path.display().to_string()).expect("open");
+        let columns = table_columns_sync(&conn, "events").expect("columns");
+        // events table: run_id, seq, ts_rfc3339, stage, code, message, payload_json.
+        assert_eq!(columns.len(), 7, "events table should have 7 columns");
+
+        let mut names = Vec::new();
+        for row in &columns {
+            let def =
+                reconstruct_column_definition_sync(row).expect("reconstruct");
+            let name = value_to_string_sqlite(row.get(1));
+            assert!(
+                def.contains(&name),
+                "definition should contain column name `{name}`: {def}"
+            );
+            names.push(name);
+        }
+        assert!(
+            names.contains(&"run_id".to_owned()),
+            "events should have run_id column"
+        );
+        assert!(
+            names.contains(&"payload_json".to_owned()),
+            "events should have payload_json column"
+        );
+    }
+
+    #[test]
+    fn assert_no_stale_events_passes_when_all_seqs_replaced() {
+        let mut overwritten = HashSet::new();
+        overwritten.insert("run-x".to_owned());
+
+        let mut existing: HashMap<String, HashSet<i64>> = HashMap::new();
+        existing.insert("run-x".to_owned(), HashSet::from([1, 2, 3]));
+
+        let mut imported: HashMap<String, HashSet<i64>> = HashMap::new();
+        imported.insert("run-x".to_owned(), HashSet::from([1, 2, 3]));
+
+        assert!(
+            assert_no_stale_events_for_overwritten_runs(&overwritten, &existing, &imported)
+                .is_ok(),
+            "should pass when all existing event seqs are in imported set"
+        );
+    }
+
+    #[test]
+    fn sync_parent_dir_succeeds_for_tempdir_file() {
+        let dir = tempdir().expect("tempdir");
+        let file_path = dir.path().join("test.jsonl");
+        std::fs::write(&file_path, "{}").expect("write");
+        assert!(
+            sync_parent_dir(&file_path).is_ok(),
+            "sync_parent_dir should succeed for a file in tempdir"
+        );
+    }
+
+    #[test]
+    fn incremental_export_manifest_cursor_none_round_trip() {
+        let manifest = IncrementalExportManifest {
+            schema_version: "0.1.0".to_owned(),
+            export_format_version: "1".to_owned(),
+            export_mode: "incremental".to_owned(),
+            created_at_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            source_db_path: "/tmp/test.sqlite3".to_owned(),
+            row_counts: RowCounts {
+                runs: 0,
+                segments: 0,
+                events: 0,
+            },
+            checksums: FileChecksums {
+                runs_jsonl_sha256: "aaa".to_owned(),
+                segments_jsonl_sha256: "bbb".to_owned(),
+                events_jsonl_sha256: "ccc".to_owned(),
+            },
+            cursor_used: None,
+            cursor_after: SyncCursor {
+                last_export_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+                last_export_run_id: Some("run-new".to_owned()),
+                last_run_count: 0,
+            },
+        };
+        let json = serde_json::to_string(&manifest).expect("serialize");
+        let parsed: IncrementalExportManifest =
+            serde_json::from_str(&json).expect("deserialize");
+        assert!(parsed.cursor_used.is_none(), "cursor_used should be None");
+        assert_eq!(parsed.row_counts.runs, 0);
+        assert_eq!(parsed.export_mode, "incremental");
+    }
+
+    #[test]
+    fn import_result_debug_displays_counts() {
+        let result = ImportResult {
+            runs_imported: 5,
+            segments_imported: 20,
+            events_imported: 15,
+            conflicts: vec![SyncConflict {
+                table: "runs".to_owned(),
+                key: "run-1".to_owned(),
+                reason: "conflict".to_owned(),
+            }],
+        };
+        let debug = format!("{:?}", result);
+        assert!(
+            debug.contains("runs_imported"),
+            "debug output should contain field name: {debug}"
+        );
+        assert!(
+            debug.contains("5"),
+            "debug output should contain count: {debug}"
+        );
+    }
+
+    #[test]
+    fn collect_exported_run_ids_no_cursor_returns_all_runs() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("collect_ids.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let mut r1 = fixture_report("run-a", &db_path);
+        r1.finished_at_rfc3339 = "2026-01-01T00:00:01Z".to_owned();
+        store.persist_report(&r1).expect("persist r1");
+
+        let mut r2 = fixture_report("run-b", &db_path);
+        r2.finished_at_rfc3339 = "2026-01-01T00:00:02Z".to_owned();
+        store.persist_report(&r2).expect("persist r2");
+
+        let conn =
+            Connection::open(db_path.display().to_string()).expect("open");
+        let ids = collect_exported_run_ids(&conn, None).expect("collect");
+        assert_eq!(ids.len(), 2, "should find both runs");
+        assert_eq!(ids[0], "run-a", "first should be run-a (earlier finished_at)");
+        assert_eq!(ids[1], "run-b", "second should be run-b (later finished_at)");
+    }
+
+    // ------------------------------------------------------------------
+    // sync edge-case tests pass 25
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn max_export_position_returns_none_when_finished_at_is_empty() {
+        // Exercises the defensive guard at line 724:
+        //   if ts.is_empty() || run_id.is_empty() { Ok(None) }
+        // which protects against a row where finished_at is empty-string.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("empty_ts.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let report = fixture_report("run-empty-ts", &db_path);
+        store.persist_report(&report).expect("persist");
+
+        // Forcibly overwrite `finished_at` with empty string via raw SQL.
+        let conn = Connection::open(db_path.display().to_string()).expect("conn");
+        conn.execute_with_params(
+            "UPDATE runs SET finished_at = ?1 WHERE id = ?2",
+            &[
+                SqliteValue::Text(String::new()),
+                SqliteValue::Text("run-empty-ts".to_owned()),
+            ],
+        )
+        .expect("update finished_at to empty");
+
+        let pos = max_export_position(&conn, None).expect("should not error");
+        assert!(
+            pos.is_none(),
+            "empty finished_at should cause max_export_position to return None"
+        );
+    }
+
+    #[test]
+    fn assert_no_stale_segments_skips_run_without_existing_entries() {
+        // Exercises the `continue` branch at line 1312-1313:
+        //   let Some(existing_idxs) = existing_idx_before_by_run.get(run_id) else { continue; };
+        // When overwritten_run_ids contains a run_id that has NO entry in
+        // existing_idx_before_by_run (e.g., a brand-new run that didn't exist
+        // in the target DB before import), the function should skip it and
+        // return Ok(()).
+        let mut overwritten = HashSet::new();
+        overwritten.insert("new-run".to_owned());
+
+        // existing_idx_before_by_run is empty — "new-run" has no pre-existing segments.
+        let existing: HashMap<String, HashSet<i64>> = HashMap::new();
+
+        let mut imported: HashMap<String, HashSet<i64>> = HashMap::new();
+        imported.insert("new-run".to_owned(), HashSet::from([0, 1, 2]));
+
+        assert!(
+            assert_no_stale_segments_for_overwritten_runs(&overwritten, &existing, &imported)
+                .is_ok(),
+            "run_id absent from existing map should be skipped (no stale segments)"
+        );
+    }
+
+    #[test]
+    fn import_events_missing_run_id_field_returns_error() {
+        // Exercises json_str(&row, "run_id")? in import_events (line 1213)
+        // when the "run_id" key is absent. The analogous test for
+        // import_segments exists (import_segments_missing_run_id_field_returns_error)
+        // but import_events was missing this coverage.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("source.sqlite3");
+        let export_dir = dir.path().join("export");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("run-evt", &db_path))
+            .expect("persist");
+        export_inner(&db_path, &export_dir).expect("export");
+
+        // Overwrite events.jsonl with a row that has valid seq but no "run_id".
+        let evt_path = export_dir.join("events.jsonl");
+        let bad_event = json!({
+            "seq": 1,
+            "ts_rfc3339": "2026-01-01T00:00:01Z",
+            "stage": "ingest",
+            "code": "ingest.ok",
+            "message": "input materialized",
+            "payload_json": "{}"
+            // "run_id" intentionally omitted
+        });
+        fs::write(
+            &evt_path,
+            format!("{}\n", serde_json::to_string(&bad_event).expect("ser")),
+        )
+        .expect("write");
+
+        // Update manifest checksums and row counts.
+        let manifest_path = export_dir.join("manifest.json");
+        let mut mval: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read"))
+                .expect("parse");
+        mval["checksums"]["events_jsonl_sha256"] =
+            json!(sha256_file(&evt_path).expect("checksum"));
+        mval["row_counts"]["events"] = json!(1);
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&mval).expect("ser"),
+        )
+        .expect("write manifest");
+
+        let import_db = dir.path().join("import.sqlite3");
+        let err = import_inner(&import_db, &export_dir, ConflictPolicy::Reject)
+            .expect_err("missing run_id in events should fail");
+        let text = err.to_string();
+        assert!(
+            text.contains("missing string field") && text.contains("run_id"),
+            "error should mention missing 'run_id' field: {text}"
+        );
+    }
+
+    #[test]
+    fn import_runs_missing_started_at_in_new_run_returns_error() {
+        // Exercises json_str(&row, "started_at")? at line 1044 inside the
+        // INSERT block of import_runs. The existing test
+        // import_runs_missing_id_field_returns_error exercises the missing "id"
+        // path, but never reaches the INSERT block. This test provides a valid
+        // "id" (so it passes line 930) but omits "started_at", which errors at
+        // line 1044 during the INSERT parameter construction.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("source.sqlite3");
+        let export_dir = dir.path().join("export");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("run-insert", &db_path))
+            .expect("persist");
+        export_inner(&db_path, &export_dir).expect("export");
+
+        // Overwrite runs.jsonl with a row that has "id" but not "started_at".
+        let runs_path = export_dir.join("runs.jsonl");
+        let bad_row = json!({
+            "id": "run-no-started-at",
+            "finished_at": "2026-01-01T00:00:05Z",
+            "backend": "whisper_cpp",
+            "input_path": "test.wav",
+            "normalized_wav_path": "normalized.wav",
+            "request_json": "{}",
+            "result_json": "{}",
+            "warnings_json": "[]",
+            "transcript": "hello"
+            // "started_at" intentionally omitted
+        });
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&bad_row).expect("ser")),
+        )
+        .expect("write");
+
+        // Update manifest checksums and row counts.
+        let manifest_path = export_dir.join("manifest.json");
+        let mut mval: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read"))
+                .expect("parse");
+        mval["checksums"]["runs_jsonl_sha256"] =
+            json!(sha256_file(&runs_path).expect("checksum"));
+        mval["row_counts"]["runs"] = json!(1);
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&mval).expect("ser"),
+        )
+        .expect("write manifest");
+
+        let import_db = dir.path().join("import.sqlite3");
+        let err = import_inner(&import_db, &export_dir, ConflictPolicy::Reject)
+            .expect_err("missing started_at should fail");
+        let text = err.to_string();
+        assert!(
+            text.contains("missing string field") && text.contains("started_at"),
+            "error should mention missing 'started_at' field: {text}"
+        );
+    }
+
+    #[test]
+    fn collect_jsonl_ids_malformed_json_returns_error() {
+        // Exercises the serde_json::from_str error propagation at line 2035
+        // inside collect_jsonl_ids. Existing tests all use valid JSON lines;
+        // this test provides malformed JSON to exercise the `?` propagation.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("bad.jsonl");
+        fs::write(&path, "this is not valid json\n").expect("write");
+
+        let result = collect_jsonl_ids(&path, "id");
+        assert!(
+            result.is_err(),
+            "malformed JSON line should cause collect_jsonl_ids to return an error"
         );
     }
 }

@@ -211,8 +211,13 @@ impl RunStore {
         } else {
             "'{}' AS replay_json"
         };
+        let acceleration_expr = if self.table_has_column("runs", "acceleration_json")? {
+            "acceleration_json"
+        } else {
+            "'{}' AS acceleration_json"
+        };
         let run_sql = format!(
-            "SELECT id, started_at, finished_at, backend, result_json, warnings_json, transcript, {replay_expr} \
+            "SELECT id, started_at, finished_at, backend, result_json, warnings_json, transcript, {replay_expr}, {acceleration_expr} \
              FROM runs WHERE id = ?1 LIMIT 1"
         );
         let rows = self
@@ -232,6 +237,7 @@ impl RunStore {
         let warnings_json = value_to_string(row.get(5));
         let transcript_fallback = value_to_string(row.get(6));
         let replay_json = value_to_string(row.get(7));
+        let acceleration_json = value_to_string(row.get(8));
 
         let result: TranscriptionResult = serde_json::from_str(&result_json).map_err(|error| {
             FwError::Storage(format!("invalid result_json for run {run_id}: {error}"))
@@ -239,6 +245,8 @@ impl RunStore {
 
         let warnings = serde_json::from_str::<Vec<String>>(&warnings_json).unwrap_or_default();
         let replay = serde_json::from_str::<ReplayEnvelope>(&replay_json).unwrap_or_default();
+        let acceleration_override =
+            serde_json::from_str::<crate::model::AccelerationReport>(&acceleration_json).ok();
         let transcript = if result.transcript.trim().is_empty() {
             transcript_fallback
         } else {
@@ -299,7 +307,7 @@ impl RunStore {
             segments: result.segments,
             events,
             warnings,
-            acceleration: result.acceleration,
+            acceleration: acceleration_override.or(result.acceleration),
             replay,
         }))
     }
@@ -716,7 +724,7 @@ CREATE TABLE IF NOT EXISTS _meta (
         let result_json = serde_json::to_string(&report.result)?;
         let warnings_json = serde_json::to_string(&report.warnings)?;
         let has_replay = self.table_has_column("runs", "replay_json")?;
-        
+
         let acceleration_json = match &report.result.acceleration {
             Some(accel) => serde_json::to_string(accel)?,
             None => "{}".to_owned(),
@@ -5857,6 +5865,765 @@ mod tests {
             value_to_string(Some(&SqliteValue::Blob(vec![]))),
             "<blob:0>",
             "empty blob should show zero length"
+        );
+    }
+
+    // ── Task #257 — storage edge-case tests ─────────────────────────
+
+    #[test]
+    fn corrupt_acceleration_json_falls_back_to_result_acceleration() {
+        // When acceleration_json column is corrupt, `.ok()` returns None,
+        // and `.or(result.acceleration)` recovers from result_json.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("corrupt_accel.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let mut report = minimal_report("run-accel-corrupt", &db_path);
+        report.result.acceleration = Some(AccelerationReport {
+            backend: AccelerationBackend::Frankentorch,
+            input_values: 42,
+            normalized_confidences: true,
+            pre_mass: Some(0.8),
+            post_mass: Some(0.9),
+            notes: vec!["test".to_owned()],
+        });
+        store.persist_report(&report).expect("persist");
+
+        // Corrupt the acceleration_json column directly.
+        store
+            .connection
+            .execute_with_params(
+                "UPDATE runs SET acceleration_json = ?1 WHERE id = ?2",
+                &[
+                    SqliteValue::Text("NOT VALID JSON {{{".to_owned()),
+                    SqliteValue::Text("run-accel-corrupt".to_owned()),
+                ],
+            )
+            .expect("corrupt");
+
+        let details = store
+            .load_run_details("run-accel-corrupt")
+            .expect("load")
+            .expect("exists");
+        let accel = details
+            .acceleration
+            .expect("should fall back to result.acceleration");
+        assert_eq!(accel.backend, AccelerationBackend::Frankentorch);
+        assert_eq!(accel.input_values, 42);
+    }
+
+    #[test]
+    fn acceleration_override_from_column_takes_priority_over_result() {
+        // When acceleration_json column has valid but different data than
+        // result_json, the column value (acceleration_override) wins.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("accel_override.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let mut report = minimal_report("run-accel-override", &db_path);
+        report.result.acceleration = Some(AccelerationReport {
+            backend: AccelerationBackend::Frankentorch,
+            input_values: 100,
+            normalized_confidences: false,
+            pre_mass: Some(0.5),
+            post_mass: Some(0.6),
+            notes: vec!["original".to_owned()],
+        });
+        store.persist_report(&report).expect("persist");
+
+        // Overwrite acceleration_json column with different valid data.
+        let override_accel = AccelerationReport {
+            backend: AccelerationBackend::Frankentorch,
+            input_values: 999,
+            normalized_confidences: true,
+            pre_mass: Some(0.99),
+            post_mass: Some(1.0),
+            notes: vec!["overridden".to_owned()],
+        };
+        let override_json = serde_json::to_string(&override_accel).expect("ser");
+        store
+            .connection
+            .execute_with_params(
+                "UPDATE runs SET acceleration_json = ?1 WHERE id = ?2",
+                &[
+                    SqliteValue::Text(override_json),
+                    SqliteValue::Text("run-accel-override".to_owned()),
+                ],
+            )
+            .expect("override");
+
+        let details = store
+            .load_run_details("run-accel-override")
+            .expect("load")
+            .expect("exists");
+        let accel = details.acceleration.expect("should be present");
+        assert_eq!(
+            accel.input_values, 999,
+            "column override should take priority over result_json"
+        );
+        assert_eq!(accel.notes, vec!["overridden".to_owned()]);
+    }
+
+    #[test]
+    fn concurrent_session_execute_with_params_inserts_data() {
+        // The only existing test for execute_with_params tests the error path.
+        // This tests the happy path: valid INSERT with parameters.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("params_happy.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let session = store
+            .begin_concurrent_session("params_ok")
+            .expect("session");
+        let affected = session
+            .execute_with_params(
+                "INSERT INTO _meta (key, value) VALUES (?1, ?2)",
+                &[
+                    SqliteValue::Text("test_key".to_owned()),
+                    SqliteValue::Text("test_value".to_owned()),
+                ],
+            )
+            .expect("insert with params");
+        assert!(affected >= 1, "should affect at least 1 row");
+        session.commit().expect("commit");
+
+        let rows = store
+            .connection
+            .query("SELECT value FROM _meta WHERE key = 'test_key'")
+            .expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            super::value_to_string(rows[0].get(0)),
+            "test_value",
+            "parameterized insert should persist the value"
+        );
+    }
+
+    #[test]
+    fn persist_report_duplicate_different_data_preserves_original() {
+        // Existing test (persist_report_twice_same_id_succeeds_idempotently)
+        // re-persists identical data. This tests with DIFFERENT data on the
+        // same run_id, verifying original transcript is preserved.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("dup_diff.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let report = minimal_report("run-dup-diff", &db_path);
+        store.persist_report(&report).expect("first persist");
+
+        // Create a modified report with different transcript.
+        let mut modified = minimal_report("run-dup-diff", &db_path);
+        modified.result.transcript = "TOTALLY DIFFERENT TRANSCRIPT".to_owned();
+        // Second persist may succeed (no-op) or fail (unique constraint);
+        // either way, original data must remain intact.
+        let _ = store.persist_report(&modified);
+
+        let details = store
+            .load_run_details("run-dup-diff")
+            .expect("load")
+            .expect("exists");
+        assert_eq!(
+            details.transcript, "test",
+            "original transcript should be preserved, not overwritten"
+        );
+    }
+
+    #[test]
+    fn migration_v2_preserves_custom_index_during_column_addition() {
+        // The recreate_table_with_added_column function captures and
+        // recreates indexes during table rebuild. This verifies that
+        // a pre-existing custom index survives the v2 migration.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("idx_preserve.sqlite3");
+
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("open");
+        // Create v1 schema (no replay_json, no acceleration_json).
+        conn.execute(
+            "CREATE TABLE runs (\
+                id TEXT PRIMARY KEY, \
+                started_at TEXT NOT NULL, \
+                finished_at TEXT NOT NULL, \
+                backend TEXT NOT NULL, \
+                input_path TEXT NOT NULL, \
+                normalized_wav_path TEXT NOT NULL, \
+                request_json TEXT NOT NULL, \
+                result_json TEXT NOT NULL, \
+                warnings_json TEXT NOT NULL, \
+                transcript TEXT NOT NULL\
+            );",
+        )
+        .expect("create runs");
+        conn.execute(
+            "CREATE TABLE segments (\
+                run_id TEXT NOT NULL, idx INTEGER NOT NULL, \
+                start_sec REAL, end_sec REAL, speaker TEXT, \
+                text TEXT NOT NULL, confidence REAL, \
+                PRIMARY KEY (run_id, idx)\
+            );",
+        )
+        .expect("create segments");
+        conn.execute(
+            "CREATE TABLE events (\
+                run_id TEXT NOT NULL, seq INTEGER NOT NULL, \
+                ts_rfc3339 TEXT NOT NULL, stage TEXT NOT NULL, \
+                code TEXT NOT NULL, message TEXT NOT NULL, \
+                payload_json TEXT NOT NULL, \
+                PRIMARY KEY (run_id, seq)\
+            );",
+        )
+        .expect("create events");
+        conn.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("create _meta");
+
+        // Add a custom index BEFORE opening with RunStore.
+        conn.execute("CREATE INDEX idx_custom_backend ON runs(backend);")
+            .expect("create custom index");
+        drop(conn);
+
+        // Open with RunStore → triggers migration v1→v2→v3.
+        // v2 calls ensure_column_exists which rebuilds the table twice.
+        let store = RunStore::open(&db_path).expect("open should migrate");
+        assert_eq!(
+            store.current_schema_version().expect("version"),
+            RunStore::SCHEMA_VERSION
+        );
+
+        // Verify custom index survived the table rebuilds.
+        let rows = store
+            .connection
+            .query(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_custom_backend';",
+            )
+            .expect("query indexes");
+        assert_eq!(
+            rows.len(),
+            1,
+            "custom index should survive table rebuild during migration"
+        );
+
+        // Also verify the new columns exist.
+        assert!(store.table_has_column("runs", "replay_json").expect("check"));
+        assert!(store.table_has_column("runs", "acceleration_json").expect("check"));
+    }
+
+    #[test]
+    fn table_has_column_returns_false_for_nonexistent_column() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("no_col.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+        assert!(
+            !store
+                .table_has_column("runs", "totally_fake_column")
+                .expect("should succeed"),
+            "nonexistent column should return false"
+        );
+    }
+
+    #[test]
+    fn table_columns_returns_expected_column_count() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("cols.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+        // The v3 schema `runs` table has 12 columns:
+        // id, started_at, finished_at, backend, input_path,
+        // normalized_wav_path, request_json, result_json,
+        // warnings_json, transcript, replay_json, acceleration_json.
+        let columns = store.table_columns("runs").expect("table_columns");
+        assert_eq!(
+            columns.len(),
+            12,
+            "runs table should have 12 columns in v3 schema"
+        );
+    }
+
+    #[test]
+    fn concurrent_session_query_reads_within_savepoint() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("sess_query.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+        let report = minimal_report("sess-q-1", &db_path);
+        store.persist_report(&report).expect("persist");
+
+        let session = store
+            .begin_concurrent_session("qtest")
+            .expect("begin session");
+        let rows = session
+            .query("SELECT id FROM runs WHERE id = 'sess-q-1';")
+            .expect("session query");
+        assert_eq!(rows.len(), 1, "session query should see the persisted run");
+        session.commit().expect("commit");
+    }
+
+    #[test]
+    fn reconstruct_column_definition_produces_valid_defs_for_runs_table() {
+        // reconstruct_column_definition is used during table rebuilds.
+        // Verify it produces a non-empty, well-formed definition for
+        // every column in the runs table.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("reconstruct.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let columns = store.table_columns("runs").expect("columns");
+        assert!(
+            !columns.is_empty(),
+            "runs table should have columns"
+        );
+
+        let mut names = Vec::new();
+        for row in &columns {
+            let def = super::reconstruct_column_definition(row).expect("reconstruct");
+            let name = super::value_to_string(row.get(1));
+            // Each definition must contain the quoted column name.
+            assert!(
+                def.contains(&name),
+                "definition should contain column name `{name}`: {def}"
+            );
+            // Each definition must include the type (TEXT or REAL).
+            let typ = super::value_to_string(row.get(2));
+            if !typ.is_empty() {
+                assert!(
+                    def.contains(&typ),
+                    "definition should contain type `{typ}`: {def}"
+                );
+            }
+            names.push(name);
+        }
+        // Verify expected columns are present.
+        assert!(names.contains(&"id".to_owned()), "runs should have id");
+        assert!(
+            names.contains(&"transcript".to_owned()),
+            "runs should have transcript"
+        );
+        assert!(
+            names.contains(&"replay_json".to_owned()),
+            "runs should have replay_json"
+        );
+    }
+
+    #[test]
+    fn table_has_column_returns_false_for_nonexistent_table() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("no_table.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+        // PRAGMA table_info on a nonexistent table returns zero rows,
+        // so table_has_column should return false (not error).
+        assert!(
+            !store
+                .table_has_column("totally_fake_table", "any_column")
+                .expect("should succeed without error"),
+            "nonexistent table should return false, not an error"
+        );
+    }
+
+    // ── Task #306 — storage edge-case tests pass 2 ──────────────────
+
+    #[test]
+    fn apply_migration_v1_is_noop() {
+        // apply_migration(1) is the v1 base migration which simply returns Ok(()).
+        // Only apply_migration(999) was previously tested; the v1 path was untested.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("mig_v1.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+        // Directly invoke the v1 migration — it should succeed as a no-op.
+        store.apply_migration(1).expect("v1 migration should be a no-op");
+        // Schema should still be intact and usable.
+        store
+            .persist_report(&minimal_report("after-v1", &db_path))
+            .expect("persist after v1 migration");
+        let runs = store.list_recent_runs(10).expect("list");
+        assert_eq!(runs.len(), 1);
+    }
+
+    #[test]
+    fn run_migrations_shortcut_v0_to_v2_when_fresh_shape() {
+        // When schema_version == 0 but both replay_json AND acceleration_json
+        // columns already exist (fresh schema), run_migrations shortcuts to v2
+        // before continuing to v3. This tests the code path at lines 441-448.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("shortcut_v0.sqlite3");
+
+        // Create a "fresh shape" DB at version 0: tables with both columns
+        // present but no schema_version key in _meta.
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        conn.execute(
+            "CREATE TABLE runs (\
+                id TEXT PRIMARY KEY, \
+                started_at TEXT NOT NULL, \
+                finished_at TEXT NOT NULL, \
+                backend TEXT NOT NULL, \
+                input_path TEXT NOT NULL, \
+                normalized_wav_path TEXT NOT NULL, \
+                request_json TEXT NOT NULL, \
+                result_json TEXT NOT NULL, \
+                warnings_json TEXT NOT NULL, \
+                transcript TEXT NOT NULL, \
+                replay_json TEXT NOT NULL DEFAULT '{}', \
+                acceleration_json TEXT NOT NULL DEFAULT '{}'\
+            );",
+        )
+        .expect("create runs");
+        conn.execute(
+            "CREATE TABLE segments (\
+                run_id TEXT NOT NULL, \
+                idx INTEGER NOT NULL, \
+                start_sec REAL, end_sec REAL, speaker TEXT, \
+                text TEXT NOT NULL, confidence REAL, \
+                PRIMARY KEY (run_id, idx)\
+            );",
+        )
+        .expect("create segments");
+        conn.execute(
+            "CREATE TABLE events (\
+                run_id TEXT NOT NULL, \
+                seq INTEGER NOT NULL, \
+                ts_rfc3339 TEXT NOT NULL, stage TEXT NOT NULL, \
+                code TEXT NOT NULL, message TEXT NOT NULL, \
+                payload_json TEXT NOT NULL, \
+                PRIMARY KEY (run_id, seq)\
+            );",
+        )
+        .expect("create events");
+        conn.execute(
+            "CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .expect("create _meta");
+        // Crucially: do NOT insert a schema_version row → version == 0.
+        drop(conn);
+
+        // Open with RunStore. The shortcut should detect both columns,
+        // jump to v2, then migrate to v3.
+        let store = RunStore::open(&db_path).expect("shortcut migration");
+        let version = store.current_schema_version().expect("version");
+        assert_eq!(
+            version,
+            RunStore::SCHEMA_VERSION,
+            "should reach latest version via shortcut"
+        );
+
+        // DB should be fully usable.
+        store
+            .persist_report(&minimal_report("shortcut-run", &db_path))
+            .expect("persist");
+        let details = store
+            .load_run_details("shortcut-run")
+            .expect("q")
+            .expect("exists");
+        assert_eq!(details.run_id, "shortcut-run");
+    }
+
+    #[test]
+    fn ensure_column_exists_journal_mode_restored_after_add() {
+        // ensure_column_exists switches from WAL to DELETE mode for DDL,
+        // then restores WAL. Verify the journal mode restoration path.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("journal_restore.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        // Verify we start in WAL mode.
+        let mode_before = store
+            .connection
+            .query("PRAGMA journal_mode;")
+            .expect("pragma");
+        let mode_str = super::value_to_string(mode_before.first().and_then(|r| r.get(0)));
+        assert!(
+            mode_str.eq_ignore_ascii_case("wal"),
+            "should start in WAL mode, got: {mode_str}"
+        );
+
+        // Add a column (triggers WAL→DELETE→WAL round-trip).
+        store
+            .ensure_column_exists("runs", "extra_col", "TEXT NOT NULL DEFAULT 'hi'")
+            .expect("add column");
+
+        // Verify journal mode was restored to WAL.
+        let mode_after = store
+            .connection
+            .query("PRAGMA journal_mode;")
+            .expect("pragma after");
+        let restored = super::value_to_string(mode_after.first().and_then(|r| r.get(0)));
+        assert!(
+            restored.eq_ignore_ascii_case("wal"),
+            "journal mode should be restored to WAL after column addition, got: {restored}"
+        );
+
+        // Store should remain fully functional.
+        store
+            .persist_report(&minimal_report("after-journal", &db_path))
+            .expect("persist should work after journal mode restore");
+    }
+
+    #[test]
+    fn migration_from_v1_preserves_existing_run_data() {
+        // Insert a row into a legacy v1 schema (no replay_json, no acceleration_json),
+        // then open with RunStore to trigger migration. The existing row should be
+        // loadable with default replay/acceleration values.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("v1_data.sqlite3");
+
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        // Create v1 schema.
+        conn.execute(
+            "CREATE TABLE runs (\
+                id TEXT PRIMARY KEY, \
+                started_at TEXT NOT NULL, \
+                finished_at TEXT NOT NULL, \
+                backend TEXT NOT NULL, \
+                input_path TEXT NOT NULL, \
+                normalized_wav_path TEXT NOT NULL, \
+                request_json TEXT NOT NULL, \
+                result_json TEXT NOT NULL, \
+                warnings_json TEXT NOT NULL, \
+                transcript TEXT NOT NULL\
+            );",
+        )
+        .expect("create runs");
+        conn.execute(
+            "CREATE TABLE segments (\
+                run_id TEXT NOT NULL, idx INTEGER NOT NULL, \
+                start_sec REAL, end_sec REAL, speaker TEXT, \
+                text TEXT NOT NULL, confidence REAL, \
+                PRIMARY KEY (run_id, idx)\
+            );",
+        )
+        .expect("create segments");
+        conn.execute(
+            "CREATE TABLE events (\
+                run_id TEXT NOT NULL, seq INTEGER NOT NULL, \
+                ts_rfc3339 TEXT NOT NULL, stage TEXT NOT NULL, \
+                code TEXT NOT NULL, message TEXT NOT NULL, \
+                payload_json TEXT NOT NULL, \
+                PRIMARY KEY (run_id, seq)\
+            );",
+        )
+        .expect("create events");
+        conn.execute(
+            "CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .expect("create _meta");
+
+        // Insert a v1 row (no replay_json or acceleration_json columns).
+        let result_json = serde_json::json!({
+            "backend": "whisper_cpp",
+            "transcript": "legacy audio",
+            "language": "en",
+            "segments": [{"start_sec": 0.0, "end_sec": 1.0, "text": "hello"}],
+            "acceleration": null,
+            "raw_output": {},
+            "artifact_paths": []
+        });
+        conn.execute_with_params(
+            "INSERT INTO runs (id, started_at, finished_at, backend, input_path, \
+             normalized_wav_path, request_json, result_json, warnings_json, transcript) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            &[
+                SqliteValue::Text("legacy-run".to_owned()),
+                SqliteValue::Text("2025-06-01T00:00:00Z".to_owned()),
+                SqliteValue::Text("2025-06-01T00:00:05Z".to_owned()),
+                SqliteValue::Text("whisper_cpp".to_owned()),
+                SqliteValue::Text("old.wav".to_owned()),
+                SqliteValue::Text("old_norm.wav".to_owned()),
+                SqliteValue::Text("{}".to_owned()),
+                SqliteValue::Text(result_json.to_string()),
+                SqliteValue::Text("[]".to_owned()),
+                SqliteValue::Text("legacy audio".to_owned()),
+            ],
+        )
+        .expect("insert legacy run");
+        drop(conn);
+
+        // Open with RunStore → triggers migration (v0→v2→v3).
+        let store = RunStore::open(&db_path).expect("open after migration");
+        let details = store
+            .load_run_details("legacy-run")
+            .expect("q")
+            .expect("legacy row should be loadable after migration");
+        assert_eq!(details.run_id, "legacy-run");
+        assert_eq!(details.transcript, "legacy audio");
+        // Replay should default to empty (column added with DEFAULT '{}').
+        assert!(
+            details.replay.input_content_hash.is_none(),
+            "migrated legacy run should have empty replay defaults"
+        );
+    }
+
+    #[test]
+    fn set_schema_version_inserts_when_key_missing() {
+        // set_schema_version has an INSERT fallback when UPDATE affects 0 rows
+        // (i.e., when the schema_version key doesn't yet exist in _meta).
+        // The existing test (set_schema_version_overwrites_existing_value) only
+        // tests the UPDATE path; this tests the INSERT fallback.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("ver_insert.sqlite3");
+
+        // Create a bare DB with _meta but no schema_version row.
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        conn.execute(
+            "CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .expect("create _meta");
+        // Also create required tables so RunStore operations work.
+        conn.execute(
+            "CREATE TABLE runs (\
+                id TEXT PRIMARY KEY, started_at TEXT, finished_at TEXT, \
+                backend TEXT, input_path TEXT, normalized_wav_path TEXT, \
+                request_json TEXT, result_json TEXT, warnings_json TEXT, \
+                transcript TEXT, replay_json TEXT DEFAULT '{}', \
+                acceleration_json TEXT DEFAULT '{}'\
+            );",
+        )
+        .expect("create runs");
+        conn.execute(
+            "CREATE TABLE segments (\
+                run_id TEXT, idx INTEGER, start_sec REAL, end_sec REAL, \
+                speaker TEXT, text TEXT, confidence REAL, PRIMARY KEY (run_id, idx)\
+            );",
+        )
+        .expect("create segments");
+        conn.execute(
+            "CREATE TABLE events (\
+                run_id TEXT, seq INTEGER, ts_rfc3339 TEXT, stage TEXT, \
+                code TEXT, message TEXT, payload_json TEXT, \
+                PRIMARY KEY (run_id, seq)\
+            );",
+        )
+        .expect("create events");
+
+        // Confirm no schema_version row exists.
+        let rows = conn
+            .query("SELECT value FROM _meta WHERE key = 'schema_version';")
+            .expect("query");
+        assert!(rows.is_empty(), "should have no schema_version row yet");
+        drop(conn);
+
+        // Open with RunStore — this triggers set_schema_version via run_migrations,
+        // hitting the INSERT fallback since the key doesn't exist.
+        let store = RunStore::open(&db_path).expect("open");
+        let version = store.current_schema_version().expect("version");
+        assert_eq!(
+            version,
+            RunStore::SCHEMA_VERSION,
+            "version should be set to latest after INSERT fallback"
+        );
+
+        // Verify the row was actually inserted (not just cached).
+        let rows = store
+            .connection
+            .query("SELECT value FROM _meta WHERE key = 'schema_version';")
+            .expect("query");
+        assert_eq!(rows.len(), 1, "schema_version row should now exist");
+    }
+
+    // ------------------------------------------------------------------
+    // storage edge-case tests pass 3
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_migration_v2_idempotent_when_columns_exist() {
+        // Directly calls `apply_migration(2)` which ensures replay_json and
+        // acceleration_json columns exist. On a fresh RunStore these columns
+        // are already present from initialize_schema, so the call should be
+        // a no-op that succeeds without error.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("mig_v2.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        // apply_migration(2) should be idempotent — columns already exist.
+        store.apply_migration(2).expect("v2 migration should succeed when columns exist");
+
+        // Verify data operations still work after the idempotent migration.
+        store.persist_report(&minimal_report("after-v2", &db_path)).expect("persist");
+        let runs = store.list_recent_runs(10).expect("list");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "after-v2");
+    }
+
+    #[test]
+    fn recreate_table_with_added_column_empty_columns_returns_error() {
+        // Exercises the guard at lines 593-597:
+        //   if existing_columns.is_empty() {
+        //       return Err(FwError::Storage("cannot rebuild table ... no discovered columns"));
+        //   }
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("empty_cols.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let empty_cols: Vec<fsqlite::Row> = vec![];
+        let err = store
+            .recreate_table_with_added_column("runs", &empty_cols, "new_col", "TEXT DEFAULT ''")
+            .expect_err("should fail with empty columns");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no discovered columns"),
+            "error should mention no discovered columns: {msg}"
+        );
+    }
+
+    #[test]
+    fn table_columns_returns_empty_for_nonexistent_table() {
+        // Exercises `table_columns` on a table that does not exist.
+        // PRAGMA table_info returns zero rows for nonexistent tables.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("no_such_table.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let columns = store.table_columns("completely_fictional_table").expect("columns");
+        assert!(
+            columns.is_empty(),
+            "nonexistent table should return empty column list"
+        );
+    }
+
+    #[test]
+    fn concurrent_session_query_method_reads_within_savepoint() {
+        // Exercises `ConcurrentPersistSession::query()` (line 1014-1018).
+        // The execute() and execute_with_params() methods on the session are
+        // tested elsewhere, but `query()` has never been called in tests.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("session_query.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        store
+            .persist_report(&minimal_report("query-run", &db_path))
+            .expect("persist");
+
+        let session = store
+            .begin_concurrent_session("querytest")
+            .expect("begin session");
+
+        // Use session.query() to read data within the savepoint.
+        let rows = session
+            .query("SELECT id, transcript FROM runs WHERE id = 'query-run'")
+            .expect("session query");
+        assert_eq!(rows.len(), 1, "should find the persisted run");
+        let id = super::value_to_string(rows[0].get(0));
+        assert_eq!(id, "query-run");
+
+        session.commit().expect("commit");
+    }
+
+    #[test]
+    fn ensure_column_exists_on_nonexistent_table_returns_error() {
+        // When called with a table that doesn't exist, table_columns returns
+        // empty, the column is not found, and recreate_table_with_added_column
+        // is called with empty columns — hitting the "no discovered columns"
+        // error guard at lines 593-597, wrapped by the rebuild error format
+        // at line 542-544.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("no_table.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let err = store
+            .ensure_column_exists("phantom_table", "phantom_col", "TEXT DEFAULT ''")
+            .expect_err("should fail for nonexistent table");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no discovered columns") || msg.contains("failed to add column"),
+            "error should mention rebuild failure: {msg}"
         );
     }
 }
