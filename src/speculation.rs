@@ -850,8 +850,21 @@ pub struct BetaPosterior {
 }
 
 impl BetaPosterior {
+    /// Create a new Beta posterior with the given parameters.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `alpha` or `beta` is not positive and finite.
     #[must_use]
     pub fn new(alpha: f64, beta: f64) -> Self {
+        assert!(
+            alpha > 0.0 && alpha.is_finite(),
+            "BetaPosterior alpha must be positive and finite, got {alpha}"
+        );
+        assert!(
+            beta > 0.0 && beta.is_finite(),
+            "BetaPosterior beta must be positive and finite, got {beta}"
+        );
         Self { alpha, beta }
     }
 
@@ -1032,13 +1045,8 @@ impl SpeculationWindowController {
             self.state.correction_rate = corrections / total;
         }
 
-        self.state.mean_wer = if is_correction {
-            let prev_total = self.state.mean_wer * (self.state.window_count - 1) as f64;
-            (prev_total + drift.wer_approx) / self.state.window_count as f64
-        } else {
-            self.state.mean_wer * (self.state.window_count - 1) as f64
-                / self.state.window_count as f64
-        };
+        let prev_total = self.state.mean_wer * (self.state.window_count - 1) as f64;
+        self.state.mean_wer = (prev_total + drift.wer_approx) / self.state.window_count as f64;
         self.state.current_window_ms = self.current_window_ms;
 
         let predicted = self.posterior.mean();
@@ -1424,6 +1432,30 @@ mod tests {
             p3.observe_confirmation();
         }
         assert!(p3.mean() < 0.5);
+    }
+
+    #[test]
+    #[should_panic(expected = "alpha must be positive")]
+    fn beta_posterior_rejects_zero_alpha() {
+        BetaPosterior::new(0.0, 1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "beta must be positive")]
+    fn beta_posterior_rejects_negative_beta() {
+        BetaPosterior::new(1.0, -1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "alpha must be positive")]
+    fn beta_posterior_rejects_nan_alpha() {
+        BetaPosterior::new(f64::NAN, 1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "beta must be positive")]
+    fn beta_posterior_rejects_infinite_beta() {
+        BetaPosterior::new(1.0, f64::INFINITY);
     }
 
     #[test]
