@@ -356,9 +356,13 @@ mod tests {
         BackendKind, BackendParams, InputSource, SpeakerConstraints, TranscribeRequest,
     };
 
-    use crate::backend::DiarizationPilot;
+    use crate::backend::{DiarizationPilot, DiarizedSegment, DiarizedTranscript};
 
-    use super::{build_native_projection, is_available, run};
+    use super::{
+        build_native_projection, estimate_duration_ms, format_srt_time, is_available, render_srt,
+        requested_num_speakers, run, speaker_inventory, to_transcription_segments,
+    };
+    use crate::model::TranscriptionSegment;
 
     fn request() -> TranscribeRequest {
         TranscribeRequest {
@@ -556,5 +560,251 @@ mod tests {
             result.is_err(),
             "expired token should cancel waveform-aware diarization projection"
         );
+    }
+
+    #[test]
+    fn requested_num_speakers_all_branches() {
+        // num_speakers = Some(0) should be filtered out
+        let mut req = request();
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: Some(0),
+            min_speakers: None,
+            max_speakers: None,
+        });
+        assert_eq!(requested_num_speakers(&req), None);
+
+        // num_speakers = Some(3)
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: Some(3),
+            min_speakers: None,
+            max_speakers: None,
+        });
+        assert_eq!(requested_num_speakers(&req), Some(3));
+
+        // (min, max) average
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(2),
+            max_speakers: Some(6),
+        });
+        assert_eq!(requested_num_speakers(&req), Some(4));
+
+        // min only
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(5),
+            max_speakers: None,
+        });
+        assert_eq!(requested_num_speakers(&req), Some(5));
+
+        // max only
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: None,
+            max_speakers: Some(4),
+        });
+        assert_eq!(requested_num_speakers(&req), Some(4));
+
+        // no constraints
+        req.backend_params.speaker_constraints = None;
+        assert_eq!(requested_num_speakers(&req), None);
+    }
+
+    #[test]
+    fn estimate_duration_ms_clamps_hint_and_falls_back() {
+        let mut req = request();
+
+        // When duration_ms hint is provided, clamp to [1_000, 1_800_000]
+        req.backend_params.duration_ms = Some(500);
+        assert_eq!(estimate_duration_ms(&req, Path::new("no_such.wav")), 1_000);
+
+        req.backend_params.duration_ms = Some(5_000_000);
+        assert_eq!(
+            estimate_duration_ms(&req, Path::new("no_such.wav")),
+            1_800_000
+        );
+
+        // When no hint and no file → DEFAULT_DURATION_MS (18_000)
+        req.backend_params.duration_ms = None;
+        assert_eq!(estimate_duration_ms(&req, Path::new("no_such.wav")), 18_000);
+    }
+
+    #[test]
+    fn format_srt_time_edge_cases() {
+        assert_eq!(format_srt_time(0.0), "00:00:00,000");
+        assert_eq!(format_srt_time(1.5), "00:00:01,500");
+        assert_eq!(format_srt_time(3661.123), "01:01:01,123");
+        // Negative clamped to 0
+        assert_eq!(format_srt_time(-5.0), "00:00:00,000");
+    }
+
+    #[test]
+    fn to_transcription_segments_suppress_numerals_and_punctuation() {
+        let diarized = DiarizedTranscript {
+            segments: vec![
+                DiarizedSegment {
+                    text: "Hello 123 world".to_owned(),
+                    start_ms: 0,
+                    end_ms: 1000,
+                    speaker_id: "SPEAKER_00".to_owned(),
+                    confidence: 0.8,
+                },
+                DiarizedSegment {
+                    text: "Already ends!".to_owned(),
+                    start_ms: 1000,
+                    end_ms: 2000,
+                    speaker_id: "SPEAKER_01".to_owned(),
+                    confidence: 0.9,
+                },
+            ],
+            speakers: vec![],
+        };
+
+        // suppress_numerals=true, punctuation=true
+        let result = to_transcription_segments(&diarized, true, true, None).expect("segments");
+        assert_eq!(result[0].text, "Hello  world.");
+        // Already ends with '!' — no extra period
+        assert_eq!(result[1].text, "Already ends!");
+        assert_eq!(result[0].speaker, Some("SPEAKER_00".to_owned()));
+        assert!((result[0].start_sec.unwrap() - 0.0).abs() < 0.001);
+        assert!((result[0].end_sec.unwrap() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn speaker_inventory_with_empty_segments() {
+        let segments: Vec<DiarizedSegment> = vec![];
+        let speakers = speaker_inventory(&segments, 3);
+        assert_eq!(speakers.len(), 3);
+        assert_eq!(speakers[0].id, "SPEAKER_00");
+        assert_eq!(speakers[0].label, "Speaker A");
+        assert_eq!(speakers[0].total_duration_ms, 0);
+        assert_eq!(speakers[2].id, "SPEAKER_02");
+        assert_eq!(speakers[2].label, "Speaker C");
+    }
+
+    // ── Task #208 — whisper_diarization_native edge-case tests ──────
+
+    #[test]
+    fn requested_num_speakers_inverted_range_returns_none() {
+        let mut req = request();
+        // min > max → falls through to wildcard → None.
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(5),
+            max_speakers: Some(2),
+        });
+        assert_eq!(
+            requested_num_speakers(&req),
+            None,
+            "inverted min/max range should return None"
+        );
+
+        // min == max → valid (both guards satisfied).
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(3),
+            max_speakers: Some(3),
+        });
+        assert_eq!(
+            requested_num_speakers(&req),
+            Some(3),
+            "min == max should produce that value"
+        );
+    }
+
+    #[test]
+    fn requested_num_speakers_zero_min_and_zero_max_return_none() {
+        let mut req = request();
+        // min = 0 only → fails the `min > 0` guard → None.
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(0),
+            max_speakers: None,
+        });
+        assert_eq!(requested_num_speakers(&req), None);
+
+        // max = 0 only → fails the `max > 0` guard → None.
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: None,
+            max_speakers: Some(0),
+        });
+        assert_eq!(requested_num_speakers(&req), None);
+    }
+
+    #[test]
+    fn estimate_duration_ms_tiny_file_clamps_to_min() {
+        let tmp = tempdir().expect("tempdir");
+        let tiny = tmp.path().join("tiny.raw");
+        // 4 bytes < WAV_HEADER_BYTES (44) → saturating_sub → 0 audio bytes
+        // → estimated 0 → clamped to MIN_DURATION_MS (1_000).
+        std::fs::write(&tiny, b"RIFF").unwrap();
+
+        let mut req = request();
+        req.backend_params.duration_ms = None;
+        assert_eq!(
+            estimate_duration_ms(&req, &tiny),
+            1_000,
+            "sub-header file should clamp to MIN_DURATION_MS"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_question_mark_not_double_punctuated() {
+        let diarized = DiarizedTranscript {
+            segments: vec![DiarizedSegment {
+                text: "Is this correct?".to_owned(),
+                start_ms: 0,
+                end_ms: 1000,
+                speaker_id: "SPEAKER_00".to_owned(),
+                confidence: 0.8,
+            }],
+            speakers: vec![],
+        };
+        // punctuation enabled, but text already ends with '?'.
+        let result = to_transcription_segments(&diarized, true, false, None).unwrap();
+        assert_eq!(
+            result[0].text, "Is this correct?",
+            "trailing '?' should not receive extra period"
+        );
+    }
+
+    #[test]
+    fn render_srt_none_timestamps_fall_back() {
+        // end_sec = None → falls back to start_sec.
+        let segs = vec![
+            TranscriptionSegment {
+                start_sec: Some(1.0),
+                end_sec: None,
+                text: "Hello".to_owned(),
+                speaker: Some("SPEAKER_00".to_owned()),
+                confidence: Some(0.9),
+            },
+            // Both None → both fall back to 0.0.
+            TranscriptionSegment {
+                start_sec: None,
+                end_sec: None,
+                text: "World".to_owned(),
+                speaker: None,
+                confidence: None,
+            },
+        ];
+        let srt = render_srt(&segs);
+
+        // Entry 1: start=1.0, end falls back to start=1.0.
+        assert!(
+            srt.contains("00:00:01,000 --> 00:00:01,000"),
+            "None end_sec should fall back to start_sec: {srt}"
+        );
+        assert!(srt.contains("[SPEAKER_00] Hello"));
+
+        // Entry 2: both None → both 0.0.
+        assert!(
+            srt.contains("00:00:00,000 --> 00:00:00,000"),
+            "both None should fall back to 0.0: {srt}"
+        );
+        // No speaker prefix.
+        assert!(srt.contains("World"));
+        assert!(!srt.contains("[SPEAKER_") || srt.matches("[SPEAKER_").count() == 1);
     }
 }

@@ -249,27 +249,36 @@ pub(crate) fn build_args(
 
     // Word-level timestamp parameters (bd-1rj.2).
     if let Some(wt) = &bp.word_timestamps {
-        if wt.enabled {
-            // Enable word-level output with max-len 1 (one word per segment).
-            args.push("-ml".to_owned());
-            args.push("1".to_owned());
-        }
-        if let Some(max_len) = wt.max_len {
-            // Override max-len if explicitly set (takes precedence).
+        let ml_val = if let Some(max_len) = wt.max_len {
+            Some(max_len.to_string())
+        } else if wt.enabled {
+            Some("1".to_owned())
+        } else {
+            None
+        };
+        if let Some(val) = ml_val {
             if let Some(ml_idx) = args.iter().position(|a| a == "-ml") {
-                args[ml_idx + 1] = max_len.to_string();
+                args[ml_idx + 1] = val;
             } else {
                 args.push("-ml".to_owned());
-                args.push(max_len.to_string());
+                args.push(val);
             }
         }
         if let Some(token_threshold) = wt.token_threshold {
-            args.push("-wt".to_owned());
-            args.push(token_threshold.to_string());
+            if let Some(wt_idx) = args.iter().position(|a| a == "-wt") {
+                args[wt_idx + 1] = token_threshold.to_string();
+            } else {
+                args.push("-wt".to_owned());
+                args.push(token_threshold.to_string());
+            }
         }
         if let Some(token_sum_threshold) = wt.token_sum_threshold {
-            args.push("-wtps".to_owned());
-            args.push(token_sum_threshold.to_string());
+            if let Some(wtps_idx) = args.iter().position(|a| a == "-wtps") {
+                args[wtps_idx + 1] = token_sum_threshold.to_string();
+            } else {
+                args.push("-wtps".to_owned());
+                args.push(token_sum_threshold.to_string());
+            }
         }
     }
 
@@ -545,7 +554,7 @@ mod tests {
             "--temperature-inc",
             "-et",
             "-lpt",
-            "-ns",
+            "-nth",
             "--vad-model",
             "--vad-threshold",
             "-nt",
@@ -1706,6 +1715,125 @@ mod tests {
     // -----------------------------------------------------------------------
     // bd-1rj.2: Streaming engine tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn decoding_ml_and_word_timestamps_enabled_without_max_len_uses_enabled_default() {
+        // When decoding.max_segment_length is set AND word_timestamps.enabled=true
+        // but max_len is None, the word_timestamps default of "1" overrides the decoding param.
+        let mut request = minimal_request();
+        request.backend_params.decoding = Some(DecodingParams {
+            max_segment_length: Some(40),
+            ..DecodingParams::default()
+        });
+        request.backend_params.word_timestamps = Some(WordTimestampParams {
+            enabled: true,
+            max_len: None,
+            ..WordTimestampParams::default()
+        });
+        let args = build_args(&request, &PathBuf::from("n.wav"), &PathBuf::from("/o"));
+        let ml_positions: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "-ml")
+            .map(|(i, _)| i)
+            .collect();
+        // One -ml flag: word_timestamps' 1 overrides decoding's 40.
+        assert_eq!(ml_positions.len(), 1, "expected one -ml flag");
+        assert_eq!(args[ml_positions[0] + 1], "1");
+    }
+
+    #[test]
+    fn word_threshold_and_token_threshold_overrides_wt_flag() {
+        // When both bp.word_threshold and word_timestamps.token_threshold are set,
+        // one -wt flag is emitted: the one from WordTimestampParams overrides.
+        let mut request = minimal_request();
+        request.backend_params.word_threshold = Some(0.01);
+        request.backend_params.word_timestamps = Some(WordTimestampParams {
+            enabled: true,
+            token_threshold: Some(0.5),
+            ..WordTimestampParams::default()
+        });
+        let args = build_args(&request, &PathBuf::from("n.wav"), &PathBuf::from("/o"));
+        let wt_positions: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "-wt")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(wt_positions.len(), 1, "expected one -wt flag");
+        assert_eq!(args[wt_positions[0] + 1], "0.5");
+    }
+
+    #[test]
+    fn word_timestamps_enabled_only_no_wt_no_wtps() {
+        // When only enabled=true with no other WordTimestampParams fields,
+        // exactly -ml 1 appears but no -wt or -wtps flags.
+        let mut request = minimal_request();
+        request.backend_params.word_timestamps = Some(WordTimestampParams {
+            enabled: true,
+            max_len: None,
+            token_threshold: None,
+            token_sum_threshold: None,
+        });
+        let args = build_args(&request, &PathBuf::from("n.wav"), &PathBuf::from("/o"));
+        let ml_idx = args.iter().position(|a| a == "-ml").expect("-ml present");
+        assert_eq!(args[ml_idx + 1], "1");
+        let ml_count = args.iter().filter(|a| *a == "-ml").count();
+        assert_eq!(ml_count, 1, "exactly one -ml flag");
+        assert!(
+            !args.contains(&"-wt".to_owned()),
+            "no -wt without token_threshold"
+        );
+        assert!(
+            !args.contains(&"-wtps".to_owned()),
+            "no -wtps without token_sum_threshold"
+        );
+    }
+
+    #[test]
+    fn word_timestamps_max_len_zero_emits_ml_0() {
+        // Edge case: max_len=0 should produce -ml 0.
+        let mut request = minimal_request();
+        request.backend_params.word_timestamps = Some(WordTimestampParams {
+            enabled: false,
+            max_len: Some(0),
+            ..WordTimestampParams::default()
+        });
+        let args = build_args(&request, &PathBuf::from("n.wav"), &PathBuf::from("/o"));
+        let ml_idx = args.iter().position(|a| a == "-ml").expect("-ml present");
+        assert_eq!(args[ml_idx + 1], "0");
+    }
+
+    #[test]
+    fn vad_zero_boundary_values_still_produce_flags() {
+        // All VAD params set to zero/minimum values — flags should still appear.
+        let mut request = minimal_request();
+        request.backend_params.vad = Some(VadParams {
+            model_path: None,
+            threshold: Some(0.0),
+            min_speech_duration_ms: Some(0),
+            min_silence_duration_ms: Some(0),
+            max_speech_duration_s: Some(0.0),
+            speech_pad_ms: Some(0),
+            samples_overlap: Some(0.0),
+        });
+        let args = build_args(&request, &PathBuf::from("n.wav"), &PathBuf::from("/o"));
+        let check = |flag: &str, expected: &str| {
+            let idx = args
+                .iter()
+                .position(|a| a == flag)
+                .unwrap_or_else(|| panic!("expected flag {flag}"));
+            assert_eq!(args[idx + 1], expected, "flag {flag}");
+        };
+        check("--vad-threshold", "0");
+        check("--vad-min-speech-duration-ms", "0");
+        check("--vad-min-silence-duration-ms", "0");
+        check("--vad-max-speech-duration-s", "0");
+        check("--vad-speech-pad-ms", "0");
+        check("--vad-samples-overlap", "0");
+        // model_path is None, so --vad-model should be absent.
+        assert!(!args.contains(&"--vad-model".to_owned()));
+    }
 
     #[test]
     fn run_streaming_function_signature_compiles() {

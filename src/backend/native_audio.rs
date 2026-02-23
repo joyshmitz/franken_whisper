@@ -448,6 +448,102 @@ mod tests {
     }
 
     #[test]
+    fn as_json_contains_expected_fields() {
+        use super::{AudioRegion, NativeAudioAnalysis};
+        let analysis = NativeAudioAnalysis {
+            duration_ms: 5000,
+            sample_rate_hz: 16_000,
+            frame_ms: 20,
+            frame_count: 250,
+            avg_rms: 0.05,
+            max_rms: 0.3,
+            activity_threshold: 0.075,
+            active_regions: vec![AudioRegion {
+                start_ms: 100,
+                end_ms: 500,
+                avg_rms: 0.1,
+            }],
+        };
+        let json = analysis.as_json();
+        assert_eq!(json["sample_rate_hz"], 16_000);
+        assert_eq!(json["duration_ms"], 5000);
+        assert_eq!(json["frame_count"], 250);
+        assert_eq!(json["active_region_count"], 1);
+        let regions = json["active_regions"].as_array().expect("array");
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0]["start_ms"], 100);
+        assert_eq!(regions[0]["end_ms"], 500);
+    }
+
+    #[test]
+    fn bridge_short_gaps_fills_short_preserves_long() {
+        use super::bridge_short_gaps;
+        // Gap of 2 frames (= GAP_BRIDGE_MAX_FRAMES) between two active runs → bridged.
+        let mut active = vec![true, true, false, false, true, true];
+        bridge_short_gaps(&mut active, 2);
+        assert!(active.iter().all(|&v| v), "gap of 2 should be bridged");
+
+        // Gap of 3 frames (> max 2) → NOT bridged.
+        let mut active2 = vec![true, false, false, false, true];
+        bridge_short_gaps(&mut active2, 2);
+        assert!(!active2[1]);
+        assert!(!active2[2]);
+        assert!(!active2[3]);
+
+        // Empty input → no panic.
+        let mut empty: Vec<bool> = vec![];
+        bridge_short_gaps(&mut empty, 2);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn active_regions_filters_short_regions() {
+        use super::active_regions_from_frames;
+        // Active run of 1 frame with min_region_frames=2 → filtered out.
+        let rms = vec![0.1, 0.0, 0.1, 0.1, 0.0];
+        let active = vec![true, false, true, true, false];
+        let regions = active_regions_from_frames(&rms, &active, 20, 2);
+        // Only the 2-frame run at index 2-3 should survive.
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].start_ms, 40);
+        assert_eq!(regions[0].end_ms, 80);
+    }
+
+    #[test]
+    fn compute_frame_rms_max_amplitude() {
+        use super::compute_frame_rms;
+        // Max amplitude 16-bit: 32767/32768 ≈ 1.0 per sample → RMS ≈ 1.0.
+        let samples = vec![i16::MAX; 160]; // one 10ms frame at 16kHz
+        let rms = compute_frame_rms(&samples, 160);
+        assert_eq!(rms.len(), 1);
+        assert!(
+            (rms[0] - 1.0).abs() < 0.001,
+            "max amplitude RMS ≈ 1.0, got {}",
+            rms[0]
+        );
+
+        // Silence → RMS 0.
+        let silence = vec![0i16; 160];
+        let rms_silent = compute_frame_rms(&silence, 160);
+        assert!((rms_silent[0] - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn duration_override_zero_falls_back_to_computed() {
+        let dir = tempdir().expect("tempdir");
+        let wav = dir.path().join("override_zero.wav");
+        let samples = vec![0i16; 16_000]; // 1 second at 16kHz
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
+
+        // Some(0) is filtered out by `.filter(|value| *value > 0)`.
+        let analysis = analyze_wav(&wav, Some(0)).expect("analysis should succeed");
+        assert_eq!(
+            analysis.duration_ms, 1_000,
+            "Some(0) should fall back to computed duration"
+        );
+    }
+
+    #[test]
     fn duration_override_is_honored_when_positive() {
         let dir = tempdir().expect("tempdir");
         let wav = dir.path().join("override.wav");

@@ -258,7 +258,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::backend::{Engine, InsanelyFastPilot};
+    use crate::backend::{Engine, InsanelyFastPilot, TranscriptSegment};
     use crate::model::{BackendKind, BackendParams, InputSource, TranscribeRequest};
     use crate::orchestrator::CancellationToken;
 
@@ -489,5 +489,276 @@ mod tests {
             result.is_err(),
             "expired token should cancel waveform-aware segmentation"
         );
+    }
+
+    #[test]
+    fn estimate_duration_ms_clamps_and_defaults() {
+        let mut req = request();
+
+        // Below minimum → 1_000
+        req.backend_params.duration_ms = Some(50);
+        assert_eq!(estimate_duration_ms(&req, Path::new("no.wav")), 1_000);
+
+        // Above maximum → 1_800_000
+        req.backend_params.duration_ms = Some(9_999_999);
+        assert_eq!(estimate_duration_ms(&req, Path::new("no.wav")), 1_800_000);
+
+        // No hint + no file → DEFAULT_DURATION_MS (20_000)
+        req.backend_params.duration_ms = None;
+        assert_eq!(
+            estimate_duration_ms(&req, Path::new("nonexistent.wav")),
+            20_000
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_from_wav_file() {
+        let dir = tempdir().expect("tempdir");
+        let wav = dir.path().join("two_seconds.wav");
+        // 2 seconds of PCM16 mono 16kHz = 64000 bytes payload
+        write_pcm16_mono_wav(&wav, 16_000, &vec![0i16; 32_000]);
+
+        let mut req = request();
+        req.backend_params.duration_ms = None;
+        let estimated = estimate_duration_ms(&req, &wav);
+        assert!(
+            (estimated as i64 - 2_000).unsigned_abs() < 50,
+            "2s of PCM should estimate ~2000ms, got {estimated}"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_diarize_assigns_alternating_speakers() {
+        let pilot_segs = vec![
+            TranscriptSegment {
+                start_ms: 0,
+                end_ms: 1000,
+                text: "first".to_owned(),
+                confidence: 0.8,
+            },
+            TranscriptSegment {
+                start_ms: 1000,
+                end_ms: 2000,
+                text: "second".to_owned(),
+                confidence: 0.9,
+            },
+            TranscriptSegment {
+                start_ms: 2000,
+                end_ms: 3000,
+                text: "third".to_owned(),
+                confidence: 0.7,
+            },
+        ];
+
+        let result = to_transcription_segments(&pilot_segs, true, None).expect("segments");
+        assert_eq!(result[0].speaker, Some("SPEAKER_00".to_owned()));
+        assert_eq!(result[1].speaker, Some("SPEAKER_01".to_owned()));
+        assert_eq!(result[2].speaker, Some("SPEAKER_00".to_owned()));
+
+        // Without diarize → no speakers
+        let no_diarize = to_transcription_segments(&pilot_segs, false, None).expect("segments");
+        assert!(no_diarize.iter().all(|s| s.speaker.is_none()));
+    }
+
+    #[test]
+    fn to_transcription_segments_trims_text_and_clamps_confidence() {
+        let pilot_segs = vec![
+            TranscriptSegment {
+                start_ms: 500,
+                end_ms: 1500,
+                text: "  padded text  ".to_owned(),
+                confidence: 2.5,
+            },
+            TranscriptSegment {
+                start_ms: 2000,
+                end_ms: 3000,
+                text: "ok".to_owned(),
+                confidence: -0.5,
+            },
+        ];
+
+        let result = to_transcription_segments(&pilot_segs, false, None).expect("segments");
+        assert_eq!(result[0].text, "padded text");
+        assert_eq!(result[0].confidence, Some(1.0));
+        assert!((result[0].start_sec.unwrap() - 0.5).abs() < 0.001);
+
+        assert_eq!(result[1].confidence, Some(0.0));
+    }
+
+    #[test]
+    fn device_dtype_selection_cpu_vs_gpu() {
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+
+        // no_gpu → device=cpu, dtype=float32
+        req.backend_params.no_gpu = true;
+        req.backend_params.gpu_device = None;
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("cpu run");
+        assert_eq!(
+            result.raw_output["telemetry"]["device"].as_str(),
+            Some("cpu")
+        );
+        assert_eq!(
+            result.raw_output["telemetry"]["dtype"].as_str(),
+            Some("float32")
+        );
+
+        // explicit gpu_device=cuda:1 → dtype=float16
+        req.backend_params.no_gpu = false;
+        req.backend_params.gpu_device = Some("cuda:1".to_owned());
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("gpu run");
+        assert_eq!(
+            result.raw_output["telemetry"]["device"].as_str(),
+            Some("cuda:1")
+        );
+        assert_eq!(
+            result.raw_output["telemetry"]["dtype"].as_str(),
+            Some("float16")
+        );
+    }
+
+    // ── Task #209 — insanely_fast_native edge-case tests ────────────
+
+    #[test]
+    fn batch_size_zero_coerced_to_one() {
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.backend_params.batch_size = Some(0);
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run should succeed");
+
+        assert_eq!(
+            result.raw_output["telemetry"]["batch_size_effective"],
+            1,
+            "batch_size 0 should be coerced to 1 via .max(1)"
+        );
+        assert_eq!(
+            result.raw_output["telemetry"]["batch_size_requested"],
+            0,
+            "original requested value should be recorded as 0"
+        );
+    }
+
+    #[test]
+    fn mps_device_selects_float16() {
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.backend_params.no_gpu = false;
+        req.backend_params.gpu_device = Some("mps:0".to_owned());
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("mps run");
+
+        assert_eq!(
+            result.raw_output["telemetry"]["device"].as_str(),
+            Some("mps:0")
+        );
+        assert_eq!(
+            result.raw_output["telemetry"]["dtype"].as_str(),
+            Some("float16"),
+            "mps device should select float16 dtype"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_tiny_file_clamps_to_min() {
+        let tmp = tempdir().expect("tempdir");
+        let tiny = tmp.path().join("tiny.wav");
+        // 4 bytes < WAV_HEADER_BYTES (44) → audio_bytes saturates to 0
+        // → estimate = 0 → clamped to MIN_DURATION_MS (1_000).
+        std::fs::write(&tiny, b"RIFF").unwrap();
+
+        let mut req = request();
+        req.backend_params.duration_ms = None;
+        assert_eq!(
+            estimate_duration_ms(&req, &tiny),
+            1_000,
+            "sub-header file should clamp to MIN_DURATION_MS"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_cancellation_propagates() {
+        let pilot_segs = vec![TranscriptSegment {
+            text: "hello".to_owned(),
+            start_ms: 0,
+            end_ms: 1000,
+            confidence: 0.9,
+        }];
+
+        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(5));
+
+        let result = to_transcription_segments(&pilot_segs, false, Some(&token));
+        assert!(
+            result.is_err(),
+            "expired cancellation token should propagate error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::error::FwError::Cancelled(_)),
+            "error should be FwError::Cancelled"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_diarize_three_alternating_speakers() {
+        let pilot_segs = vec![
+            TranscriptSegment {
+                text: "hello".to_owned(),
+                start_ms: 0,
+                end_ms: 1000,
+                confidence: 0.8,
+            },
+            TranscriptSegment {
+                text: "world".to_owned(),
+                start_ms: 1000,
+                end_ms: 2000,
+                confidence: 0.8,
+            },
+            TranscriptSegment {
+                text: "again".to_owned(),
+                start_ms: 2000,
+                end_ms: 3000,
+                confidence: 0.8,
+            },
+        ];
+
+        let result = to_transcription_segments(&pilot_segs, true, None).unwrap();
+        // index % 2: 0→SPEAKER_00, 1→SPEAKER_01, 2→SPEAKER_00.
+        assert_eq!(result[0].speaker, Some("SPEAKER_00".to_owned()));
+        assert_eq!(result[1].speaker, Some("SPEAKER_01".to_owned()));
+        assert_eq!(result[2].speaker, Some("SPEAKER_00".to_owned()));
+
+        // Non-diarize → no speakers.
+        let result_no = to_transcription_segments(&pilot_segs, false, None).unwrap();
+        assert_eq!(result_no[0].speaker, None);
     }
 }

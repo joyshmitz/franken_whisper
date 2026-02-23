@@ -197,10 +197,13 @@ pub fn run(
         segments,
         acceleration: None,
         raw_output: raw,
-        artifact_paths: vec![
-            txt_path.display().to_string(),
-            srt_path.display().to_string(),
-        ],
+        artifact_paths: {
+            let mut paths = vec![txt_path.display().to_string()];
+            if srt_path.exists() {
+                paths.push(srt_path.display().to_string());
+            }
+            paths
+        },
     })
 }
 

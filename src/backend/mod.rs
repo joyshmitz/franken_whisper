@@ -8024,4 +8024,168 @@ mod tests {
             "diagnostics total_entries should be 1"
         );
     }
+
+    #[test]
+    fn calibration_state_window_eviction_caps_count() {
+        let mut cal = CalibrationState::new(5);
+        // Record 8 observations: first 5 terrible (predict 0.0, outcome=success),
+        // then 3 perfect (predict 1.0, outcome=success).
+        for _ in 0..5 {
+            cal.record(0.0, true);
+        }
+        for _ in 0..3 {
+            cal.record(1.0, true);
+        }
+        // Window eviction: only 5 remain.
+        assert_eq!(cal.observation_count(), 5);
+        // Window should contain: 2 terrible (Brier=1.0 each) + 3 perfect (Brier=0.0 each).
+        // Mean Brier = 2/5 = 0.4.
+        let bs = cal.brier_score().expect("should have observations");
+        assert!((bs - 0.4).abs() < 1e-9, "expected Brier 0.4, got {bs}");
+    }
+
+    #[test]
+    fn routing_evidence_ledger_latest_and_is_empty() {
+        let mut ledger = RoutingEvidenceLedger::new(5);
+        assert!(ledger.is_empty());
+        assert!(ledger.latest().is_none());
+
+        let make_entry = |id: &str| RoutingEvidenceLedgerEntry {
+            decision_id: id.to_owned(),
+            trace_id: "00000000000000000000000000000000".to_owned(),
+            timestamp_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            observed_state: "all_available".to_owned(),
+            chosen_action: "try_whisper_cpp".to_owned(),
+            recommended_order: vec![],
+            fallback_active: false,
+            fallback_reason: None,
+            posterior_snapshot: vec![0.5],
+            calibration_score: 0.8,
+            brier_score: None,
+            e_process: 1.0,
+            ci_width: 0.1,
+            adaptive_mode: true,
+            policy_id: "test".to_owned(),
+            loss_matrix_hash: "abc".to_owned(),
+            availability: vec![],
+            duration_bucket: "short".to_owned(),
+            diarize: false,
+            actual_outcome: None,
+        };
+
+        ledger.record(make_entry("dec-1"));
+        assert!(!ledger.is_empty());
+        assert_eq!(ledger.latest().unwrap().decision_id, "dec-1");
+
+        ledger.record(make_entry("dec-2"));
+        assert_eq!(ledger.latest().unwrap().decision_id, "dec-2");
+    }
+
+    #[test]
+    fn concurrent_executor_basic_execution() {
+        use super::ConcurrentTwoLaneExecutor;
+        let executor = ConcurrentTwoLaneExecutor::new(QualitySelector::HigherConfidence);
+
+        let primary_called = Arc::new(StdMutex::new(false));
+        let compare_called = Arc::new(StdMutex::new(false));
+        let pc = primary_called.clone();
+        let cc = compare_called.clone();
+
+        let result = executor.execute_with_early_emit(
+            || {
+                vec![TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 1000,
+                    text: "fast".to_owned(),
+                    confidence: 0.7,
+                }]
+            },
+            || {
+                vec![TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 1000,
+                    text: "quality".to_owned(),
+                    confidence: 0.95,
+                }]
+            },
+            move |_primary, _lat| {
+                *pc.lock().unwrap() = true;
+            },
+            move |_p, _s, _pl, _sl| {
+                *cc.lock().unwrap() = true;
+            },
+        );
+
+        assert!(
+            *primary_called.lock().unwrap(),
+            "on_primary should be called"
+        );
+        assert!(
+            *compare_called.lock().unwrap(),
+            "on_compare should be called"
+        );
+        assert!(!result.primary_result.is_empty());
+        assert!(!result.secondary_result.is_empty());
+        // HigherConfidence selector should pick secondary (0.95 > 0.7).
+        assert_eq!(result.selected, "secondary");
+    }
+
+    #[test]
+    fn gate_recommended_order_sole_validated_fallback_stages() {
+        use crate::conformance::NativeEngineRolloutStage;
+        let custom_order = vec![BackendKind::WhisperCpp, BackendKind::InsanelyFast];
+
+        // Sole → preserves adaptive order, not forced.
+        let (order, forced) = super::gate_recommended_order_for_rollout(
+            false,
+            custom_order.clone(),
+            NativeEngineRolloutStage::Sole,
+        );
+        assert_eq!(order, custom_order);
+        assert!(!forced, "Sole should not force static");
+
+        // Validated → static order, forced.
+        let (order_v, forced_v) = super::gate_recommended_order_for_rollout(
+            false,
+            custom_order.clone(),
+            NativeEngineRolloutStage::Validated,
+        );
+        assert_eq!(order_v, auto_priority(false));
+        assert!(forced_v, "Validated should force static");
+
+        // Fallback → static order, forced.
+        let (order_f, forced_f) = super::gate_recommended_order_for_rollout(
+            false,
+            custom_order,
+            NativeEngineRolloutStage::Fallback,
+        );
+        assert_eq!(order_f, auto_priority(false));
+        assert!(forced_f, "Fallback should force static");
+    }
+
+    #[test]
+    fn calibration_state_poorly_calibrated_with_bad_predictions() {
+        let mut cal = CalibrationState::new(20);
+        // Record perfect predictions — should NOT be poorly calibrated.
+        for _ in 0..10 {
+            cal.record(1.0, true);
+        }
+        assert!(
+            !cal.is_poorly_calibrated(),
+            "perfect predictions should not be poorly calibrated"
+        );
+
+        // Now fill with maximally wrong predictions (predict 0.0, outcome true).
+        let mut cal_bad = CalibrationState::new(10);
+        for _ in 0..10 {
+            cal_bad.record(0.0, true);
+        }
+        // Brier = 1.0 > 0.35 threshold.
+        assert!(
+            cal_bad.is_poorly_calibrated(),
+            "all-wrong predictions should be poorly calibrated"
+        );
+        let bs = cal_bad.brier_score().unwrap();
+        assert!((bs - 1.0).abs() < 1e-9, "Brier should be 1.0, got {bs}");
+    }
 }
