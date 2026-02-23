@@ -623,7 +623,9 @@ CREATE TABLE IF NOT EXISTS _meta (
                  ORDER BY name ASC;",
                 &[text_value(table.to_owned())],
             )
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                FwError::Storage(format!("index introspection for `{table}` failed: {error}"))
+            })?;
         let index_defs = index_sql_rows
             .iter()
             .filter_map(|row| {
@@ -645,37 +647,61 @@ CREATE TABLE IF NOT EXISTS _meta (
 
         self.connection
             .execute(&format!("DROP TABLE IF EXISTS {temp_table_ident};"))
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                FwError::Storage(format!(
+                    "drop temporary table `{temp_table_name}` failed: {error}"
+                ))
+            })?;
         self.connection
             .execute(&format!(
                 "CREATE TABLE {temp_table_ident} ({});",
                 column_defs.join(", ")
             ))
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                FwError::Storage(format!(
+                    "create temporary table `{temp_table_name}` failed: {error}"
+                ))
+            })?;
         self.connection
             .execute(&format!(
                 "INSERT INTO {temp_table_ident} ({existing_cols_csv}) \
                  SELECT {existing_cols_csv} FROM {table_ident};"
             ))
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                FwError::Storage(format!(
+                    "copy data from `{table}` to `{temp_table_name}` failed: {error}"
+                ))
+            })?;
         for (index_name, _) in &index_defs {
             self.connection
                 .execute(&format!("DROP INDEX IF EXISTS {};", sql_ident(index_name)))
-                .map_err(|error| FwError::Storage(error.to_string()))?;
+                .map_err(|error| {
+                    FwError::Storage(format!(
+                        "drop index `{index_name}` before table rebuild failed: {error}"
+                    ))
+                })?;
         }
         self.connection
-            .execute(&format!("DROP TABLE {table_ident};"))
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .execute(&format!("DROP TABLE IF EXISTS {table_ident};"))
+            .map_err(|error| {
+                FwError::Storage(format!("drop original table `{table}` failed: {error}"))
+            })?;
         self.connection
             .execute(&format!(
                 "ALTER TABLE {temp_table_ident} RENAME TO {table_ident};"
             ))
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                FwError::Storage(format!(
+                    "rename temporary table `{temp_table_name}` to `{table}` failed: {error}"
+                ))
+            })?;
 
         for (_, sql) in index_defs {
-            self.connection
-                .execute(&sql)
-                .map_err(|error| FwError::Storage(error.to_string()))?;
+            self.connection.execute(&sql).map_err(|error| {
+                FwError::Storage(format!(
+                    "recreate index for rebuilt table `{table}` failed: {error}"
+                ))
+            })?;
         }
 
         Ok(())
@@ -2488,7 +2514,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_runs_replay_column_legacy_schema_fails_with_actionable_error() {
+    fn ensure_runs_replay_column_migrates_legacy_schema() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("legacy.sqlite3");
 
@@ -2537,12 +2563,33 @@ mod tests {
         .expect("create events table");
         drop(conn);
 
-        let error = RunStore::open(&db_path)
-            .expect_err("legacy schema should fail closed")
-            .to_string();
+        // Opening via RunStore should trigger schema migration that adds
+        // replay/acceleration columns.
+        let store = RunStore::open(&db_path).expect("migration should succeed");
+        let columns = store
+            .connection
+            .query("PRAGMA table_info(runs);")
+            .expect("pragma");
+        let has_replay = columns
+            .iter()
+            .any(|row| super::value_to_string(row.get(1)) == "replay_json");
+        let has_acceleration = columns
+            .iter()
+            .any(|row| super::value_to_string(row.get(1)) == "acceleration_json");
+        assert!(has_replay, "migration should add replay_json");
+        assert!(has_acceleration, "migration should add acceleration_json");
+
+        let report = minimal_report("run-migrated", &db_path);
+        store
+            .persist_report(&report)
+            .expect("persist after migration");
+        let details = store
+            .load_run_details("run-migrated")
+            .expect("query")
+            .expect("exists");
         assert!(
-            error.contains("automatic migration from legacy v1 is unavailable"),
-            "error should explain legacy migration limitation: {error}"
+            details.replay.input_content_hash.is_none(),
+            "migrated column should default to empty replay"
         );
     }
 
@@ -5307,13 +5354,12 @@ mod tests {
             .any(|row| super::value_to_string(row.get(1)) == "test_column_xyz");
         assert!(!has_new_col, "column should not exist yet");
 
-        // Request a new column. In compatibility mode we do not perform in-place
-        // DDL mutation; this should still succeed without corrupting the DB.
+        // Request a new column; migration helper should materialize it.
         store
             .ensure_column_exists("runs", "test_column_xyz", "TEXT NOT NULL DEFAULT 'hello'")
             .expect("add column");
 
-        // Verify DB remains usable and the request is handled safely.
+        // Verify DB remains usable and schema was updated.
         let after = store
             .connection
             .query("PRAGMA table_info(runs);")
@@ -5321,10 +5367,7 @@ mod tests {
         let has_new_col = after
             .iter()
             .any(|row| super::value_to_string(row.get(1)) == "test_column_xyz");
-        assert!(
-            !has_new_col,
-            "compatibility mode should avoid in-place DDL mutation"
-        );
+        assert!(has_new_col, "requested column should be present");
 
         // Calling again is idempotent.
         store
