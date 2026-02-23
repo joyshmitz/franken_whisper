@@ -5115,6 +5115,137 @@ mod enabled {
 
             assert_eq!(count, 2, "only Alice segments exported");
         }
+
+        #[test]
+        fn speculation_stats_line_inactive_returns_empty() {
+            use super::LiveTranscriptionView;
+            let view = LiveTranscriptionView::new(BackendKind::WhisperCpp, false);
+            assert_eq!(view.speculation_stats_line(), "");
+        }
+
+        #[test]
+        fn speculation_stats_line_active_computes_rate() {
+            use super::LiveTranscriptionView;
+            let mut view = LiveTranscriptionView::new(BackendKind::WhisperCpp, false);
+            view.set_speculative(true);
+
+            // Zero windows → 0.0% rate.
+            let line = view.speculation_stats_line();
+            assert!(line.contains("[SPEC]"), "should contain [SPEC]: {line}");
+            assert!(
+                line.contains("0.0%"),
+                "zero windows should show 0.0%: {line}"
+            );
+
+            // Push a speculative segment and then correct it.
+            let seg = make_segment(Some(0.0), Some(1.0), "fast", None, None);
+            view.push_speculative_segment(seg, 1);
+            let corrected = make_segment(Some(0.0), Some(1.0), "quality", None, None);
+            view.push_correction(1, vec![corrected]);
+
+            let line = view.speculation_stats_line();
+            assert!(line.contains("1/1"), "should show 1/1 corrections: {line}");
+            assert!(line.contains("100.0%"), "rate should be 100%: {line}");
+        }
+
+        #[test]
+        fn correction_prefix_all_states() {
+            use super::{LiveTranscriptionView, SegmentCorrectionState};
+
+            let mut view = LiveTranscriptionView::new(BackendKind::WhisperCpp, false);
+            // Out-of-range index has no state entry → Original → ""
+            assert_eq!(view.correction_prefix(99), "");
+
+            view.set_speculative(true);
+
+            // Push speculative → idx 0, state is Speculative → "~ "
+            let seg = make_segment(Some(0.0), Some(1.0), "fast", None, None);
+            view.push_speculative_segment(seg, 7);
+            assert_eq!(view.correction_prefix(0), "~ ");
+
+            // Retract → idx 0 becomes Retracted → "x "
+            view.retract_segments(7);
+            assert_eq!(view.correction_prefix(0), "x ");
+
+            // Push correction → new segment at idx 1 is Corrected → "> "
+            let corrected = make_segment(Some(0.0), Some(1.0), "quality", None, None);
+            view.push_correction(999, vec![corrected]);
+            assert_eq!(view.correction_prefix(1), "> ");
+
+            // Confirm a speculative segment → Confirmed → ""
+            let seg2 = make_segment(Some(1.0), Some(2.0), "spec2", None, None);
+            view.push_speculative_segment(seg2, 42);
+            assert_eq!(
+                view.segment_correction_state(2),
+                SegmentCorrectionState::Speculative
+            );
+            view.confirm_segments(42);
+            assert_eq!(view.correction_prefix(2), "");
+        }
+
+        #[test]
+        fn render_speaker_colored_line_start_only_no_end() {
+            use super::SpeakerColorMap;
+            use super::render_speaker_colored_line;
+
+            // (Some(start), None) → "HH:MM:SS.mmm -> ???"
+            let seg = make_segment(Some(5.0), None, "partial", Some("Alice"), None);
+            let mut cmap = SpeakerColorMap::new();
+            let line = render_speaker_colored_line(&seg, &mut cmap, true);
+            assert!(
+                line.contains("-> ???"),
+                "missing end should produce '-> ???': {line}"
+            );
+            assert!(
+                line.contains("00:00:05.000"),
+                "start should be formatted: {line}"
+            );
+
+            // (None, None) → "??:??:??.???"
+            let seg2 = make_segment(None, None, "no timestamps", None, None);
+            let line2 = render_speaker_colored_line(&seg2, &mut cmap, true);
+            assert!(
+                line2.contains("??:??:??.???"),
+                "no timestamps → fallback: {line2}"
+            );
+        }
+
+        #[test]
+        fn export_plain_text_omits_timestamp_when_none() {
+            let segments = vec![
+                make_segment(None, None, "timeless text", Some("Alice"), None),
+                make_segment(Some(1.0), None, "partial timing", None, None),
+            ];
+            let filter = TranscriptFilter::new();
+            let text = export_filtered_transcript(&segments, &filter, ExportFormat::PlainText);
+            let lines: Vec<&str> = text.lines().collect();
+            // No timestamp arrow when either side is None.
+            assert!(
+                !lines[0].contains("->"),
+                "no arrow for None timestamps: {}",
+                lines[0]
+            );
+            assert!(
+                lines[0].contains("timeless text"),
+                "text present: {}",
+                lines[0]
+            );
+            assert!(
+                lines[0].contains("[Alice]"),
+                "speaker present: {}",
+                lines[0]
+            );
+            assert!(
+                !lines[1].contains("->"),
+                "partial timing has None end: {}",
+                lines[1]
+            );
+            assert!(
+                lines[1].contains("partial timing"),
+                "text present: {}",
+                lines[1]
+            );
+        }
     }
 }
 

@@ -1254,7 +1254,8 @@ impl AdaptiveBitrateController {
             self.frame_loss_rate = 0.0;
             self.current_quality = 1.0;
         } else {
-            self.frame_loss_rate = self.frames_lost as f64 / self.frames_sent as f64;
+            self.frame_loss_rate =
+                (self.frames_lost as f64 / self.frames_sent as f64).clamp(0.0, 1.0);
             self.current_quality = 1.0 - self.frame_loss_rate;
         }
     }
@@ -1626,11 +1627,12 @@ mod tests {
     use base64::engine::general_purpose::STANDARD_NO_PAD;
 
     use super::{
-        CODEC_MULAW_ZLIB_B64, DecodeRecoveryPolicy, SUPPORTED_PROTOCOL_VERSION, TtyAudioFrame,
-        compress_chunk, crc32_of, decode_frames_to_raw, decode_frames_to_raw_with_policy,
-        decompress_chunk, emit_control_frame_to_writer, emit_retransmit_loop_from_reader,
+        CODEC_MULAW_ZLIB_B64, DecodeRecoveryPolicy, SUPPORTED_PROTOCOL_VERSION,
+        TranscriptSegmentCompact, TtyAudioFrame, compress_chunk, crc32_of, decode_frames_to_raw,
+        decode_frames_to_raw_with_policy, decompress_chunk, emit_control_frame_to_writer,
+        emit_retransmit_loop_from_reader, emit_tty_transcript_partial, emit_tty_transcript_retract,
         mulaw_chunk_size, parse_audio_frames_for_decode, parse_frame_line, parse_frames,
-        sha256_hex,
+        retransmit_plan_from_reader, sha256_hex,
     };
 
     fn make_frame(seq: u64, data: &[u8]) -> TtyAudioFrame {
@@ -4656,5 +4658,131 @@ mod tests {
             let parsed: RecoveryStrategy = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(parsed, strategy);
         }
+    }
+
+    #[test]
+    fn transcript_segment_compact_from_transcription_segment() {
+        use crate::model::TranscriptionSegment;
+        let seg = TranscriptionSegment {
+            start_sec: Some(1.5),
+            end_sec: Some(3.0),
+            text: "hello".to_owned(),
+            speaker: Some("A".to_owned()),
+            confidence: Some(0.95),
+        };
+        let compact: TranscriptSegmentCompact = (&seg).into();
+        assert_eq!(compact.s, Some(1.5));
+        assert_eq!(compact.e, Some(3.0));
+        assert_eq!(compact.t, "hello");
+        assert_eq!(compact.sp.as_deref(), Some("A"));
+        assert_eq!(compact.c, Some(0.95));
+
+        // None speaker/confidence should be omitted from JSON
+        let seg_none = TranscriptionSegment {
+            start_sec: None,
+            end_sec: None,
+            text: "x".to_owned(),
+            speaker: None,
+            confidence: None,
+        };
+        let compact2: TranscriptSegmentCompact = (&seg_none).into();
+        let json = serde_json::to_string(&compact2).expect("serialize");
+        assert!(!json.contains("\"sp\""), "None speaker should be omitted");
+        assert!(!json.contains("\"c\""), "None confidence should be omitted");
+    }
+
+    #[test]
+    fn transcript_partial_frame_round_trips() {
+        let frame = TtyControlFrame::TranscriptPartial {
+            seq: 7,
+            window_id: 3,
+            segments: vec![TranscriptSegmentCompact {
+                s: Some(0.0),
+                e: Some(1.5),
+                t: "hello world".to_owned(),
+                sp: Some("speaker_0".to_owned()),
+                c: Some(0.92),
+            }],
+            model_id: "whisper-tiny".to_owned(),
+            speculative: true,
+        };
+        let json = serde_json::to_string(&frame).expect("serialize");
+        let parsed: TtyControlFrame = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            TtyControlFrame::TranscriptPartial {
+                seq,
+                window_id,
+                segments,
+                speculative,
+                ..
+            } => {
+                assert_eq!(seq, 7);
+                assert_eq!(window_id, 3);
+                assert_eq!(segments.len(), 1);
+                assert_eq!(segments[0].t, "hello world");
+                assert!(speculative);
+            }
+            _ => panic!("expected TranscriptPartial"),
+        }
+    }
+
+    #[test]
+    fn emit_tty_transcript_partial_writes_correct_ndjson() {
+        use crate::model::TranscriptionSegment;
+        let segments = vec![TranscriptionSegment {
+            start_sec: Some(0.0),
+            end_sec: Some(2.0),
+            text: "test text".to_owned(),
+            speaker: None,
+            confidence: Some(0.88),
+        }];
+        let mut out = Vec::new();
+        emit_tty_transcript_partial(&mut out, 5, 2, &segments, "whisper-base", false)
+            .expect("emit partial");
+
+        let text = String::from_utf8(out).expect("utf8");
+        let value: serde_json::Value = serde_json::from_str(text.trim()).expect("json");
+        assert_eq!(value["frame_type"], "transcript_partial");
+        assert_eq!(value["seq"], 5);
+        assert_eq!(value["window_id"], 2);
+        assert_eq!(value["model_id"], "whisper-base");
+        assert_eq!(value["speculative"], false);
+        assert_eq!(value["segments"][0]["t"], "test text");
+    }
+
+    #[test]
+    fn emit_tty_transcript_retract_writes_correct_ndjson() {
+        let mut out = Vec::new();
+        emit_tty_transcript_retract(&mut out, 42, 7, "model_timeout").expect("emit retract");
+
+        let text = String::from_utf8(out).expect("utf8");
+        let value: serde_json::Value = serde_json::from_str(text.trim()).expect("json");
+        assert_eq!(value["frame_type"], "transcript_retract");
+        assert_eq!(value["retracted_seq"], 42);
+        assert_eq!(value["window_id"], 7);
+        assert_eq!(value["reason"], "model_timeout");
+    }
+
+    #[test]
+    fn retransmit_plan_from_reader_identifies_gaps() {
+        let frames = vec![
+            make_frame(0, b"a"),
+            make_frame(2, b"c"),
+            make_frame(3, b"d"),
+        ];
+        let ndjson = frames_to_ndjson(&frames);
+        let mut reader = ndjson.as_bytes();
+
+        let plan = retransmit_plan_from_reader(&mut reader, DecodeRecoveryPolicy::SkipMissing)
+            .expect("plan from reader");
+
+        assert_eq!(plan.requested_sequences, vec![1]);
+        assert_eq!(plan.gap_count, 1);
+        assert_eq!(plan.integrity_failure_count, 0);
+        assert_eq!(plan.dropped_frame_count, 0);
+        assert_eq!(plan.protocol_version, SUPPORTED_PROTOCOL_VERSION);
+        assert_eq!(plan.requested_ranges.len(), 1);
+        assert_eq!(plan.requested_ranges[0].start_seq, 1);
+        assert_eq!(plan.requested_ranges[0].end_seq, 1);
     }
 }
