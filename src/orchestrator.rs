@@ -573,7 +573,7 @@ impl FinalizerRegistry {
     }
 
     /// Execute all registered finalizers with a per-finalizer time budget
-    /// (bd-38c.4).  Finalizers that exceed the budget are logged and skipped.
+    /// (bd-38c.4).  Finalizers that exceed the budget are warned but still run.
     pub(crate) fn run_all_bounded(&mut self, budget_ms: u64) {
         let budget = budget_duration(budget_ms);
         while let Some((label, finalizer)) = self.entries.pop() {
@@ -1288,6 +1288,9 @@ async fn run_pipeline_body(
             PipelineStage::Normalize => {
                 execute_normalize(pcx, log, stage_budgets, run_tmp_dir, &mut inter).await?;
             }
+            // NOTE: When speculative mode is active (TranscribeArgs.speculative),
+            // the caller should use SpeculativeStreamingPipeline instead of this
+            // single-backend execution path. See streaming::SpeculativeStreamingPipeline.
             PipelineStage::Backend => {
                 execute_backend(
                     pcx,
@@ -8308,5 +8311,163 @@ mod tests {
         assert_eq!(events[0].code, "backend.cancelled");
         assert!(events[0].payload.is_object());
         assert_eq!(events[0].payload["checkpoint"], true);
+    }
+
+    // ── Task #203 — orchestrator edge-case tests ──────────────────────
+
+    #[test]
+    fn recommended_budget_zero_service_ms_clamps_to_floor() {
+        // service_ms = 0 with a non-zero budget → utilization 0.0 ≤ 0.30
+        // → "decrease_budget_candidate", candidate = ceil(0 * 1.60) = 0,
+        //   max(0, 1_000) = 1_000 (hard floor).
+        let (budget, action, _reason, utilization) = recommended_budget(0, 5_000);
+        assert_eq!(action, "decrease_budget_candidate");
+        assert_eq!(utilization, 0.0);
+        assert_eq!(budget, 1_000, "zero service_ms should clamp to 1_000 floor");
+    }
+
+    #[test]
+    fn punctuate_segments_already_punctuated_emits_no_changes_note() {
+        // All segments already have correct capitalization and trailing
+        // punctuation → modified == 0 → note is emitted.
+        let mut segments = vec![
+            TranscriptionSegment {
+                text: "Hello world.".to_owned(),
+                start_sec: None,
+                end_sec: None,
+                speaker: None,
+                confidence: None,
+            },
+            TranscriptionSegment {
+                text: "How are you?".to_owned(),
+                start_sec: None,
+                end_sec: None,
+                speaker: None,
+                confidence: None,
+            },
+            TranscriptionSegment {
+                text: "Fine!".to_owned(),
+                start_sec: None,
+                end_sec: None,
+                speaker: None,
+                confidence: None,
+            },
+        ];
+        let token = CancellationToken::no_deadline();
+        let report = punctuate_segments(&mut segments, &token).unwrap();
+
+        assert_eq!(report.segments_total, 3);
+        assert_eq!(report.segments_modified, 0);
+        assert!(
+            report.notes.iter().any(|n| n.contains("no segments required punctuation changes")),
+            "expected 'no changes' note, got: {:?}",
+            report.notes
+        );
+        // Segments should be unchanged.
+        assert_eq!(segments[0].text, "Hello world.");
+        assert_eq!(segments[1].text, "How are you?");
+        assert_eq!(segments[2].text, "Fine!");
+    }
+
+    #[test]
+    fn pipeline_cx_cancel_then_uncancel_round_trip() {
+        let mut pcx = PipelineCx::new(None);
+
+        // Initially no deadline → checkpoint passes.
+        let token1 = pcx.cancellation_token();
+        assert!(token1.checkpoint().is_ok());
+
+        // cancel_now() → checkpoint fails.
+        pcx.cancel_now();
+        let token2 = pcx.cancellation_token();
+        assert!(token2.checkpoint().is_err(), "should fail after cancel_now");
+
+        // uncancel() → new token passes again.
+        pcx.uncancel();
+        let token3 = pcx.cancellation_token();
+        assert!(
+            token3.checkpoint().is_ok(),
+            "should pass after uncancel"
+        );
+    }
+
+    #[test]
+    fn vad_energy_detect_below_min_voice_ratio_is_silence_only() {
+        // Voice frames exist but their ratio is below min_voice_ratio → silence_only = true.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("low_voice.wav");
+
+        // 44-byte header + PCM data:
+        // 10 frames of silence (0) then 1 frame of loud audio → 1/11 ≈ 0.09
+        // With min_voice_ratio = 0.50, this should be classified as silence_only.
+        let frame_samples = 160;
+        let mut data = vec![0u8; 44]; // header
+        // 10 silent frames (160 samples each, all zeros)
+        data.extend(vec![0u8; 10 * frame_samples * 2]);
+        // 1 loud frame (160 samples of max amplitude)
+        for _ in 0..frame_samples {
+            data.extend(16000_i16.to_le_bytes());
+        }
+        std::fs::write(&path, &data).unwrap();
+
+        let token = CancellationToken::no_deadline();
+        let config = VadConfig {
+            rms_threshold: 0.01,
+            frame_samples,
+            min_voice_ratio: 0.50, // well above 1/11 ≈ 0.09
+        };
+        let report = vad_energy_detect(&path, &config, &token).unwrap();
+
+        assert_eq!(report.frames_total, 11);
+        assert_eq!(report.frames_voiced, 1);
+        assert!(
+            report.silence_only,
+            "voice_ratio {:.3} should be below min_voice_ratio 0.50",
+            report.voice_ratio
+        );
+        assert!(!report.regions.is_empty(), "should still have a voiced region");
+    }
+
+    #[test]
+    fn stage_latency_profile_terminal_only_event_is_skipped() {
+        // A stage with a terminal event but no start event should be skipped
+        // because `start_ts_ms` is `None` → the `let Some(start_ts) = ...` guard
+        // triggers `continue`.
+        let events = vec![RunEvent {
+            stage: "backend".to_owned(),
+            code: "backend.ok".to_owned(),
+            message: "done".to_owned(),
+            payload: json!({ "ts_ms": 5000, "elapsed_ms": 2000 }),
+            seq: 1,
+            ts_rfc3339: "2026-01-01T00:00:05Z".to_owned(),
+        }];
+        let budgets = StageBudgetPolicy {
+            ingest_ms: 5_000,
+            normalize_ms: 10_000,
+            probe_ms: 8_000,
+            vad_ms: 10_000,
+            separate_ms: 30_000,
+            backend_ms: 60_000,
+            acceleration_ms: 20_000,
+            align_ms: 30_000,
+            punctuate_ms: 10_000,
+            diarize_ms: 30_000,
+            persist_ms: 20_000,
+            cleanup_budget_ms: 5_000,
+        };
+        let profile = stage_latency_profile(&events, budgets);
+
+        // No observed stages because the backend event had no start event.
+        assert_eq!(
+            profile["summary"]["observed_stages"], 0,
+            "terminal-only event should not produce an observed stage"
+        );
+        let stages = profile["stages"]
+            .as_object()
+            .expect("stages should be object");
+        assert!(
+            stages.is_empty(),
+            "no stage profiles should exist for terminal-only events"
+        );
     }
 }

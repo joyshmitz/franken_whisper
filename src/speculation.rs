@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{FwError, FwResult};
 use crate::model::TranscriptionSegment;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 // ---------------------------------------------------------------------------
 // SpeculationWindow
@@ -272,15 +272,17 @@ pub struct SpeculationStats {
     pub windows_processed: u64,
     /// Number of corrections emitted.
     pub corrections_emitted: u64,
+    /// Number of windows confirmed without correction.
+    pub confirmations_emitted: u64,
     /// `corrections_emitted / windows_processed` (0.0 when no windows).
     pub correction_rate: f64,
     /// Mean latency of the fast model across all partials (ms).
     pub mean_fast_latency_ms: f64,
-    /// Mean latency of the quality model across all corrections (ms).
+    /// Mean latency of the quality model across all processed windows (ms).
     pub mean_quality_latency_ms: f64,
     /// Current window size being used (ms).
     pub current_window_size_ms: u64,
-    /// Mean approximate WER across all corrections.
+    /// Mean approximate WER across all processed windows.
     pub mean_drift_wer: f64,
 }
 
@@ -429,8 +431,12 @@ impl WindowManager {
         }
     }
 
-    /// Create the next speculation window starting at `audio_position_ms`.
-    pub fn next_window(&mut self, audio_position_ms: u64, audio_hash: &str) -> SpeculationWindow {
+    fn create_window(
+        &mut self,
+        audio_position_ms: u64,
+        end_ms: u64,
+        audio_hash: &str,
+    ) -> SpeculationWindow {
         let id = self.next_window_id;
         self.next_window_id += 1;
 
@@ -438,7 +444,7 @@ impl WindowManager {
             id,
             self.run_id.clone(),
             audio_position_ms,
-            audio_position_ms + self.window_size_ms,
+            end_ms,
             self.overlap_ms,
             audio_hash.to_owned(),
         );
@@ -451,6 +457,33 @@ impl WindowManager {
         });
 
         window
+    }
+
+    /// Create the next speculation window starting at `audio_position_ms`.
+    pub fn next_window(&mut self, audio_position_ms: u64, audio_hash: &str) -> SpeculationWindow {
+        let end_ms = audio_position_ms.saturating_add(self.window_size_ms);
+        self.create_window(audio_position_ms, end_ms, audio_hash)
+    }
+
+    /// Create a window bounded by `max_end_ms` (useful for final-window truncation).
+    ///
+    /// Returns `None` when `audio_position_ms >= max_end_ms`, preventing
+    /// zero-length windows from being created.
+    pub fn next_window_bounded(
+        &mut self,
+        audio_position_ms: u64,
+        max_end_ms: u64,
+        audio_hash: &str,
+    ) -> Option<SpeculationWindow> {
+        if audio_position_ms >= max_end_ms {
+            return None;
+        }
+        let natural_end = audio_position_ms.saturating_add(self.window_size_ms);
+        let end_ms = natural_end.min(max_end_ms);
+        if end_ms <= audio_position_ms {
+            return None;
+        }
+        Some(self.create_window(audio_position_ms, end_ms, audio_hash))
     }
 
     /// Record the fast model result for a window.
@@ -863,8 +896,8 @@ pub enum ControllerAction {
 /// Calibration tracker using Brier score over a rolling window.
 #[derive(Debug, Clone)]
 pub struct CalibrationTracker {
-    predictions: Vec<f64>,
-    outcomes: Vec<bool>,
+    predictions: VecDeque<f64>,
+    outcomes: VecDeque<bool>,
     window_size: usize,
 }
 
@@ -872,18 +905,18 @@ impl CalibrationTracker {
     #[must_use]
     pub fn new(window_size: usize) -> Self {
         Self {
-            predictions: Vec::new(),
-            outcomes: Vec::new(),
+            predictions: VecDeque::new(),
+            outcomes: VecDeque::new(),
             window_size,
         }
     }
 
     pub fn record(&mut self, predicted: f64, actual_correction: bool) {
-        self.predictions.push(predicted);
-        self.outcomes.push(actual_correction);
+        self.predictions.push_back(predicted);
+        self.outcomes.push_back(actual_correction);
         if self.predictions.len() > self.window_size {
-            self.predictions.remove(0);
-            self.outcomes.remove(0);
+            self.predictions.pop_front();
+            self.outcomes.pop_front();
         }
     }
 
@@ -1072,8 +1105,7 @@ impl SpeculationWindowController {
             self.fallback_active = true;
             self.fallback_reason = Some("correction rate > 75%".to_owned());
             if let ControllerAction::Grow(delta) = &action {
-                self.current_window_ms =
-                    (self.current_window_ms + delta).min(self.max_window_ms);
+                self.current_window_ms = (self.current_window_ms + delta).min(self.max_window_ms);
             }
         } else {
             self.fallback_active = false;
@@ -1141,5 +1173,447 @@ impl SpeculationWindowController {
     #[must_use]
     pub fn posterior(&self) -> &BetaPosterior {
         &self.posterior
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bd-qlt.8: CorrectionEvidenceLedger — per-window evidence trail
+// ---------------------------------------------------------------------------
+
+/// A single evidence entry recording one speculation window decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectionEvidenceEntry {
+    pub entry_id: u64,
+    pub window_id: u64,
+    pub run_id: String,
+    pub timestamp_rfc3339: String,
+    pub fast_model_id: String,
+    pub fast_latency_ms: u64,
+    pub fast_confidence_mean: f64,
+    pub fast_segment_count: usize,
+    pub quality_model_id: String,
+    pub quality_latency_ms: u64,
+    pub quality_confidence_mean: f64,
+    pub quality_segment_count: usize,
+    pub drift: CorrectionDrift,
+    pub decision: String,
+    pub window_size_ms: u64,
+    pub correction_rate_at_decision: f64,
+    pub controller_confidence: f64,
+    pub fallback_active: bool,
+    pub fallback_reason: Option<String>,
+}
+
+/// Bounded evidence ledger recording every speculation decision for
+/// post-hoc analysis, adaptive tuning, and debugging.
+pub struct CorrectionEvidenceLedger {
+    entries: VecDeque<CorrectionEvidenceEntry>,
+    capacity: usize,
+    total_recorded: u64,
+}
+
+impl CorrectionEvidenceLedger {
+    /// Create a new ledger with the given capacity (default: 500).
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(capacity),
+            capacity,
+            total_recorded: 0,
+        }
+    }
+
+    /// Record an entry. Evicts the oldest if at capacity.
+    pub fn record(&mut self, entry: CorrectionEvidenceEntry) {
+        if self.capacity == 0 {
+            self.total_recorded += 1;
+            return;
+        }
+        if self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
+        self.total_recorded += 1;
+    }
+
+    /// Total entries ever recorded (including evicted).
+    #[must_use]
+    pub fn total_recorded(&self) -> u64 {
+        self.total_recorded
+    }
+
+    /// Current entries in the ledger.
+    #[must_use]
+    pub fn entries(&self) -> &VecDeque<CorrectionEvidenceEntry> {
+        &self.entries
+    }
+
+    /// Export all entries as a JSON Value for `PipelineCx::record_evidence()`.
+    #[must_use]
+    pub fn to_evidence_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "correction_evidence_ledger",
+            "total_recorded": self.total_recorded,
+            "retained": self.entries.len(),
+            "capacity": self.capacity,
+            "diagnostics": self.diagnostics(),
+            "entries": self.entries.iter().collect::<Vec<_>>(),
+        })
+    }
+
+    /// Summary diagnostics as JSON.
+    #[must_use]
+    pub fn diagnostics(&self) -> serde_json::Value {
+        serde_json::json!({
+            "correction_rate": self.correction_rate(),
+            "mean_fast_latency_ms": self.mean_fast_latency(),
+            "mean_quality_latency_ms": self.mean_quality_latency(),
+            "mean_wer": self.mean_wer(),
+            "latency_savings_pct": self.latency_savings_pct(),
+        })
+    }
+
+    /// Fraction of entries that were corrections.
+    #[must_use]
+    pub fn correction_rate(&self) -> f64 {
+        if self.entries.is_empty() {
+            return 0.0;
+        }
+        let corrections = self
+            .entries
+            .iter()
+            .filter(|e| is_correction_decision(&e.decision))
+            .count();
+        corrections as f64 / self.entries.len() as f64
+    }
+
+    /// Mean fast model latency across entries.
+    #[must_use]
+    pub fn mean_fast_latency(&self) -> f64 {
+        if self.entries.is_empty() {
+            return 0.0;
+        }
+        let sum: u64 = self.entries.iter().map(|e| e.fast_latency_ms).sum();
+        sum as f64 / self.entries.len() as f64
+    }
+
+    /// Mean quality model latency across entries.
+    #[must_use]
+    pub fn mean_quality_latency(&self) -> f64 {
+        if self.entries.is_empty() {
+            return 0.0;
+        }
+        let sum: u64 = self.entries.iter().map(|e| e.quality_latency_ms).sum();
+        sum as f64 / self.entries.len() as f64
+    }
+
+    /// Mean WER across entries.
+    #[must_use]
+    pub fn mean_wer(&self) -> f64 {
+        if self.entries.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = self.entries.iter().map(|e| e.drift.wer_approx).sum();
+        sum / self.entries.len() as f64
+    }
+
+    /// Percentage of latency savings from showing fast results immediately.
+    ///
+    /// `(mean_quality - mean_fast) / mean_quality * 100`
+    #[must_use]
+    pub fn latency_savings_pct(&self) -> f64 {
+        let q = self.mean_quality_latency();
+        if q == 0.0 {
+            return 0.0;
+        }
+        let f = self.mean_fast_latency();
+        (q - f) / q * 100.0
+    }
+
+    /// Window size over time as `(window_id, window_size_ms)` pairs.
+    #[must_use]
+    pub fn window_size_trend(&self) -> Vec<(u64, u64)> {
+        self.entries
+            .iter()
+            .map(|e| (e.window_id, e.window_size_ms))
+            .collect()
+    }
+}
+
+fn is_correction_decision(decision: &str) -> bool {
+    matches!(
+        decision.trim().to_ascii_lowercase().as_str(),
+        "correct" | "corrected" | "correction"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::TranscriptionSegment;
+
+    fn seg(text: &str, confidence: Option<f64>) -> TranscriptionSegment {
+        TranscriptionSegment {
+            text: text.to_owned(),
+            start_sec: None,
+            end_sec: None,
+            confidence,
+            speaker: None,
+        }
+    }
+
+    #[test]
+    fn speculation_window_duration_and_contains_boundary() {
+        let w = SpeculationWindow::new(0, "r".into(), 1000, 4000, 500, "h".into());
+        assert_eq!(w.duration_ms(), 3000);
+        // contains_ms: start inclusive, end exclusive.
+        assert!(w.contains_ms(1000));
+        assert!(w.contains_ms(3999));
+        assert!(!w.contains_ms(4000));
+        assert!(!w.contains_ms(999));
+        // Degenerate: start == end → duration 0, contains nothing.
+        let w2 = SpeculationWindow::new(1, "r".into(), 5000, 5000, 0, "h".into());
+        assert_eq!(w2.duration_ms(), 0);
+        assert!(!w2.contains_ms(5000));
+        // Saturating sub when end < start (shouldn't happen, but safe).
+        let w3 = SpeculationWindow::new(2, "r".into(), 100, 50, 0, "h".into());
+        assert_eq!(w3.duration_ms(), 0);
+    }
+
+    #[test]
+    fn correction_drift_identical_empty_and_divergent() {
+        // Identical segments → wer 0, edit distance 0.
+        let segs = vec![seg("hello world", Some(0.9))];
+        let drift = CorrectionDrift::compute(&segs, &segs);
+        assert_eq!(drift.wer_approx, 0.0);
+        assert_eq!(drift.text_edit_distance, 0);
+        assert_eq!(drift.segment_count_delta, 0);
+        assert!(drift.confidence_delta < f64::EPSILON);
+
+        // Empty vs empty → all zeros.
+        let empty_drift = CorrectionDrift::compute(&[], &[]);
+        assert_eq!(empty_drift.text_edit_distance, 0);
+        assert_eq!(empty_drift.segment_count_delta, 0);
+
+        // Divergent segments → positive WER.
+        let fast = vec![seg("the cat sat", Some(0.8))];
+        let quality = vec![seg("a dog ran", Some(0.95))];
+        let d = CorrectionDrift::compute(&fast, &quality);
+        assert!(d.wer_approx > 0.0);
+        assert!(d.text_edit_distance > 0);
+        assert!((d.confidence_delta - 0.15).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn beta_posterior_prior_updates_and_variance() {
+        let p = BetaPosterior::weakly_informative();
+        assert!((p.mean() - 0.5).abs() < f64::EPSILON);
+        let var_initial = p.variance();
+
+        // Corrections shift mean up (towards 1).
+        let mut p2 = BetaPosterior::weakly_informative();
+        for _ in 0..10 {
+            p2.observe_correction();
+        }
+        assert!(p2.mean() > 0.5);
+        assert!(p2.variance() < var_initial);
+
+        // Confirmations shift mean down (towards 0).
+        let mut p3 = BetaPosterior::weakly_informative();
+        for _ in 0..10 {
+            p3.observe_confirmation();
+        }
+        assert!(p3.mean() < 0.5);
+    }
+
+    #[test]
+    fn calibration_tracker_brier_score_and_eviction() {
+        // Perfect predictions: predicted=1.0 when correction, 0.0 when confirm → Brier=0.
+        let mut ct = CalibrationTracker::new(10);
+        ct.record(1.0, true);
+        ct.record(0.0, false);
+        assert!(ct.brier_score() < f64::EPSILON);
+        assert_eq!(ct.sample_count(), 2);
+
+        // Worst predictions: predicted=0.0 when correction, 1.0 when confirm → Brier=1.
+        let mut ct2 = CalibrationTracker::new(10);
+        ct2.record(0.0, true);
+        ct2.record(1.0, false);
+        assert!((ct2.brier_score() - 1.0).abs() < f64::EPSILON);
+
+        // Eviction: window_size=3, add 5 entries, only 3 remain.
+        let mut ct3 = CalibrationTracker::new(3);
+        for i in 0..5 {
+            ct3.record(0.5, i % 2 == 0);
+        }
+        assert_eq!(ct3.sample_count(), 3);
+
+        // Empty tracker → Brier 0.
+        let ct4 = CalibrationTracker::new(5);
+        assert_eq!(ct4.brier_score(), 0.0);
+    }
+
+    #[test]
+    fn evidence_ledger_capacity_zero_eviction_and_diagnostics() {
+        // Capacity 0: records total but stores nothing.
+        let mut ledger = CorrectionEvidenceLedger::new(0);
+        let entry = CorrectionEvidenceEntry {
+            entry_id: 0,
+            window_id: 0,
+            run_id: "r".into(),
+            timestamp_rfc3339: "2025-01-01T00:00:00Z".into(),
+            fast_model_id: "tiny".into(),
+            fast_latency_ms: 100,
+            fast_confidence_mean: 0.8,
+            fast_segment_count: 1,
+            quality_model_id: "large".into(),
+            quality_latency_ms: 500,
+            quality_confidence_mean: 0.95,
+            quality_segment_count: 1,
+            drift: CorrectionDrift {
+                wer_approx: 0.1,
+                confidence_delta: 0.15,
+                segment_count_delta: 0,
+                text_edit_distance: 5,
+            },
+            decision: "confirm".into(),
+            window_size_ms: 3000,
+            correction_rate_at_decision: 0.0,
+            controller_confidence: 0.5,
+            fallback_active: false,
+            fallback_reason: None,
+        };
+        ledger.record(entry.clone());
+        assert_eq!(ledger.total_recorded(), 1);
+        assert!(ledger.entries().is_empty());
+
+        // Normal capacity with eviction.
+        let mut ledger2 = CorrectionEvidenceLedger::new(2);
+        let mut e = entry;
+        for i in 0..3 {
+            e.entry_id = i;
+            e.fast_latency_ms = 100;
+            e.quality_latency_ms = 500;
+            e.decision = if i == 1 {
+                "correct".into()
+            } else {
+                "confirm".into()
+            };
+            ledger2.record(e.clone());
+        }
+        assert_eq!(ledger2.total_recorded(), 3);
+        assert_eq!(ledger2.entries().len(), 2);
+        // Oldest (entry_id=0) was evicted; entry_id=1,2 remain.
+        assert_eq!(ledger2.entries()[0].entry_id, 1);
+
+        // Diagnostics: 1 correction out of 2 retained = 50%.
+        assert!((ledger2.correction_rate() - 0.5).abs() < f64::EPSILON);
+        assert!((ledger2.mean_fast_latency() - 100.0).abs() < f64::EPSILON);
+        assert!((ledger2.mean_quality_latency() - 500.0).abs() < f64::EPSILON);
+        // Latency savings: (500-100)/500*100 = 80%.
+        assert!((ledger2.latency_savings_pct() - 80.0).abs() < f64::EPSILON);
+    }
+
+    // ── Task #206 — speculation pass 2 edge-case tests ───────────────
+
+    #[test]
+    fn window_manager_next_window_bounded_none_and_clamped() {
+        let mut mgr = WindowManager::new("run-bounded", 5000, 500);
+
+        // audio_position >= max_end → None.
+        assert!(mgr.next_window_bounded(10_000, 10_000, "h").is_none());
+        assert!(mgr.next_window_bounded(10_001, 10_000, "h").is_none());
+
+        // natural_end (3000 + 5000 = 8000) > max_end (6000) → clamped to 6000.
+        let w = mgr.next_window_bounded(3000, 6000, "h").unwrap();
+        assert_eq!(w.end_ms, 6000);
+        assert_eq!(w.duration_ms(), 3000); // 6000 - 3000
+
+        // Happy path: natural_end fits within max_end.
+        let w2 = mgr.next_window_bounded(0, 100_000, "h").unwrap();
+        assert_eq!(w2.duration_ms(), 5000);
+    }
+
+    #[test]
+    fn window_manager_set_window_size_clamps() {
+        let mut mgr = WindowManager::new("run-clamp", 5000, 500);
+        // min_window_ms = 1000, max_window_ms = 30000.
+
+        // Below min → clamped to 1000.
+        mgr.set_window_size(0);
+        assert_eq!(mgr.current_window_size(), 1000);
+
+        // Above max → clamped to 30000.
+        mgr.set_window_size(u64::MAX);
+        assert_eq!(mgr.current_window_size(), 30_000);
+
+        // Within range → passes through.
+        mgr.set_window_size(15_000);
+        assert_eq!(mgr.current_window_size(), 15_000);
+    }
+
+    #[test]
+    fn correction_tracker_unregistered_window_returns_error() {
+        let mut tracker = CorrectionTracker::new(CorrectionTolerance::default());
+
+        // submit_quality_result with no registered partial → Err.
+        let result = tracker.submit_quality_result(
+            999, // no partial for this window_id
+            "quality-model",
+            vec![seg("hello", Some(0.9))],
+            100,
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for unregistered window_id"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no partial registered"),
+            "error should mention missing partial: {msg}"
+        );
+    }
+
+    #[test]
+    fn correction_tracker_all_resolved_transitions() {
+        let mut tracker = CorrectionTracker::new(CorrectionTolerance::default());
+
+        // No partials → all_resolved() is vacuously true.
+        assert!(tracker.all_resolved());
+
+        // Register a partial → not all resolved (Pending).
+        let partial = PartialTranscript::new(
+            0,
+            0,
+            "fast".to_owned(),
+            vec![seg("hello", Some(0.9))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        tracker.register_partial(partial);
+        assert!(!tracker.all_resolved(), "pending partial → not resolved");
+
+        // Submit matching quality result → Confirm → all resolved.
+        let decision = tracker
+            .submit_quality_result(0, "quality", vec![seg("hello", Some(0.9))], 100)
+            .unwrap();
+        let is_confirm = matches!(decision, CorrectionDecision::Confirm { .. });
+        assert!(is_confirm, "expected Confirm decision");
+        assert!(tracker.all_resolved());
+    }
+
+    #[test]
+    fn is_correction_decision_all_variants_and_normalization() {
+        assert!(is_correction_decision("correct"));
+        assert!(is_correction_decision("corrected"));
+        assert!(is_correction_decision("correction"));
+        // Normalization: trim + lowercase.
+        assert!(is_correction_decision(" CORRECTED "));
+        assert!(is_correction_decision("\tCorrection\n"));
+        // Non-corrections.
+        assert!(!is_correction_decision("confirm"));
+        assert!(!is_correction_decision("confirmed"));
+        assert!(!is_correction_decision(""));
+        assert!(!is_correction_decision("   "));
     }
 }
