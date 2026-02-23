@@ -1090,4 +1090,161 @@ mod tests {
         assert!(result[0].speaker.is_none());
         assert!(result[1].speaker.is_none());
     }
+
+    // ── Task #262 — whisper_cpp_native pass 5 edge-case tests ──────────
+
+    #[test]
+    fn run_custom_model_name_appears_in_raw_output() {
+        let mut req = native_request();
+        req.model = Some("ggml-large-v3-turbo".to_owned());
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("custom model run should succeed");
+
+        assert_eq!(
+            result.raw_output["model"].as_str(),
+            Some("ggml-large-v3-turbo"),
+            "raw_output must reflect the custom model name"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_large_file_clamps_to_max() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("huge.wav");
+        // Need file size that produces estimate > MAX_DURATION_MS (1_800_000).
+        // audio_bytes / 32_000 * 1_000 > 1_800_000 → audio_bytes > 57_600_000.
+        // Total file = 57_600_100 + 44 = 57_600_144 bytes. Use sparse file.
+        let f = std::fs::File::create(&wav).unwrap();
+        f.set_len(57_600_144).unwrap();
+        drop(f);
+
+        let mut req = native_request();
+        req.backend_params.duration_ms = None;
+        assert_eq!(
+            estimate_duration_ms(&req, &wav),
+            MAX_DURATION_MS,
+            "large file estimate should clamp to MAX_DURATION_MS"
+        );
+    }
+
+    #[test]
+    fn build_native_segmentation_waveform_multiple_active_regions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("two_bursts.wav");
+        // Pattern: 0.5s silence, 1s tone, 0.5s silence, 1s tone, 0.5s silence
+        // = 3.5s total at 16kHz = 56_000 samples
+        let mut samples = vec![0i16; 8_000]; // 0.5s silence
+        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 9_000i16 } else { -9_000 })); // 1s tone
+        samples.extend(vec![0i16; 8_000]); // 0.5s silence
+        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 9_000i16 } else { -9_000 })); // 1s tone
+        samples.extend(vec![0i16; 8_000]); // 0.5s silence
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
+
+        let pilot =
+            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false);
+        let req = native_request();
+        let seg = build_native_segmentation(&req, &wav, &pilot, None)
+            .expect("segmentation should succeed");
+
+        assert_eq!(seg.analysis_provenance["mode"], "waveform");
+        let seg_count = seg
+            .analysis_provenance["segments_from_active_regions"]
+            .as_u64()
+            .expect("segments_from_active_regions must be u64");
+        assert!(
+            seg_count >= 2,
+            "two active regions should produce at least 2 segments, got {seg_count}"
+        );
+        // Segments should be sorted by start_ms
+        for pair in seg.pilot_segments.windows(2) {
+            assert!(
+                pair[0].start_ms <= pair[1].start_ms,
+                "segments must be sorted by start_ms"
+            );
+        }
+    }
+
+    #[test]
+    fn run_raw_output_segments_array_matches_result_structure() {
+        let req = native_request();
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run should succeed");
+
+        let raw_segments = result.raw_output["segments"]
+            .as_array()
+            .expect("raw_output.segments must be an array");
+        assert_eq!(raw_segments.len(), result.segments.len());
+
+        for (raw, actual) in raw_segments.iter().zip(result.segments.iter()) {
+            assert_eq!(
+                raw["start_sec"].as_f64(),
+                actual.start_sec,
+                "start_sec must match"
+            );
+            assert_eq!(
+                raw["end_sec"].as_f64(),
+                actual.end_sec,
+                "end_sec must match"
+            );
+            assert_eq!(
+                raw["text"].as_str().map(|s| s.to_owned()),
+                Some(actual.text.clone()),
+                "text must match"
+            );
+            assert_eq!(
+                raw["confidence"].as_f64(),
+                actual.confidence,
+                "confidence must match"
+            );
+            assert!(raw["speaker"].is_null(), "speaker should be null for whisper.cpp");
+        }
+    }
+
+    #[test]
+    fn waveform_confidence_decreases_with_continuity_penalty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("long_tone.wav");
+        // Pilot produces 1 segment per 5000ms, so we need >10s of tone
+        // to get at least 2 segments within a single active region.
+        // 12 seconds of continuous tone at 16kHz = 192_000 samples.
+        let samples: Vec<i16> = (0..192_000)
+            .map(|i| if i % 2 == 0 { 8_000i16 } else { -8_000 })
+            .collect();
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
+
+        let pilot =
+            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false);
+        let req = native_request();
+        let seg = build_native_segmentation(&req, &wav, &pilot, None)
+            .expect("segmentation should succeed");
+
+        // With multiple segments in the same region, the continuity_penalty
+        // = (region_index + segment_index) * 0.003 increases per segment,
+        // so confidence should decrease (or at least not increase) across segments.
+        assert!(
+            seg.pilot_segments.len() >= 2,
+            "need at least 2 segments to observe penalty, got {}",
+            seg.pilot_segments.len()
+        );
+        assert!(
+            seg.pilot_segments.first().unwrap().confidence
+                >= seg.pilot_segments.last().unwrap().confidence,
+            "later segments should have equal or lower confidence due to continuity penalty: first={}, last={}",
+            seg.pilot_segments.first().unwrap().confidence,
+            seg.pilot_segments.last().unwrap().confidence,
+        );
+    }
 }

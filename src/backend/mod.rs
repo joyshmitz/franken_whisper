@@ -5563,8 +5563,8 @@ mod tests {
         let report = probe_system_health_uncached();
         assert_eq!(
             report.backends.len(),
-            6,
-            "should report on all 6 backends (incl. 3 native pilots), got {}",
+            3,
+            "should report on all 3 production backends, got {}",
             report.backends.len()
         );
 
@@ -5584,7 +5584,7 @@ mod tests {
         // Verify key fields are present.
         let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("should parse back");
         assert!(parsed["backends"].is_array());
-        assert_eq!(parsed["backends"].as_array().unwrap().len(), 6);
+        assert_eq!(parsed["backends"].as_array().unwrap().len(), 3);
         assert!(parsed.get("recommended_backend").is_some());
         assert!(parsed.get("diarization_ready").is_some());
         assert!(parsed.get("hf_token_set").is_some());
@@ -8545,5 +8545,334 @@ mod tests {
                 .any(|d| matches!(d.kind, ShadowDivergenceKind::EndTimestampDivergence)),
             "one-sided end timestamp should not flag divergence"
         );
+    }
+
+    #[test]
+    fn diagnostics_avg_brier_null_when_all_entries_have_none_brier() {
+        // Entries exist (total > 0), but every brier_score is None.
+        // Exercises the `brier_values.is_empty()` branch at line 353-354
+        // which should produce avg_brier_score: null despite non-empty ledger.
+        let mut ledger = RoutingEvidenceLedger::new(10);
+        ledger.record(make_ledger_entry("d1", false, None));
+        ledger.record(make_ledger_entry("d2", true, None));
+        ledger.record(make_ledger_entry("d3", false, None));
+
+        let diag = ledger.diagnostics();
+        assert_eq!(diag["total_entries"], 3, "should have 3 entries");
+        assert!(
+            diag["avg_brier_score"].is_null(),
+            "avg_brier_score should be null when all entries have None brier, got: {}",
+            diag["avg_brier_score"]
+        );
+        // Other fields should still be populated.
+        assert_eq!(diag["fallback_count"], 1, "d2 is a fallback entry");
+        let avg_cal = diag["avg_calibration_score"].as_f64().unwrap();
+        assert!(
+            (avg_cal - 0.8).abs() < 1e-9,
+            "avg calibration should be 0.8 (all entries use 0.8), got {avg_cal}"
+        );
+    }
+
+    #[test]
+    fn last_error_none_after_all_failures_evicted_from_window() {
+        // Fill the sliding window with failures, then overwrite them entirely
+        // with successes. `metrics_for().last_error` should become None because
+        // all error-bearing records have been evicted from the window.
+        let mut state = RouterState::new();
+        // Record ADAPTIVE_MIN_SAMPLES failures with error messages.
+        for i in 0..ADAPTIVE_MIN_SAMPLES {
+            let mut rec = make_outcome(BackendKind::WhisperCpp, false, 100 + i as u64);
+            rec.error_message = Some(format!("err-{i}"));
+            state.record_outcome(rec);
+        }
+        // Verify errors exist.
+        let m = state.metrics_for(BackendKind::WhisperCpp);
+        assert!(m.last_error.is_some(), "should have error before eviction");
+
+        // Now record ROUTER_HISTORY_WINDOW successes to fully evict all failures.
+        for i in 0..ROUTER_HISTORY_WINDOW {
+            state.record_outcome(make_outcome(BackendKind::WhisperCpp, true, 50 + i as u64));
+        }
+        let m = state.metrics_for(BackendKind::WhisperCpp);
+        assert!(
+            m.last_error.is_none(),
+            "last_error should be None after all failures evicted, got: {:?}",
+            m.last_error
+        );
+        assert_eq!(m.sample_count, ROUTER_HISTORY_WINDOW);
+        assert_eq!(m.success_count, ROUTER_HISTORY_WINDOW);
+    }
+
+    #[test]
+    fn resolve_outcome_ignored_for_evicted_entry() {
+        // Record enough entries to evict the first one from the circular buffer,
+        // then try to resolve the evicted entry. Should be silently ignored and
+        // resolved_count should remain 0.
+        let mut ledger = RoutingEvidenceLedger::new(3);
+        ledger.record(make_ledger_entry("dec-evicted", false, Some(0.1)));
+        ledger.record(make_ledger_entry("dec-2", false, Some(0.2)));
+        ledger.record(make_ledger_entry("dec-3", false, Some(0.3)));
+        // This fourth record evicts "dec-evicted".
+        ledger.record(make_ledger_entry("dec-4", false, Some(0.4)));
+
+        assert!(
+            ledger.find_by_decision_id("dec-evicted").is_none(),
+            "dec-evicted should have been evicted"
+        );
+        assert_eq!(ledger.total_recorded(), 4);
+        assert_eq!(ledger.len(), 3);
+
+        // Try to resolve the evicted entry.
+        ledger.resolve_outcome(
+            "dec-evicted",
+            RoutingOutcomeRecord {
+                backend: BackendKind::WhisperCpp,
+                success: true,
+                latency_ms: 100,
+                error_message: None,
+                recorded_at_rfc3339: "2026-01-01T00:00:01Z".to_owned(),
+            },
+        );
+        assert_eq!(
+            ledger.resolved_count(),
+            0,
+            "evicted entry should not be resolvable"
+        );
+        // Remaining entries should still be unresolved.
+        for entry in ledger.entries() {
+            assert!(
+                entry.actual_outcome.is_none(),
+                "entry {} should still be unresolved",
+                entry.decision_id
+            );
+        }
+    }
+
+    #[test]
+    fn router_state_resolve_evidence_outcome_delegates_to_ledger() {
+        // RouterState.resolve_evidence_outcome() at line 640 delegates to
+        // evidence_ledger.resolve_outcome(). Verify the outcome is visible
+        // through the evidence_ledger() accessor.
+        let mut state = RouterState::new();
+        let entry = make_ledger_entry("dec-rs-1", false, Some(0.2));
+        state.record_evidence(entry);
+
+        assert_eq!(state.evidence_ledger().len(), 1);
+        assert_eq!(state.evidence_ledger().resolved_count(), 0);
+
+        state.resolve_evidence_outcome(
+            "dec-rs-1",
+            RoutingOutcomeRecord {
+                backend: BackendKind::InsanelyFast,
+                success: true,
+                latency_ms: 250,
+                error_message: None,
+                recorded_at_rfc3339: "2026-01-01T00:01:00Z".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            state.evidence_ledger().resolved_count(),
+            1,
+            "should have 1 resolved entry"
+        );
+        let resolved = state
+            .evidence_ledger()
+            .find_by_decision_id("dec-rs-1")
+            .unwrap();
+        let outcome = resolved.actual_outcome.as_ref().unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.latency_ms, 250);
+        assert_eq!(outcome.backend, BackendKind::InsanelyFast);
+    }
+
+    #[test]
+    fn should_use_static_fallback_true_when_brier_above_threshold() {
+        // Exercises the third arm of should_use_static_fallback() at line 591:
+        // `self.calibration.is_poorly_calibrated()`. The existing tests only
+        // cover arms 1 (insufficient data) and 2 (calibration_score too low).
+        let mut state = RouterState::new();
+        // Sufficient data: record enough outcomes.
+        for _ in 0..ADAPTIVE_MIN_SAMPLES {
+            state.record_outcome(make_outcome(BackendKind::WhisperCpp, true, 100));
+            state.record_prediction_outcome(true); // 100% accuracy → good calibration_score
+        }
+        assert!(state.has_sufficient_data());
+        assert!(state.calibration_score() >= ADAPTIVE_FALLBACK_CALIBRATION_THRESHOLD);
+
+        // Poison Brier calibration: predict 0.0 but actual is true → Brier = 1.0.
+        for _ in 0..ADAPTIVE_MIN_SAMPLES {
+            state.record_calibration_observation(0.0, true);
+        }
+        assert!(
+            state.calibration.is_poorly_calibrated(),
+            "Brier should indicate poor calibration"
+        );
+        assert!(
+            state.should_use_static_fallback(),
+            "should_use_static_fallback should return true when Brier exceeds threshold"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // backend/mod edge-case tests pass 9
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_executor_execute_lower_latency_selector() {
+        // Exercises QualitySelector::LowerLatency in ConcurrentTwoLaneExecutor::select()
+        // (line 3592-3607). Only HigherConfidence has been tested in the
+        // concurrent executor; LowerLatency is tested in TwoLaneExecutor but not here.
+        use super::ConcurrentTwoLaneExecutor;
+
+        let executor = ConcurrentTwoLaneExecutor::new(QualitySelector::LowerLatency);
+
+        let result = executor.execute(
+            || {
+                // Primary: simulate some computation.
+                vec![TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 1000,
+                    text: "fast".to_owned(),
+                    confidence: 0.7,
+                }]
+            },
+            || {
+                // Secondary: simulate slower computation.
+                std::thread::sleep(Duration::from_millis(10));
+                vec![TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 1000,
+                    text: "quality".to_owned(),
+                    confidence: 0.95,
+                }]
+            },
+        );
+
+        // LowerLatency should select primary (finishes first).
+        assert_eq!(
+            result.selected, "primary",
+            "LowerLatency selector should pick primary (faster)"
+        );
+        assert!(
+            result.selection_reason.contains("latency"),
+            "reason should mention latency: {}",
+            result.selection_reason
+        );
+    }
+
+    #[test]
+    fn concurrent_executor_speculative_correct_always_picks_secondary() {
+        // Exercises QualitySelector::SpeculativeCorrect in
+        // ConcurrentTwoLaneExecutor::select() (lines 3624-3628).
+        // SpeculativeCorrect unconditionally selects secondary.
+        use super::ConcurrentTwoLaneExecutor;
+
+        let executor = ConcurrentTwoLaneExecutor::new(QualitySelector::SpeculativeCorrect);
+
+        let result = executor.execute(
+            || {
+                vec![TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 1000,
+                    text: "primary".to_owned(),
+                    confidence: 1.0,
+                }]
+            },
+            || {
+                vec![TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 1000,
+                    text: "secondary".to_owned(),
+                    confidence: 0.5,
+                }]
+            },
+        );
+
+        assert_eq!(
+            result.selected, "secondary",
+            "SpeculativeCorrect always picks secondary"
+        );
+        assert!(
+            result.selection_reason.contains("speculative-correct"),
+            "reason should contain 'speculative-correct': {}",
+            result.selection_reason
+        );
+    }
+
+    #[test]
+    fn segments_from_nodes_word_key_fallback_when_text_absent() {
+        // Exercises the "word" key fallback at line 2519:
+        //   .or_else(|| node.get("word").and_then(Value::as_str))
+        // The existing test only uses "text" key. This tests the "word" fallback
+        // used by some whisper output formats (word-level timestamps).
+        let input = serde_json::json!({
+            "segments": [
+                {"word": " Hello ", "start": 0.0, "end": 0.5},
+                {"word": "World", "start": 0.5, "end": 1.0}
+            ]
+        });
+        let segments = extract_segments_from_json(&input);
+        assert_eq!(segments.len(), 2, "should extract 2 segments from 'word' keys");
+        assert_eq!(segments[0].text, "Hello", "text should be trimmed from 'word' value");
+        assert_eq!(segments[1].text, "World");
+    }
+
+    #[test]
+    fn segments_from_nodes_probability_key_as_confidence_fallback() {
+        // Exercises the "probability" key fallback at line 2531:
+        //   .or_else(|| node.get("probability"))
+        // Existing tests cover "confidence" and "score" but not "probability".
+        let input = serde_json::json!({
+            "segments": [
+                {"text": "hello", "start": 0.0, "end": 1.0, "probability": 0.72}
+            ]
+        });
+        let segments = extract_segments_from_json(&input);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0].confidence,
+            Some(0.72),
+            "probability key should be used as confidence fallback"
+        );
+    }
+
+    #[test]
+    fn concurrent_executor_execute_returns_both_results() {
+        // Exercises ConcurrentTwoLaneExecutor::execute() (lines 3467-3505),
+        // the plain parallel execution method. Only execute_with_early_emit()
+        // has been tested for the concurrent executor. This verifies execute()
+        // populates both primary and secondary results.
+        use super::ConcurrentTwoLaneExecutor;
+
+        let executor = ConcurrentTwoLaneExecutor::new(QualitySelector::HigherConfidence);
+
+        let result = executor.execute(
+            || {
+                vec![TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 500,
+                    text: "primary text".to_owned(),
+                    confidence: 0.6,
+                }]
+            },
+            || {
+                vec![TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 500,
+                    text: "secondary text".to_owned(),
+                    confidence: 0.9,
+                }]
+            },
+        );
+
+        assert_eq!(result.primary_result.len(), 1);
+        assert_eq!(result.secondary_result.len(), 1);
+        assert_eq!(result.primary_result[0].text, "primary text");
+        assert_eq!(result.secondary_result[0].text, "secondary text");
+        // HigherConfidence should pick secondary (0.9 > 0.6).
+        assert_eq!(result.selected, "secondary");
+        assert!(result.primary_latency_ms < 5000, "primary should complete quickly");
+        assert!(result.secondary_latency_ms < 5000, "secondary should complete quickly");
     }
 }

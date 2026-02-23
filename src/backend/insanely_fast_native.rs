@@ -1096,4 +1096,141 @@ mod tests {
             "explicit duration_ms hint should be returned directly"
         );
     }
+
+    // ── Task #261 — insanely_fast_native pass 5 edge-case tests ──
+
+    #[test]
+    fn run_custom_batch_size_reflected_in_telemetry() {
+        // Existing tests cover batch_size=0→1 and default→8.
+        // This verifies a positive custom batch_size passes through.
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.backend_params.batch_size = Some(16);
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run should succeed");
+
+        assert_eq!(
+            result.raw_output["telemetry"]["batch_size_effective"], 16,
+            "custom batch_size=16 should be reflected in telemetry"
+        );
+        assert_eq!(
+            result.raw_output["telemetry"]["batch_size_requested"], 16,
+            "requested value should also be 16"
+        );
+    }
+
+    #[test]
+    fn run_raw_output_chunks_array_matches_segments() {
+        // Verify the "chunks" array in raw_output contains the same data
+        // as the result segments. No existing test checks the chunks array.
+        let tmp = tempdir().expect("tempdir");
+        let result = run(
+            &request(),
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run should succeed");
+
+        let chunks = result.raw_output["chunks"]
+            .as_array()
+            .expect("chunks should be an array");
+        assert_eq!(
+            chunks.len(),
+            result.segments.len(),
+            "chunks count should match segments count"
+        );
+        for (chunk, seg) in chunks.iter().zip(result.segments.iter()) {
+            assert_eq!(
+                chunk["text"].as_str(),
+                Some(seg.text.as_str()),
+                "chunk text should match segment text"
+            );
+            // speaker should be null when diarize=false
+            assert!(
+                chunk["speaker"].is_null(),
+                "speaker should be null without diarize"
+            );
+        }
+    }
+
+    #[test]
+    fn run_custom_model_name_in_raw_output() {
+        // Verify a custom model name appears in raw_output["model"].
+        // Tests only checked model=None default; never a custom model.
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.model = Some("openai/whisper-small.en".to_owned());
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run should succeed");
+
+        assert_eq!(
+            result.raw_output["model"].as_str(),
+            Some("openai/whisper-small.en"),
+            "custom model name should appear in raw_output"
+        );
+    }
+
+    #[test]
+    fn run_language_none_produces_null_in_raw_output() {
+        // All existing tests use language: Some("en").
+        // Verify language=None produces null in raw_output and result.
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.language = None;
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run should succeed");
+
+        assert!(
+            result.raw_output["language"].is_null(),
+            "language=None should produce null in raw_output"
+        );
+        assert!(
+            result.language.is_none(),
+            "result.language should be None"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_large_file_clamps_to_max() {
+        // File large enough that computed duration exceeds MAX_DURATION_MS.
+        // 30 min at 32_000 bytes/sec = 57_600_000 + 44 header.
+        // Use set_len for sparse file to avoid memory allocation.
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("huge.wav");
+        let huge_size: u64 = 57_600_044 + 32_000; // ~30 min + 1 sec
+        let file = std::fs::File::create(&wav).unwrap();
+        file.set_len(huge_size).unwrap();
+        drop(file);
+
+        let mut req = request();
+        req.backend_params.duration_ms = None;
+        let dur = estimate_duration_ms(&req, &wav);
+        assert_eq!(
+            dur, 1_800_000,
+            "file exceeding 30 min should clamp to MAX_DURATION_MS (1_800_000)"
+        );
+    }
 }

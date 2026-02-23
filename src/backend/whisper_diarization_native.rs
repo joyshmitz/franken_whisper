@@ -1374,4 +1374,268 @@ mod tests {
             "expected Cancelled error, got: {err:?}"
         );
     }
+
+    // ── Task #259 — whisper_diarization_native pass 7 edge-case tests ──
+
+    #[test]
+    fn run_with_custom_alignment_model_appears_in_raw_output() {
+        // When backend_params.alignment is set with a custom alignment_model,
+        // it should appear in raw_output.stages[1].model (line 115).
+        // No existing test ever sets alignment config.
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.backend_params.alignment = Some(crate::model::AlignmentConfig {
+            alignment_model: Some("WAV2VEC2_CUSTOM_MODEL".to_owned()),
+            interpolate_method: None,
+            return_char_alignments: false,
+        });
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: Some(2),
+            min_speakers: None,
+            max_speakers: None,
+        });
+
+        let result = run(&req, Path::new("missing.wav"), tmp.path(), Duration::from_secs(1), None)
+            .expect("should succeed with custom alignment model");
+        assert_eq!(
+            result.raw_output["stages"][1]["model"].as_str(),
+            Some("WAV2VEC2_CUSTOM_MODEL"),
+            "alignment model should appear in raw_output stages"
+        );
+    }
+
+    #[test]
+    fn run_model_none_alignment_none_uses_defaults_in_raw_output() {
+        // When request.model is None, raw_output.stages[0].backend falls back
+        // to "whisper-large-v3" (line 109). When alignment is also None,
+        // stages[1].model is null (line 115).
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.model = None;
+        req.backend_params.alignment = None;
+        req.backend_params.diarization_config = None;
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: Some(2),
+            min_speakers: None,
+            max_speakers: None,
+        });
+
+        let result = run(&req, Path::new("missing.wav"), tmp.path(), Duration::from_secs(1), None)
+            .expect("should succeed with all defaults");
+        assert_eq!(
+            result.raw_output["stages"][0]["backend"].as_str(),
+            Some("whisper-large-v3"),
+            "model should fall back to 'whisper-large-v3' when request.model is None"
+        );
+        assert!(
+            result.raw_output["stages"][1]["model"].is_null(),
+            "alignment model should be null when alignment config is None"
+        );
+    }
+
+    #[test]
+    fn build_native_projection_waveform_uses_pilot_num_speakers_for_lane_count() {
+        // When requested_num_speakers returns None (no speaker_constraints)
+        // but pilot.num_speakers is Some(3), lane_count should be 3 via .or()
+        // at line 167. The provenance should reflect speaker_lane_count = 3.
+        let tmp = tempdir().expect("tempdir");
+        let wav = tmp.path().join("speech.wav");
+        let mut speech = vec![0i16; 4_000];
+        speech.extend((0..16_000).map(|i| if i % 2 == 0 { 8_000 } else { -8_000 }));
+        speech.extend(vec![0i16; 4_000]);
+        write_pcm16_mono_wav(&wav, 16_000, &speech);
+
+        let mut req = request();
+        req.backend_params.speaker_constraints = None; // → requested_num_speakers returns None
+
+        let pilot = DiarizationPilot::new(
+            "whisper-large-v3".to_owned(),
+            "WAV2VEC2_ASR_LARGE_LV60K_960H".to_owned(),
+            Some(3), // pilot provides 3 speakers via .or()
+            "en".to_owned(),
+        );
+        let projection = build_native_projection(&req, &wav, &pilot, None)
+            .expect("waveform projection should succeed");
+        assert_eq!(
+            projection.analysis_provenance["mode"].as_str(),
+            Some("waveform"),
+            "should use waveform mode with real WAV"
+        );
+        assert_eq!(
+            projection.analysis_provenance["speaker_lane_count"].as_u64(),
+            Some(3),
+            "lane_count should come from pilot.num_speakers via .or()"
+        );
+    }
+
+    #[test]
+    fn speaker_inventory_two_lanes_accumulates_durations_per_speaker() {
+        // Verify that with 2 lanes and segments from both speakers,
+        // durations are accumulated correctly per speaker_id.
+        let segments = vec![
+            DiarizedSegment {
+                text: "hello".to_owned(),
+                start_ms: 0,
+                end_ms: 2000,
+                speaker_id: "SPEAKER_00".to_owned(),
+                confidence: 0.8,
+            },
+            DiarizedSegment {
+                text: "world".to_owned(),
+                start_ms: 2000,
+                end_ms: 5000,
+                speaker_id: "SPEAKER_01".to_owned(),
+                confidence: 0.9,
+            },
+            DiarizedSegment {
+                text: "again".to_owned(),
+                start_ms: 5000,
+                end_ms: 7000,
+                speaker_id: "SPEAKER_00".to_owned(),
+                confidence: 0.7,
+            },
+        ];
+        let inventory = speaker_inventory(&segments, 2);
+        assert_eq!(inventory.len(), 2);
+        // SPEAKER_00: 2000 + 2000 = 4000 ms
+        assert_eq!(inventory[0].id, "SPEAKER_00");
+        assert_eq!(
+            inventory[0].total_duration_ms, 4000,
+            "SPEAKER_00 should have 2000 + 2000 = 4000 ms"
+        );
+        // SPEAKER_01: 3000 ms
+        assert_eq!(inventory[1].id, "SPEAKER_01");
+        assert_eq!(
+            inventory[1].total_duration_ms, 3000,
+            "SPEAKER_01 should have 3000 ms"
+        );
+        // Labels: A and B
+        assert_eq!(inventory[0].label, "Speaker A");
+        assert_eq!(inventory[1].label, "Speaker B");
+    }
+
+    #[test]
+    fn estimate_duration_ms_large_file_clamps_to_max() {
+        // File large enough that computed duration exceeds MAX_DURATION_MS (30 min = 1_800_000 ms).
+        // 30 min at 32_000 bytes/sec = 57_600_000 audio bytes + 44 header = 57_600_044 bytes.
+        // Use set_len to create a sparse file to avoid allocating that memory.
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("huge.wav");
+        let huge_size: u64 = 57_600_044 + 32_000; // ~30 min + 1 sec → should clamp to max
+        let file = std::fs::File::create(&wav).unwrap();
+        file.set_len(huge_size).unwrap();
+        drop(file);
+
+        let mut req = request();
+        req.backend_params.duration_ms = None;
+        let dur = estimate_duration_ms(&req, &wav);
+        assert_eq!(
+            dur, 1_800_000,
+            "file exceeding 30 min should clamp to MAX_DURATION_MS (1_800_000)"
+        );
+    }
+
+    // ── Task #268 — whisper_diarization_native pass 8 edge-case tests ──
+
+    #[test]
+    fn estimate_duration_ms_nonexistent_file_no_hint_returns_default() {
+        let mut req = request();
+        req.backend_params.duration_ms = None;
+        let dur = estimate_duration_ms(&req, Path::new("/no/such/file.wav"));
+        assert_eq!(
+            dur, 18_000,
+            "nonexistent file with no hint should return DEFAULT_DURATION_MS (18_000)"
+        );
+    }
+
+    #[test]
+    fn run_raw_output_fallback_block_contains_contract_fields() {
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: Some(2),
+            min_speakers: None,
+            max_speakers: None,
+        });
+
+        let result = run(&req, Path::new("missing.wav"), tmp.path(), Duration::from_secs(1), None)
+            .expect("native diarization should succeed");
+
+        let fallback = &result.raw_output["fallback"];
+        assert_eq!(
+            fallback["deterministic_bridge_fallback_supported"].as_bool(),
+            Some(true),
+            "fallback block must have deterministic_bridge_fallback_supported: true"
+        );
+        assert_eq!(
+            fallback["trigger_contract"].as_str(),
+            Some("native-failure-or-contract-violation"),
+            "fallback block must have trigger_contract field"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_exclamation_mark_not_double_punctuated() {
+        let diarized = DiarizedTranscript {
+            segments: vec![DiarizedSegment {
+                text: "Stop right there!".to_owned(),
+                start_ms: 0,
+                end_ms: 1000,
+                speaker_id: "SPEAKER_00".to_owned(),
+                confidence: 0.8,
+            }],
+            speakers: vec![],
+        };
+        let result = to_transcription_segments(&diarized, true, false, None).unwrap();
+        assert_eq!(
+            result[0].text, "Stop right there!",
+            "trailing '!' should not receive extra period"
+        );
+    }
+
+    #[test]
+    fn build_native_projection_defaults_lane_count_to_two_when_no_speakers_specified() {
+        let tmp = tempdir().expect("tempdir");
+        let wav = tmp.path().join("speech.wav");
+        let mut speech = vec![0i16; 4_000];
+        speech.extend((0..16_000).map(|i| if i % 2 == 0 { 8_000 } else { -8_000 }));
+        speech.extend(vec![0i16; 4_000]);
+        write_pcm16_mono_wav(&wav, 16_000, &speech);
+
+        let mut req = request();
+        req.backend_params.speaker_constraints = None; // → requested_num_speakers returns None
+
+        let pilot = DiarizationPilot::new(
+            "whisper-large-v3".to_owned(),
+            "WAV2VEC2_ASR_LARGE_LV60K_960H".to_owned(),
+            None, // pilot also has no num_speakers → .or() returns None → unwrap_or(2)
+            "en".to_owned(),
+        );
+        let projection = build_native_projection(&req, &wav, &pilot, None)
+            .expect("waveform projection should succeed");
+        assert_eq!(
+            projection.analysis_provenance["speaker_lane_count"].as_u64(),
+            Some(2),
+            "lane_count should default to 2 when both request and pilot have no speaker count"
+        );
+    }
+
+    #[test]
+    fn run_language_none_produces_none_language_in_result() {
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.language = None;
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: Some(2),
+            min_speakers: None,
+            max_speakers: None,
+        });
+
+        let result = run(&req, Path::new("missing.wav"), tmp.path(), Duration::from_secs(1), None)
+            .expect("should succeed with language=None");
+        assert_eq!(
+            result.language, None,
+            "result.language should be None when request.language is None"
+        );
+    }
 }

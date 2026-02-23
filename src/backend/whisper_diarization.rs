@@ -139,6 +139,8 @@ pub fn run(
             // When source separation is enabled and no_stem is not already set,
             // we ensure stemming is active (do not pass --no-stem).
             // The diarize.py script runs Demucs by default unless --no-stem is passed.
+        } else if !args.contains(&"--no-stem".to_owned()) {
+            args.push("--no-stem".to_owned());
         }
         if let Some(model) = &sep.model {
             args.push("--demucs-model".to_owned());
@@ -575,6 +577,54 @@ corrupted\n\n\
             args.push("--batch-size".to_owned());
             args.push(batch.to_string());
         }
+
+        // bd-248: alignment configuration.
+        if let Some(align) = &bp.alignment {
+            if let Some(model) = &align.alignment_model {
+                args.push("--align-model".to_owned());
+                args.push(model.clone());
+            }
+            if let Some(method) = &align.interpolate_method {
+                args.push("--interpolate-method".to_owned());
+                args.push(method.clone());
+            }
+            if align.return_char_alignments {
+                args.push("--return-char-alignments".to_owned());
+            }
+        }
+
+        // bd-248: punctuation restoration.
+        if let Some(punct) = &bp.punctuation
+            && punct.enabled
+        {
+            args.push("--punctuation-restore".to_owned());
+            if let Some(model) = &punct.model {
+                args.push(model.clone());
+            } else {
+                args.push("True".to_owned());
+            }
+        }
+
+        if let Some(sep) = &bp.source_separation {
+            if sep.enabled {
+                // ...
+            } else if !args.contains(&"--no-stem".to_owned()) {
+                args.push("--no-stem".to_owned());
+            }
+            if let Some(model) = &sep.model {
+                args.push("--demucs-model".to_owned());
+                args.push(model.clone());
+            }
+            if let Some(shifts) = sep.shifts {
+                args.push("--demucs-shifts".to_owned());
+                args.push(shifts.to_string());
+            }
+            if let Some(overlap) = sep.overlap {
+                args.push("--demucs-overlap".to_owned());
+                args.push(overlap.to_string());
+            }
+        }
+
         args
     }
 
@@ -815,5 +865,128 @@ corrupted\n\n\
         assert_eq!(arg_value(&args, "--batch-size"), Some("32"));
         let batch_count = args.iter().filter(|a| a.as_str() == "--batch-size").count();
         assert_eq!(batch_count, 1, "only one --batch-size flag should appear");
+    }
+
+    #[test]
+    fn source_separation_disabled_adds_no_stem() {
+        use crate::model::SourceSeparationConfig;
+        let mut request = minimal_diarization_request();
+        request.backend_params.source_separation = Some(SourceSeparationConfig {
+            enabled: false,
+            model: None,
+            shifts: None,
+            overlap: None,
+        });
+        let args = build_diarization_args(&request);
+        assert!(
+            has_flag(&args, "--no-stem"),
+            "must add --no-stem if source separation is explicitly disabled"
+        );
+    }
+
+    // -- bd-248: whisper_diarization.rs edge-case tests pass 2 --
+
+    #[test]
+    fn alignment_flags_all_three_emitted() {
+        use crate::model::AlignmentConfig;
+        let mut request = minimal_diarization_request();
+        request.backend_params.alignment = Some(AlignmentConfig {
+            alignment_model: Some("WAV2VEC2_ASR_LARGE_LV60K_960H".to_owned()),
+            interpolate_method: Some("nearest".to_owned()),
+            return_char_alignments: true,
+        });
+        let args = build_diarization_args(&request);
+        assert_eq!(
+            arg_value(&args, "--align-model"),
+            Some("WAV2VEC2_ASR_LARGE_LV60K_960H")
+        );
+        assert_eq!(arg_value(&args, "--interpolate-method"), Some("nearest"));
+        assert!(
+            has_flag(&args, "--return-char-alignments"),
+            "should include --return-char-alignments"
+        );
+    }
+
+    #[test]
+    fn punctuation_no_model_pushes_true_literal() {
+        use crate::model::PunctuationConfig;
+        let mut request = minimal_diarization_request();
+        request.backend_params.punctuation = Some(PunctuationConfig {
+            enabled: true,
+            model: None,
+        });
+        let args = build_diarization_args(&request);
+        let punct_idx = args
+            .iter()
+            .position(|a| a == "--punctuation-restore")
+            .expect("should contain --punctuation-restore");
+        assert_eq!(
+            args[punct_idx + 1], "True",
+            "should push literal 'True' when no model is specified"
+        );
+    }
+
+    #[test]
+    fn punctuation_with_model_pushes_model_name() {
+        use crate::model::PunctuationConfig;
+        let mut request = minimal_diarization_request();
+        request.backend_params.punctuation = Some(PunctuationConfig {
+            enabled: true,
+            model: Some("kredor/punctuate-all".to_owned()),
+        });
+        let args = build_diarization_args(&request);
+        let punct_idx = args
+            .iter()
+            .position(|a| a == "--punctuation-restore")
+            .expect("should contain --punctuation-restore");
+        assert_eq!(
+            args[punct_idx + 1], "kredor/punctuate-all",
+            "should push model name when specified"
+        );
+    }
+
+    #[test]
+    fn source_separation_enabled_emits_demucs_flags() {
+        use crate::model::SourceSeparationConfig;
+        let mut request = minimal_diarization_request();
+        request.backend_params.source_separation = Some(SourceSeparationConfig {
+            enabled: true,
+            model: Some("htdemucs".to_owned()),
+            shifts: Some(4),
+            overlap: Some(0.25),
+        });
+        let args = build_diarization_args(&request);
+        assert_eq!(arg_value(&args, "--demucs-model"), Some("htdemucs"));
+        assert_eq!(arg_value(&args, "--demucs-shifts"), Some("4"));
+        assert_eq!(arg_value(&args, "--demucs-overlap"), Some("0.25"));
+        // When enabled=true, --no-stem should NOT be present.
+        assert!(
+            !has_flag(&args, "--no-stem"),
+            "--no-stem should not be present when source separation is enabled"
+        );
+    }
+
+    #[test]
+    fn alignment_return_char_alignments_only() {
+        use crate::model::AlignmentConfig;
+        let mut request = minimal_diarization_request();
+        request.backend_params.alignment = Some(AlignmentConfig {
+            alignment_model: None,
+            interpolate_method: None,
+            return_char_alignments: true,
+        });
+        let args = build_diarization_args(&request);
+        assert!(
+            has_flag(&args, "--return-char-alignments"),
+            "should include --return-char-alignments even without model/method"
+        );
+        assert!(
+            !has_flag(&args, "--align-model"),
+            "--align-model should not appear when alignment_model is None"
+        );
+        assert!(
+            !has_flag(&args, "--interpolate-method"),
+            "--interpolate-method should not appear when interpolate_method is None"
+        );
     }
 }

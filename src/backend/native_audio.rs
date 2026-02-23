@@ -914,4 +914,233 @@ mod tests {
             rms.len()
         );
     }
+
+    // -- bd-246: native_audio.rs edge-case tests pass 2 --
+
+    #[test]
+    fn missing_fmt_chunk_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("no_fmt.wav");
+        // Construct a RIFF/WAVE with only a data chunk, no fmt chunk.
+        let mut bytes = Vec::new();
+        let data_payload = vec![0u8; 100];
+        let data_chunk_size = data_payload.len() as u32;
+        let file_size = 4 + 8 + data_chunk_size; // "WAVE" + data chunk header + data
+
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&file_size.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_chunk_size.to_le_bytes());
+        bytes.extend_from_slice(&data_payload);
+
+        std::fs::write(&wav, bytes).unwrap();
+        let result = analyze_wav(&wav, None);
+        assert!(result.is_err(), "missing fmt chunk should cause error");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("missing wav fmt"),
+            "error should mention missing fmt, got: {err}"
+        );
+    }
+
+    #[test]
+    fn bridge_short_gaps_all_active_no_mutation() {
+        use super::bridge_short_gaps;
+
+        let mut active = vec![true, true, true, true, true];
+        let original = active.clone();
+        bridge_short_gaps(&mut active, 2);
+        assert_eq!(active, original, "all-true input should not be mutated");
+    }
+
+    #[test]
+    fn as_json_with_zero_active_regions() {
+        use super::NativeAudioAnalysis;
+        let analysis = NativeAudioAnalysis {
+            duration_ms: 1000,
+            sample_rate_hz: 16000,
+            frame_ms: 20,
+            frame_count: 50,
+            avg_rms: 0.001,
+            max_rms: 0.002,
+            activity_threshold: 0.003,
+            active_regions: vec![],
+        };
+        let json = analysis.as_json();
+        assert_eq!(json["active_region_count"], 0);
+        assert!(json["active_regions"].is_array());
+        assert_eq!(json["active_regions"].as_array().unwrap().len(), 0);
+        assert_eq!(json["duration_ms"], 1000);
+    }
+
+    #[test]
+    fn negative_amplitude_samples_rms_is_positive() {
+        use super::compute_frame_rms;
+
+        // All negative samples including i16::MIN.
+        let samples = vec![i16::MIN, -16384, -8192, -4096];
+        let rms = compute_frame_rms(&samples, 4);
+        assert_eq!(rms.len(), 1, "one frame expected");
+        assert!(rms[0] > 0.0, "RMS should be positive for negative samples");
+        // i16::MIN = -32768, normalized = -32768/32768 ≈ -1.0
+        // RMS should be fairly large (close to 0.6-0.7 range).
+        assert!(
+            rms[0] > 0.3,
+            "RMS of large negative samples should be substantial, got {}",
+            rms[0]
+        );
+    }
+
+    #[test]
+    fn analyze_wav_silence_yields_no_active_regions() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("silence.wav");
+        // Pure silence: all zero samples, 16kHz, 1 second.
+        let samples = vec![0i16; 16_000];
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
+
+        let analysis = analyze_wav(&wav, None).expect("should parse");
+        assert!(
+            analysis.active_regions.is_empty(),
+            "pure silence should have no active regions, got {}",
+            analysis.active_regions.len()
+        );
+        assert!((analysis.avg_rms - 0.0).abs() < 1e-6);
+    }
+
+    // ── Task #260 — native_audio pass 5 edge-case tests ──
+
+    #[test]
+    fn analyze_wav_low_sample_rate_exercises_frame_samples_max_guard() {
+        // Sample rate of 100 Hz → frame_samples = (100 * 20) / 1000 = 2.
+        // Very small frame size, exercises edge of frame computation.
+        // All existing tests use 16 kHz (frame_samples = 320).
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("low_rate.wav");
+        // 100 samples at 100 Hz = 1 second.
+        let samples: Vec<i16> = (0..100)
+            .map(|i| if i % 2 == 0 { 10_000 } else { -10_000 })
+            .collect();
+        write_pcm16_mono_wav(&wav, 100, &samples);
+
+        let analysis = analyze_wav(&wav, None).expect("low sample rate should parse");
+        assert_eq!(analysis.sample_rate_hz, 100);
+        assert_eq!(analysis.duration_ms, 1_000);
+        // frame_samples = 2, 100 samples → 50 frames
+        assert_eq!(analysis.frame_count, 50, "100 samples / 2 per frame = 50 frames");
+    }
+
+    #[test]
+    fn active_regions_from_frames_all_active_single_region() {
+        use super::active_regions_from_frames;
+
+        // All frames active → single region spanning the full range.
+        // Existing tests always have mixed active/inactive; none test all-active.
+        let rms = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        let active = vec![true, true, true, true, true];
+        let regions = active_regions_from_frames(&rms, &active, 20, 1);
+        assert_eq!(regions.len(), 1, "all-active should produce single region");
+        assert_eq!(regions[0].start_ms, 0);
+        assert_eq!(regions[0].end_ms, 100); // 5 frames * 20ms
+        // avg_rms = (0.1 + 0.2 + 0.3 + 0.4 + 0.5) / 5 = 0.3
+        assert!(
+            (regions[0].avg_rms - 0.3).abs() < 1e-6,
+            "avg_rms should be 0.3, got {}",
+            regions[0].avg_rms
+        );
+    }
+
+    #[test]
+    fn analyze_wav_activity_threshold_matches_formula() {
+        // Verify that activity_threshold is computed as:
+        //   ((avg_rms * 1.5).max(MIN_THRESHOLD)).min((max_rms * 0.8).max(MIN_THRESHOLD))
+        // No existing test asserts the specific threshold value.
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("threshold.wav");
+        // Constant amplitude (not silence) so we get predictable RMS.
+        let samples = vec![4096i16; 16_000]; // ~0.125 normalized amplitude, 1 second
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
+
+        let analysis = analyze_wav(&wav, None).expect("should parse");
+        // All frames have same RMS → avg_rms == max_rms ≈ 0.125.
+        let expected_rms = 4096.0 / 32768.0; // 0.125
+        assert!(
+            (analysis.avg_rms - expected_rms as f32).abs() < 0.01,
+            "avg_rms should be ~{}, got {}",
+            expected_rms,
+            analysis.avg_rms
+        );
+        // activity_threshold = min(max(avg*1.5, 0.003), max(max_rms*0.8, 0.003))
+        //                    = min(max(0.1875, 0.003), max(0.100, 0.003))
+        //                    = min(0.1875, 0.100) = 0.100
+        let expected_threshold = (analysis.max_rms * 0.8).max(super::MIN_THRESHOLD);
+        assert!(
+            (analysis.activity_threshold - expected_threshold).abs() < 0.01,
+            "activity_threshold should match formula: expected ~{}, got {}",
+            expected_threshold,
+            analysis.activity_threshold
+        );
+    }
+
+    #[test]
+    fn compute_frame_rms_single_sample_frames() {
+        use super::compute_frame_rms;
+
+        // frame_samples=1 → each sample is its own frame.
+        // No existing test uses frame_samples=1.
+        let samples: Vec<i16> = vec![0, 16384, -16384, 32767];
+        let rms = compute_frame_rms(&samples, 1);
+        assert_eq!(rms.len(), 4, "4 samples with frame_size=1 → 4 frames");
+        // Frame 0: 0/32768 = 0.0 → RMS = 0.0
+        assert!((rms[0] - 0.0).abs() < 1e-6, "silence sample RMS should be 0");
+        // Frame 1: 16384/32768 = 0.5 → RMS = 0.5
+        assert!((rms[1] - 0.5).abs() < 0.01, "half-amplitude RMS should be ~0.5, got {}", rms[1]);
+        // Frame 2: -16384/32768 = -0.5 → RMS = 0.5 (squared then sqrt)
+        assert!((rms[2] - 0.5).abs() < 0.01, "negative half-amplitude RMS should be ~0.5");
+        // Frame 3: 32767/32768 ≈ 1.0 → RMS ≈ 1.0
+        assert!(rms[3] > 0.99, "max amplitude RMS should be ~1.0, got {}", rms[3]);
+    }
+
+    #[test]
+    fn as_json_multiple_active_regions_serialized() {
+        use super::{AudioRegion, NativeAudioAnalysis};
+
+        // Existing tests have 0 or 1 region; none test multiple.
+        let analysis = NativeAudioAnalysis {
+            duration_ms: 10_000,
+            sample_rate_hz: 16_000,
+            frame_ms: 20,
+            frame_count: 500,
+            avg_rms: 0.1,
+            max_rms: 0.4,
+            activity_threshold: 0.05,
+            active_regions: vec![
+                AudioRegion {
+                    start_ms: 0,
+                    end_ms: 2000,
+                    avg_rms: 0.2,
+                },
+                AudioRegion {
+                    start_ms: 4000,
+                    end_ms: 6000,
+                    avg_rms: 0.3,
+                },
+                AudioRegion {
+                    start_ms: 8000,
+                    end_ms: 10_000,
+                    avg_rms: 0.15,
+                },
+            ],
+        };
+        let json = analysis.as_json();
+        assert_eq!(json["active_region_count"], 3);
+        let regions = json["active_regions"].as_array().expect("array");
+        assert_eq!(regions.len(), 3);
+        assert_eq!(regions[0]["start_ms"], 0);
+        assert_eq!(regions[0]["end_ms"], 2000);
+        assert_eq!(regions[1]["start_ms"], 4000);
+        assert_eq!(regions[2]["start_ms"], 8000);
+        assert_eq!(regions[2]["end_ms"], 10_000);
+    }
 }
