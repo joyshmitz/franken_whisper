@@ -630,12 +630,23 @@ fn e2e_pipeline_with_silence_wav() {
         !report.events.is_empty(),
         "events list should not be empty even for silent input"
     );
-    // The mock backend always returns text, so we just verify the pipeline
-    // ran to completion without crashing on silent input.
-    assert!(
-        !report.result.transcript.is_empty(),
-        "mock backend should still produce a transcript for silent input"
-    );
+    // Silence-only input may short-circuit at VAD, producing an empty
+    // transcript without invoking the backend stage.
+    let vad_silence = report
+        .events
+        .iter()
+        .any(|event| event.code == "vad.silence");
+    if vad_silence {
+        assert!(
+            report.result.transcript.is_empty(),
+            "vad.silence short-circuit should produce empty transcript"
+        );
+    } else {
+        assert!(
+            !report.result.transcript.is_empty(),
+            "non-silence path should produce transcript output"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

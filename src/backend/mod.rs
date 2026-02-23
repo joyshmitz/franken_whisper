@@ -1507,27 +1507,55 @@ fn run_backend(
     };
 
     let run_bridge = || -> FwResult<BackendExecution> {
-        let result = bridge_runner(request, normalized_wav, work_dir, command_timeout, token)?;
-        Ok(BackendExecution {
-            result,
-            runtime: runtime_metadata_with_implementation(kind, BackendImplementation::Bridge),
-            implementation: BackendImplementation::Bridge,
-            execution_mode: execution_mode.as_str().to_owned(),
-            rollout_stage: rollout_stage.as_str().to_owned(),
-            native_fallback_error: None,
-        })
+        let started = Instant::now();
+        match bridge_runner(request, normalized_wav, work_dir, command_timeout, token) {
+            Ok(result) => {
+                let latency_ms = started.elapsed().as_millis() as u64;
+                update_router_state(kind, true, latency_ms, None);
+                Ok(BackendExecution {
+                    result,
+                    runtime: runtime_metadata_with_implementation(
+                        kind,
+                        BackendImplementation::Bridge,
+                    ),
+                    implementation: BackendImplementation::Bridge,
+                    execution_mode: execution_mode.as_str().to_owned(),
+                    rollout_stage: rollout_stage.as_str().to_owned(),
+                    native_fallback_error: None,
+                })
+            }
+            Err(error) => {
+                let latency_ms = started.elapsed().as_millis() as u64;
+                update_router_state(kind, false, latency_ms, Some(error.to_string()));
+                Err(error)
+            }
+        }
     };
 
     let run_native = || -> FwResult<BackendExecution> {
-        let result = native_runner(request, normalized_wav, work_dir, command_timeout, token)?;
-        Ok(BackendExecution {
-            result,
-            runtime: runtime_metadata_with_implementation(kind, BackendImplementation::Native),
-            implementation: BackendImplementation::Native,
-            execution_mode: execution_mode.as_str().to_owned(),
-            rollout_stage: rollout_stage.as_str().to_owned(),
-            native_fallback_error: None,
-        })
+        let started = Instant::now();
+        match native_runner(request, normalized_wav, work_dir, command_timeout, token) {
+            Ok(result) => {
+                let latency_ms = started.elapsed().as_millis() as u64;
+                update_router_state(kind, true, latency_ms, None);
+                Ok(BackendExecution {
+                    result,
+                    runtime: runtime_metadata_with_implementation(
+                        kind,
+                        BackendImplementation::Native,
+                    ),
+                    implementation: BackendImplementation::Native,
+                    execution_mode: execution_mode.as_str().to_owned(),
+                    rollout_stage: rollout_stage.as_str().to_owned(),
+                    native_fallback_error: None,
+                })
+            }
+            Err(error) => {
+                let latency_ms = started.elapsed().as_millis() as u64;
+                update_router_state(kind, false, latency_ms, Some(error.to_string()));
+                Err(error)
+            }
+        }
     };
 
     match execution_mode {
@@ -1752,30 +1780,36 @@ pub fn probe_system_health() -> SystemHealthReport {
 }
 
 fn probe_system_health_uncached() -> SystemHealthReport {
-    let engines = all_engines();
     let mut backends = Vec::new();
 
-    for engine in &engines {
-        let available = engine.is_available();
-        let capabilities = engine.capabilities();
+    let mode = native_execution_mode(native_rollout_stage());
+
+    for kind in [
+        BackendKind::WhisperCpp,
+        BackendKind::InsanelyFast,
+        BackendKind::WhisperDiarization,
+    ] {
+        let available = available_for_mode(kind, mode);
+        let capabilities = engine_for(kind).unwrap().capabilities();
         let mut issues = Vec::new();
 
         // Check binary existence.
-        let (binary_found, binary_path) = check_binary_for_kind(engine.kind());
+        let (binary_found, binary_path) = check_binary_for_kind(kind);
         if !binary_found {
-            issues.push(format!("{} binary not found in PATH", engine.name()));
+            if mode == NativeExecutionMode::BridgeOnly || !native_available(kind) {
+                issues.push(format!("{} binary not found in PATH", kind.as_str()));
+            }
         }
 
         // Check version.
         let version = if binary_found {
-            probe_version_for_kind(engine.kind())
+            probe_version_for_kind(kind)
         } else {
             None
         };
 
         // Check diarization-specific requirements.
-        if (engine.kind() == BackendKind::InsanelyFast
-            || engine.kind() == BackendKind::WhisperDiarization)
+        if (kind == BackendKind::InsanelyFast || kind == BackendKind::WhisperDiarization)
             && !is_hf_token_set()
         {
             issues.push(
@@ -1784,7 +1818,7 @@ fn probe_system_health_uncached() -> SystemHealthReport {
         }
 
         backends.push(BackendHealthReport {
-            backend: engine.kind(),
+            backend: kind,
             available,
             binary_found,
             binary_path,
@@ -3601,18 +3635,19 @@ impl ConcurrentTwoLaneExecutor {
 mod tests {
     use super::{
         ADAPTIVE_FALLBACK_CALIBRATION_THRESHOLD, ADAPTIVE_MIN_SAMPLES, BackendHealthReport,
-        BackendSelectionContract, CANONICAL_SEGMENT_TOLERANCE_MS, CalibrationState,
-        DiarizationPilot, DiarizedSegment, DiarizedTranscript, Engine, InsanelyFastPilot,
-        NativeEngineContract, QualitySelector, ROUTER_HISTORY_WINDOW, RouterState,
-        RoutingEvidenceLedger, RoutingEvidenceLedgerEntry, RoutingOutcomeRecord,
+        BackendImplementation, BackendSelectionContract, CANONICAL_SEGMENT_TOLERANCE_MS,
+        CalibrationState, DiarizationPilot, DiarizedSegment, DiarizedTranscript, Engine,
+        InsanelyFastPilot, NativeEngineContract, QualitySelector, ROUTER_HISTORY_WINDOW,
+        RouterState, RoutingEvidenceLedger, RoutingEvidenceLedgerEntry, RoutingOutcomeRecord,
         SegmentConformanceReport, SegmentConformanceViolation, SegmentViolationKind,
         ShadowDivergenceKind, ShadowRunConfig, ShadowRunDivergence, ShadowRunReport, SpeakerInfo,
         TranscriptSegment, TwoLaneExecutor, WhisperCppPilot, auto_priority,
         check_segment_conformance, compare_shadow_results, duration_bucket,
         evaluate_backend_selection, extract_segments_from_json, is_hf_token_set, latency_proxy,
-        number_millis_to_secs, number_to_secs, posterior_success_probability, prior_for,
-        probe_system_health, probe_system_health_uncached, quality_proxy, runtime_metadata,
-        segment_end, segment_start, transcript_from_segments,
+        native_runtime_metadata, number_millis_to_secs, number_to_secs,
+        posterior_success_probability, prior_for, probe_system_health,
+        probe_system_health_uncached, quality_proxy, runtime_metadata,
+        runtime_metadata_with_implementation, segment_end, segment_start, transcript_from_segments,
     };
     use crate::conformance::NativeEngineRolloutStage;
     use crate::model::{
@@ -8324,20 +8359,18 @@ mod tests {
                 // Primary returns high-confidence segments.
                 vec![TranscriptSegment {
                     text: "primary".to_owned(),
-                    start: 0.0,
-                    end: 1.0,
-                    confidence: Some(0.99),
-                    speaker: None,
+                    start_ms: 0,
+                    end_ms: 1000,
+                    confidence: 0.99,
                 }]
             },
             || {
                 // Secondary returns lower-confidence segments.
                 vec![TranscriptSegment {
                     text: "secondary".to_owned(),
-                    start: 0.0,
-                    end: 1.0,
-                    confidence: Some(0.50),
-                    speaker: None,
+                    start_ms: 0,
+                    end_ms: 1000,
+                    confidence: 0.5,
                 }]
             },
         );
@@ -8349,5 +8382,170 @@ mod tests {
             result.selection_reason
         );
         assert_eq!(result.secondary_result[0].text, "secondary");
+    }
+
+    #[test]
+    fn native_runtime_metadata_returns_correct_identity_per_backend() {
+        let wcpp = native_runtime_metadata(BackendKind::WhisperCpp);
+        assert_eq!(wcpp.identity, "whisper.cpp-native");
+        assert!(wcpp.version.is_some(), "WhisperCpp should have a version");
+        assert!(
+            wcpp.version.as_ref().unwrap().contains("native-pilot-v1"),
+            "version should contain engine tag, got: {:?}",
+            wcpp.version
+        );
+
+        let ifast = native_runtime_metadata(BackendKind::InsanelyFast);
+        assert_eq!(ifast.identity, "insanely-fast-native");
+
+        let wdiar = native_runtime_metadata(BackendKind::WhisperDiarization);
+        assert_eq!(wdiar.identity, "whisper-diarization-native");
+
+        let auto = native_runtime_metadata(BackendKind::Auto);
+        assert_eq!(auto.identity, "auto-policy");
+        assert!(auto.version.is_none(), "Auto should have no version");
+    }
+
+    #[test]
+    fn runtime_metadata_with_implementation_dispatches_native_vs_bridge() {
+        let native = runtime_metadata_with_implementation(
+            BackendKind::WhisperCpp,
+            BackendImplementation::Native,
+        );
+        assert_eq!(native.identity, "whisper.cpp-native");
+
+        let bridge =
+            runtime_metadata_with_implementation(BackendKind::Auto, BackendImplementation::Bridge);
+        assert_eq!(bridge.identity, "auto-policy");
+        assert!(bridge.version.is_none());
+    }
+
+    #[test]
+    fn routing_evidence_ledger_diagnostics_all_failures_gives_zero_success_rate() {
+        let mut ledger = RoutingEvidenceLedger::new(10);
+
+        for i in 0..3 {
+            let entry = RoutingEvidenceLedgerEntry {
+                decision_id: format!("d-{i}"),
+                trace_id: "t-1".to_owned(),
+                timestamp_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+                observed_state: "all_available".to_owned(),
+                chosen_action: "try_whisper_cpp".to_owned(),
+                recommended_order: vec!["whisper_cpp".to_owned()],
+                fallback_active: false,
+                fallback_reason: None,
+                posterior_snapshot: vec![0.5, 0.3, 0.2],
+                calibration_score: 0.8,
+                brier_score: Some(0.1),
+                e_process: 1.0,
+                ci_width: 0.2,
+                adaptive_mode: true,
+                policy_id: "test-policy".to_owned(),
+                loss_matrix_hash: "hash".to_owned(),
+                availability: vec![("whisper_cpp".to_owned(), true)],
+                duration_bucket: "short".to_owned(),
+                diarize: false,
+                actual_outcome: None,
+            };
+            ledger.record(entry);
+        }
+
+        // Resolve all as failures.
+        for i in 0..3 {
+            ledger.resolve_outcome(
+                &format!("d-{i}"),
+                RoutingOutcomeRecord {
+                    backend: BackendKind::WhisperCpp,
+                    success: false,
+                    latency_ms: 1000,
+                    error_message: Some("failed".to_owned()),
+                    recorded_at_rfc3339: "2026-01-01T00:00:05Z".to_owned(),
+                },
+            );
+        }
+
+        let diag = ledger.diagnostics();
+        assert_eq!(diag["resolved_count"].as_u64(), Some(3));
+        assert_eq!(diag["resolved_success_count"].as_u64(), Some(0));
+        let rate = diag["resolved_success_rate"].as_f64().unwrap();
+        assert!(
+            (rate - 0.0).abs() < 1e-9,
+            "all-failure resolved_success_rate should be 0.0, got {rate}"
+        );
+    }
+
+    #[test]
+    fn calibration_state_brier_score_after_window_eviction_at_boundary() {
+        let mut cal = CalibrationState::new(2);
+
+        // Two perfect observations: predicted matches actual.
+        cal.record(0.0, false); // (0.0 - 0)^2 = 0
+        cal.record(1.0, true); // (1.0 - 1)^2 = 0
+        assert!(
+            (cal.brier_score().unwrap() - 0.0).abs() < 1e-9,
+            "two perfect predictions should give Brier 0.0"
+        );
+
+        // Third observation evicts the first: window = [(1.0, true), (0.0, true)].
+        // (0.0, true) → (0.0 - 1.0)^2 = 1.0 — terrible prediction.
+        cal.record(0.0, true);
+        let brier = cal.brier_score().unwrap();
+        let expected = (0.0 + 1.0) / 2.0; // 0.5
+        assert!(
+            (brier - expected).abs() < 1e-9,
+            "Brier after eviction should be {expected}, got {brier}"
+        );
+        assert_eq!(cal.observation_count(), 2);
+    }
+
+    #[test]
+    fn compare_shadow_one_sided_timestamp_absence_does_not_flag_divergence() {
+        // When only one side has a timestamp, the if-let guard skips the check.
+        let primary = TranscriptionResult {
+            backend: BackendKind::WhisperCpp,
+            transcript: "hello".to_owned(),
+            language: None,
+            segments: vec![TranscriptionSegment {
+                text: "hello".to_owned(),
+                start_sec: Some(0.0),
+                end_sec: None, // Primary has no end
+                speaker: None,
+                confidence: None,
+            }],
+            acceleration: None,
+            raw_output: serde_json::json!({}),
+            artifact_paths: vec![],
+        };
+        let shadow = TranscriptionResult {
+            backend: BackendKind::InsanelyFast,
+            transcript: "hello".to_owned(),
+            language: None,
+            segments: vec![TranscriptionSegment {
+                text: "hello".to_owned(),
+                start_sec: None,     // Shadow has no start
+                end_sec: Some(99.0), // wildly different if compared
+                speaker: None,
+                confidence: None,
+            }],
+            acceleration: None,
+            raw_output: serde_json::json!({}),
+            artifact_paths: vec![],
+        };
+
+        let divergences = compare_shadow_results(&primary, &shadow, 0);
+        // No StartTimestampDivergence — primary has Some but shadow has None.
+        assert!(
+            !divergences
+                .iter()
+                .any(|d| matches!(d.kind, ShadowDivergenceKind::StartTimestampDivergence)),
+            "one-sided start timestamp should not flag divergence"
+        );
+        // No EndTimestampDivergence — primary has None but shadow has Some.
+        assert!(
+            !divergences
+                .iter()
+                .any(|d| matches!(d.kind, ShadowDivergenceKind::EndTimestampDivergence)),
+            "one-sided end timestamp should not flag divergence"
+        );
     }
 }

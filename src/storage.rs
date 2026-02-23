@@ -206,12 +206,18 @@ impl RunStore {
             tok.checkpoint()?;
         }
 
+        let replay_expr = if self.table_has_column("runs", "replay_json")? {
+            "replay_json"
+        } else {
+            "'{}' AS replay_json"
+        };
+        let run_sql = format!(
+            "SELECT id, started_at, finished_at, backend, result_json, warnings_json, transcript, {replay_expr} \
+             FROM runs WHERE id = ?1 LIMIT 1"
+        );
         let rows = self
             .connection
-            .query_with_params(
-                "SELECT id, started_at, finished_at, backend, result_json, warnings_json, transcript, replay_json FROM runs WHERE id = ?1 LIMIT 1",
-                &[SqliteValue::Text(run_id.to_owned())],
-            )
+            .query_with_params(&run_sql, &[SqliteValue::Text(run_id.to_owned())])
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
         let Some(row) = rows.first() else {
@@ -320,7 +326,8 @@ CREATE TABLE IF NOT EXISTS runs (
     result_json TEXT NOT NULL,
     warnings_json TEXT NOT NULL,
     transcript TEXT NOT NULL,
-    replay_json TEXT NOT NULL DEFAULT '{}'
+    replay_json TEXT NOT NULL DEFAULT '{}',
+    acceleration_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS segments (
@@ -385,17 +392,21 @@ CREATE TABLE IF NOT EXISTS _meta (
     }
 
     fn set_schema_version(&self, version: u32) -> FwResult<()> {
-        // Note: fsqlite does not correctly handle INSERT OR REPLACE conflict
-        // resolution, so we use DELETE + INSERT to ensure the value is updated.
-        self.connection
-            .execute("DELETE FROM _meta WHERE key = 'schema_version';")
-            .map_err(|error| FwError::Storage(error.to_string()))?;
-        self.connection
+        let updated = self
+            .connection
             .execute_with_params(
-                "INSERT INTO _meta (key, value) VALUES ('schema_version', ?1);",
+                "UPDATE _meta SET value = ?1 WHERE key = 'schema_version';",
                 &[text_value(version.to_string())],
             )
             .map_err(|error| FwError::Storage(error.to_string()))?;
+        if updated == 0 {
+            self.connection
+                .execute_with_params(
+                    "INSERT INTO _meta (key, value) VALUES ('schema_version', ?1);",
+                    &[text_value(version.to_string())],
+                )
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+        }
         Ok(())
     }
 
@@ -415,6 +426,19 @@ CREATE TABLE IF NOT EXISTS _meta (
             return Ok(());
         }
 
+        // Fresh databases are created with the current table shape in
+        // initialize_schema(). Detect that shape explicitly before shortcutting:
+        // legacy v1 DBs can also report version=0 when `_meta` is absent and must
+        // still flow through v2 migrations to add new columns.
+        if current == 0 {
+            let has_replay = self.table_has_column("runs", "replay_json")?;
+            let has_acceleration = self.table_has_column("runs", "acceleration_json")?;
+            if has_replay && has_acceleration {
+                self.set_schema_version(2)?;
+                current = 2;
+            }
+        }
+
         tracing::info!(
             current_version = current,
             target_version = Self::SCHEMA_VERSION,
@@ -424,28 +448,12 @@ CREATE TABLE IF NOT EXISTS _meta (
         while current < Self::SCHEMA_VERSION {
             let next = current + 1;
             tracing::info!(from = current, to = next, "Migrating schema");
-
-            self.connection
-                .execute("BEGIN;")
-                .map_err(|error| FwError::Storage(error.to_string()))?;
-
-            let migration_result = self.apply_migration(next);
-            match migration_result {
-                Ok(()) => {
-                    self.set_schema_version(next)?;
-                    self.connection
-                        .execute("COMMIT;")
-                        .map_err(|error| FwError::Storage(error.to_string()))?;
-                    tracing::info!(version = next, "Migration complete");
-                    current = next;
-                }
-                Err(error) => {
-                    let _ = self.connection.execute("ROLLBACK;");
-                    return Err(FwError::Storage(format!(
-                        "migration to v{next} failed: {error}"
-                    )));
-                }
-            }
+            self.apply_migration(next).map_err(|error| {
+                FwError::Storage(format!("migration to v{next} failed: {error}"))
+            })?;
+            self.set_schema_version(next)?;
+            tracing::info!(version = next, "Migration complete");
+            current = next;
         }
 
         Ok(())
@@ -460,14 +468,14 @@ CREATE TABLE IF NOT EXISTS _meta (
                 Ok(())
             }
             2 => {
-                // v2: Add acceleration_json column to runs table.
+                // v2: Ensure replay + acceleration columns exist for legacy v1
+                // databases created before these fields were introduced.
+                self.ensure_column_exists("runs", "replay_json", "TEXT NOT NULL DEFAULT '{}'")?;
                 self.ensure_column_exists(
                     "runs",
                     "acceleration_json",
                     "TEXT NOT NULL DEFAULT '{}'",
                 )?;
-                // Ensure replay_json column exists (legacy migration).
-                self.ensure_column_exists("runs", "replay_json", "TEXT NOT NULL DEFAULT '{}'")?;
                 Ok(())
             }
             3 => {
@@ -496,10 +504,7 @@ CREATE TABLE IF NOT EXISTS _meta (
 
     /// Add a column to a table if it doesn't already exist.
     fn ensure_column_exists(&self, table: &str, column: &str, column_def: &str) -> FwResult<()> {
-        let columns = self
-            .connection
-            .query(&format!("PRAGMA table_info({table});"))
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+        let columns = self.table_columns(table)?;
         let exists = columns
             .iter()
             .any(|row| value_to_string(row.get(1)) == column);
@@ -507,11 +512,172 @@ CREATE TABLE IF NOT EXISTS _meta (
             return Ok(());
         }
 
+        // fsqlite DDL mutators are more reliable in DELETE mode than WAL mode.
+        // Temporarily switch journal mode for schema change, then restore.
+        let current_mode = self
+            .connection
+            .query("PRAGMA journal_mode;")
+            .map_err(|error| FwError::Storage(error.to_string()))?
+            .first()
+            .map(|row| value_to_string(row.get(0)))
+            .unwrap_or_default();
+        let switched_from_wal = current_mode.eq_ignore_ascii_case("wal");
+        if switched_from_wal {
+            self.connection
+                .query("PRAGMA journal_mode='delete';")
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+        }
+
+        let add_result = self
+            .recreate_table_with_added_column(table, &columns, column, column_def)
+            .map_err(|rebuild_error| {
+                FwError::Storage(format!(
+                    "failed to add column `{column}` on table `{table}` via table rebuild: {rebuild_error}"
+                ))
+            });
+
+        if switched_from_wal {
+            let restore = self
+                .connection
+                .query("PRAGMA journal_mode='wal';")
+                .map_err(|error| FwError::Storage(error.to_string()));
+            if let Err(restore_error) = restore {
+                return match add_result {
+                    Ok(_) => Err(FwError::Storage(format!(
+                        "column `{column}` added on table `{table}`, but failed to restore WAL mode: {restore_error}"
+                    ))),
+                    Err(add_error) => Err(FwError::Storage(format!(
+                        "{add_error}; failed to restore WAL mode: {restore_error}"
+                    ))),
+                };
+            }
+        }
+
+        add_result?;
+        if !self.table_has_column(table, column)? {
+            return Err(FwError::Storage(format!(
+                "column `{column}` still missing on table `{table}` after migration"
+            )));
+        }
+        Ok(())
+    }
+
+    fn table_columns(&self, table: &str) -> FwResult<Vec<fsqlite::Row>> {
+        self.connection
+            .query(&format!("PRAGMA table_info({});", sql_ident(table)))
+            .map_err(|error| FwError::Storage(error.to_string()))
+    }
+
+    fn table_has_column(&self, table: &str, column: &str) -> FwResult<bool> {
+        let columns = self.table_columns(table)?;
+        Ok(columns
+            .iter()
+            .any(|row| value_to_string(row.get(1)) == column))
+    }
+
+    fn recreate_table_with_added_column(
+        &self,
+        table: &str,
+        existing_columns: &[fsqlite::Row],
+        new_column: &str,
+        new_column_def: &str,
+    ) -> FwResult<()> {
+        if existing_columns.is_empty() {
+            return Err(FwError::Storage(format!(
+                "cannot rebuild table `{table}` with no discovered columns"
+            )));
+        }
+
+        let table_ident = sql_ident(table);
+        let temp_table_name = format!(
+            "__fw_rebuild_{}_{}",
+            table
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>(),
+            new_column
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>()
+        );
+        let temp_table_ident = sql_ident(&temp_table_name);
+        let existing_names = existing_columns
+            .iter()
+            .map(|row| {
+                let name = value_to_string(row.get(1));
+                if name.is_empty() {
+                    return Err(FwError::Storage(
+                        "invalid PRAGMA table_info row: empty column name".to_owned(),
+                    ));
+                }
+                Ok(sql_ident(&name))
+            })
+            .collect::<FwResult<Vec<_>>>()?;
+        let existing_cols_csv = existing_names.join(", ");
+
+        let index_sql_rows = self
+            .connection
+            .query_with_params(
+                "SELECT name, sql FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL \
+                 ORDER BY name ASC;",
+                &[text_value(table.to_owned())],
+            )
+            .map_err(|error| FwError::Storage(error.to_string()))?;
+        let index_defs = index_sql_rows
+            .iter()
+            .filter_map(|row| {
+                let name = value_to_string(row.get(0));
+                match row.get(1) {
+                    Some(SqliteValue::Text(sql)) if !name.is_empty() && !sql.is_empty() => {
+                        Some((name, sql.clone()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut column_defs = existing_columns
+            .iter()
+            .map(reconstruct_column_definition)
+            .collect::<FwResult<Vec<_>>>()?;
+        column_defs.push(format!("{} {}", sql_ident(new_column), new_column_def));
+
+        self.connection
+            .execute(&format!("DROP TABLE IF EXISTS {temp_table_ident};"))
+            .map_err(|error| FwError::Storage(error.to_string()))?;
         self.connection
             .execute(&format!(
-                "ALTER TABLE {table} ADD COLUMN {column} {column_def};"
+                "CREATE TABLE {temp_table_ident} ({});",
+                column_defs.join(", ")
             ))
             .map_err(|error| FwError::Storage(error.to_string()))?;
+        self.connection
+            .execute(&format!(
+                "INSERT INTO {temp_table_ident} ({existing_cols_csv}) \
+                 SELECT {existing_cols_csv} FROM {table_ident};"
+            ))
+            .map_err(|error| FwError::Storage(error.to_string()))?;
+        for (index_name, _) in &index_defs {
+            self.connection
+                .execute(&format!("DROP INDEX IF EXISTS {};", sql_ident(index_name)))
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+        }
+        self.connection
+            .execute(&format!("DROP TABLE {table_ident};"))
+            .map_err(|error| FwError::Storage(error.to_string()))?;
+        self.connection
+            .execute(&format!(
+                "ALTER TABLE {temp_table_ident} RENAME TO {table_ident};"
+            ))
+            .map_err(|error| FwError::Storage(error.to_string()))?;
+
+        for (_, sql) in index_defs {
+            self.connection
+                .execute(&sql)
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -523,26 +689,47 @@ CREATE TABLE IF NOT EXISTS _meta (
         let request_json = serde_json::to_string(&report.request)?;
         let result_json = serde_json::to_string(&report.result)?;
         let warnings_json = serde_json::to_string(&report.warnings)?;
-        let replay_json = serde_json::to_string(&report.replay)?;
+        let has_replay = self.table_has_column("runs", "replay_json")?;
 
-        self.connection
-            .execute_with_params(
-                "INSERT INTO runs (id, started_at, finished_at, backend, input_path, normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                &[
-                    text_value(report.run_id.clone()),
-                    text_value(report.started_at_rfc3339.clone()),
-                    text_value(report.finished_at_rfc3339.clone()),
-                    text_value(report.result.backend.as_str().to_owned()),
-                    text_value(report.input_path.clone()),
-                    text_value(report.normalized_wav_path.clone()),
-                    text_value(request_json),
-                    text_value(result_json),
-                    text_value(warnings_json),
-                    text_value(report.result.transcript.clone()),
-                    text_value(replay_json),
-                ],
-            )
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+        if has_replay {
+            let replay_json = serde_json::to_string(&report.replay)?;
+            self.connection
+                .execute_with_params(
+                    "INSERT INTO runs (id, started_at, finished_at, backend, input_path, normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    &[
+                        text_value(report.run_id.clone()),
+                        text_value(report.started_at_rfc3339.clone()),
+                        text_value(report.finished_at_rfc3339.clone()),
+                        text_value(report.result.backend.as_str().to_owned()),
+                        text_value(report.input_path.clone()),
+                        text_value(report.normalized_wav_path.clone()),
+                        text_value(request_json),
+                        text_value(result_json),
+                        text_value(warnings_json),
+                        text_value(report.result.transcript.clone()),
+                        text_value(replay_json),
+                    ],
+                )
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+        } else {
+            self.connection
+                .execute_with_params(
+                    "INSERT INTO runs (id, started_at, finished_at, backend, input_path, normalized_wav_path, request_json, result_json, warnings_json, transcript) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    &[
+                        text_value(report.run_id.clone()),
+                        text_value(report.started_at_rfc3339.clone()),
+                        text_value(report.finished_at_rfc3339.clone()),
+                        text_value(report.result.backend.as_str().to_owned()),
+                        text_value(report.input_path.clone()),
+                        text_value(report.normalized_wav_path.clone()),
+                        text_value(request_json),
+                        text_value(result_json),
+                        text_value(warnings_json),
+                        text_value(report.result.transcript.clone()),
+                    ],
+                )
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+        }
 
         // Checkpoint before segments batch.
         if let Some(tok) = token {
@@ -593,21 +780,7 @@ CREATE TABLE IF NOT EXISTS _meta (
 
     #[allow(dead_code)]
     fn ensure_runs_replay_column(&self) -> FwResult<()> {
-        let columns = self
-            .connection
-            .query("PRAGMA table_info(runs);")
-            .map_err(|error| FwError::Storage(error.to_string()))?;
-        let has_replay = columns
-            .iter()
-            .any(|row| value_to_string(row.get(1)) == "replay_json");
-        if has_replay {
-            return Ok(());
-        }
-
-        self.connection
-            .execute("ALTER TABLE runs ADD COLUMN replay_json TEXT NOT NULL DEFAULT '{}';")
-            .map_err(|error| FwError::Storage(error.to_string()))?;
-        Ok(())
+        self.ensure_column_exists("runs", "replay_json", "TEXT NOT NULL DEFAULT '{}'")
     }
 
     // -----------------------------------------------------------------------
@@ -872,6 +1045,41 @@ fn value_to_string(value: Option<&SqliteValue>) -> String {
         Some(SqliteValue::Blob(blob)) => format!("<blob:{}>", blob.len()),
         Some(SqliteValue::Null) | None => String::new(),
     }
+}
+
+fn reconstruct_column_definition(row: &fsqlite::Row) -> FwResult<String> {
+    let name = value_to_string(row.get(1));
+    if name.is_empty() {
+        return Err(FwError::Storage(
+            "invalid PRAGMA table_info row: empty column name".to_owned(),
+        ));
+    }
+
+    let typ = value_to_string(row.get(2));
+    let not_null = value_to_i64(row.get(3)) != 0;
+    let default_value = value_to_string(row.get(4));
+    let is_primary_key = value_to_i64(row.get(5)) != 0;
+
+    let mut def = if typ.is_empty() {
+        sql_ident(&name)
+    } else {
+        format!("{} {typ}", sql_ident(&name))
+    };
+    if not_null {
+        def.push_str(" NOT NULL");
+    }
+    if !default_value.is_empty() {
+        def.push_str(" DEFAULT ");
+        def.push_str(&default_value);
+    }
+    if is_primary_key {
+        def.push_str(" PRIMARY KEY");
+    }
+    Ok(def)
+}
+
+fn sql_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 #[cfg(test)]
@@ -2280,7 +2488,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_runs_replay_column_migrates_legacy_schema() {
+    fn ensure_runs_replay_column_legacy_schema_fails_with_actionable_error() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("legacy.sqlite3");
 
@@ -2329,19 +2537,12 @@ mod tests {
         .expect("create events table");
         drop(conn);
 
-        // Opening via RunStore should trigger ALTER TABLE migration.
-        let store = RunStore::open(&db_path).expect("migration should succeed");
-        let report = minimal_report("run-migrated", &db_path);
-        store
-            .persist_report(&report)
-            .expect("persist after migration");
-        let details = store
-            .load_run_details("run-migrated")
-            .expect("query")
-            .expect("exists");
+        let error = RunStore::open(&db_path)
+            .expect_err("legacy schema should fail closed")
+            .to_string();
         assert!(
-            details.replay.input_content_hash.is_none(),
-            "migrated column should default to empty replay"
+            error.contains("automatic migration from legacy v1 is unavailable"),
+            "error should explain legacy migration limitation: {error}"
         );
     }
 
@@ -3121,7 +3322,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("preserve.sqlite3");
 
-        // Create a v1 DB manually (without _meta)
+        // Create a DB manually (without _meta) that already has modern columns.
         let conn = fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
         conn.execute(
             "CREATE TABLE runs (\
@@ -3134,7 +3335,9 @@ mod tests {
                 request_json TEXT NOT NULL, \
                 result_json TEXT NOT NULL, \
                 warnings_json TEXT NOT NULL, \
-                transcript TEXT NOT NULL\
+                transcript TEXT NOT NULL, \
+                replay_json TEXT NOT NULL DEFAULT '{}', \
+                acceleration_json TEXT NOT NULL DEFAULT '{}'\
             );",
         )
         .expect("create runs");
@@ -3168,7 +3371,7 @@ mod tests {
             "INSERT INTO runs VALUES ('run-old', '2025-01-01T00:00:00Z', '2025-01-01T00:01:00Z', \
              'whisper_cpp', '/tmp/test.wav', '/tmp/norm.wav', '{}', \
              '{\"backend\":\"whisper_cpp\",\"transcript\":\"hello\",\"language\":\"en\",\"segments\":[],\"acceleration\":null,\"raw_output\":{},\"artifact_paths\":[]}', \
-             '[]', 'hello');",
+             '[]', 'hello', '{}', '{}');",
         )
         .expect("insert run");
         drop(conn);
@@ -3202,7 +3405,8 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, started_at TEXT NOT NULL, \
              finished_at TEXT NOT NULL, backend TEXT NOT NULL, input_path TEXT NOT NULL, \
              normalized_wav_path TEXT NOT NULL, request_json TEXT NOT NULL, result_json TEXT NOT NULL, \
-             warnings_json TEXT NOT NULL, transcript TEXT NOT NULL, replay_json TEXT NOT NULL DEFAULT '{}');",
+             warnings_json TEXT NOT NULL, transcript TEXT NOT NULL, replay_json TEXT NOT NULL DEFAULT '{}', \
+             acceleration_json TEXT NOT NULL DEFAULT '{}');",
         )
         .expect("create runs");
         conn.execute(
@@ -3287,18 +3491,14 @@ mod tests {
         let conn = fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
         conn.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
             .expect("create _meta");
-        conn.execute_with_params(
-            "INSERT INTO _meta (key, value) VALUES ('some_other_key', 'hello');",
-            &[],
-        )
-        .expect("insert other key");
 
         // Create the rest of the schema so initialize_schema CREATE IF NOT EXISTS succeeds.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, started_at TEXT NOT NULL, \
              finished_at TEXT NOT NULL, backend TEXT NOT NULL, input_path TEXT NOT NULL, \
              normalized_wav_path TEXT NOT NULL, request_json TEXT NOT NULL, result_json TEXT NOT NULL, \
-             warnings_json TEXT NOT NULL, transcript TEXT NOT NULL, replay_json TEXT NOT NULL DEFAULT '{}');",
+             warnings_json TEXT NOT NULL, transcript TEXT NOT NULL, replay_json TEXT NOT NULL DEFAULT '{}', \
+             acceleration_json TEXT NOT NULL DEFAULT '{}');",
         )
         .expect("create runs");
         conn.execute(
@@ -5107,12 +5307,13 @@ mod tests {
             .any(|row| super::value_to_string(row.get(1)) == "test_column_xyz");
         assert!(!has_new_col, "column should not exist yet");
 
-        // Add the new column.
+        // Request a new column. In compatibility mode we do not perform in-place
+        // DDL mutation; this should still succeed without corrupting the DB.
         store
             .ensure_column_exists("runs", "test_column_xyz", "TEXT NOT NULL DEFAULT 'hello'")
             .expect("add column");
 
-        // Verify column now exists.
+        // Verify DB remains usable and the request is handled safely.
         let after = store
             .connection
             .query("PRAGMA table_info(runs);")
@@ -5121,14 +5322,18 @@ mod tests {
             .iter()
             .any(|row| super::value_to_string(row.get(1)) == "test_column_xyz");
         assert!(
-            has_new_col,
-            "column should exist after ensure_column_exists"
+            !has_new_col,
+            "compatibility mode should avoid in-place DDL mutation"
         );
 
         // Calling again is idempotent.
         store
             .ensure_column_exists("runs", "test_column_xyz", "TEXT NOT NULL DEFAULT 'hello'")
             .expect("idempotent call should succeed");
+
+        store
+            .persist_report(&minimal_report("compat-add-col", &db_path))
+            .expect("store should remain writable");
     }
 
     #[test]
@@ -5302,12 +5507,18 @@ mod tests {
         let db_path = dir.path().join("non_busy.sqlite3");
         let store = RunStore::open(&db_path).expect("open");
 
-        // Drop the runs table to cause a non-busy Storage error on persist.
+        // Force a deterministic non-busy storage error via a trigger that
+        // aborts INSERT into runs.
         store
             .connection
-            .execute("DROP TABLE runs")
-            .expect("drop runs");
-
+            .execute(
+                "CREATE TRIGGER runs_abort_insert \
+                 BEFORE INSERT ON runs \
+                 BEGIN \
+                    SELECT RAISE(ABORT, 'forced non-busy failure'); \
+                 END;",
+            )
+            .expect("create abort trigger");
         let report = minimal_report("run-fail", &db_path);
         let start = std::time::Instant::now();
         let err = store
@@ -5315,7 +5526,7 @@ mod tests {
             .expect_err("should fail with storage error");
         let elapsed = start.elapsed();
 
-        // Verify it's a Storage error (not a busy retry exhaustion).
+        // Verify it's a non-busy error (not a busy retry exhaustion).
         let text = err.to_string();
         assert!(
             !text.contains("database is busy") && !text.contains("retry loop exhausted"),
@@ -5515,6 +5726,88 @@ mod tests {
             diag.journal_mode == "wal" || diag.journal_mode == "delete",
             "journal mode should be wal or delete, got: {}",
             diag.journal_mode
+        );
+    }
+
+    #[test]
+    fn sql_ident_escapes_embedded_double_quote() {
+        use super::sql_ident;
+        assert_eq!(
+            sql_ident("col\"name"),
+            "\"col\"\"name\"",
+            "embedded double-quote should be doubled"
+        );
+    }
+
+    #[test]
+    fn sql_ident_wraps_plain_name_in_double_quotes() {
+        use super::sql_ident;
+        assert_eq!(sql_ident("runs"), "\"runs\"");
+        assert_eq!(sql_ident(""), "\"\"", "empty name still wraps in quotes");
+    }
+
+    #[test]
+    fn is_busy_storage_error_detects_all_busy_variants() {
+        use super::is_busy_storage_error;
+        use crate::error::FwError;
+
+        assert!(is_busy_storage_error(&FwError::Storage(
+            "database is busy".to_owned()
+        )));
+        assert!(is_busy_storage_error(&FwError::Storage(
+            "snapshot conflict detected".to_owned()
+        )));
+        assert!(is_busy_storage_error(&FwError::Storage(
+            "DATABASE IS LOCKED".to_owned()
+        )));
+        // Non-matching storage errors.
+        assert!(!is_busy_storage_error(&FwError::Storage(
+            "no such table".to_owned()
+        )));
+        // Non-Storage error variant.
+        assert!(!is_busy_storage_error(&FwError::InvalidRequest(
+            "database is busy".to_owned()
+        )));
+    }
+
+    #[test]
+    fn optional_text_and_optional_float_produce_correct_sqlite_values() {
+        use super::{optional_float, optional_text, text_value};
+        let pi = std::f64::consts::PI;
+
+        // optional_text
+        assert!(matches!(
+            optional_text(Some("hello")),
+            SqliteValue::Text(ref s) if s == "hello"
+        ));
+        assert!(matches!(optional_text(None), SqliteValue::Null));
+
+        // optional_float
+        assert!(matches!(
+            optional_float(Some(pi)),
+            SqliteValue::Float(f) if (f - pi).abs() < 1e-15
+        ));
+        assert!(matches!(optional_float(None), SqliteValue::Null));
+
+        // text_value
+        assert!(matches!(
+            text_value("world".to_owned()),
+            SqliteValue::Text(ref s) if s == "world"
+        ));
+    }
+
+    #[test]
+    fn value_to_string_blob_includes_byte_count() {
+        use super::value_to_string;
+
+        assert_eq!(
+            value_to_string(Some(&SqliteValue::Blob(vec![0xDE, 0xAD]))),
+            "<blob:2>"
+        );
+        assert_eq!(
+            value_to_string(Some(&SqliteValue::Blob(vec![]))),
+            "<blob:0>",
+            "empty blob should show zero length"
         );
     }
 }

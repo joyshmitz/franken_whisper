@@ -934,6 +934,7 @@ fn session_close_round_trips_through_json() {
             assert_eq!(reason, SessionCloseReason::Timeout);
             assert_eq!(last_data_seq, Some(100));
         }
+        other => panic!("expected SessionClose, got {other:?}"),
     }
 }
 

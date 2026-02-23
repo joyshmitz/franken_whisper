@@ -6383,33 +6383,33 @@ mod tests {
             max_drift_sec: 0.1, // very tight tolerance
             min_segment_duration_sec: 0.01,
         };
-        // Original timestamps are [0, 5] and [5, 10] for equal-length texts.
-        // With equal-length texts in 10s, alignment would put them at [0, 5] and [5, 10]
-        // which is exactly the same. Let's make an uneven case:
-        // "a" (1 char) and "abcdefghij" (10 chars) in 10s.
-        // Alignment: 1/11 * 10 = 0.909s for first, 10/11 * 10 = 9.091s for second.
-        // Original first segment [0, 5]: end drift = |0.909 - 5.0| = 4.09 > 0.1 => fallback.
+        // "a" (1 char) and "abcdefghij" (10 chars) in 10s audio.
+        // Proportional alignment: sec_per_char = 10/11 = 0.909.
+        // Segment 0 "a": aligned [0, 0.909], original [0, 5] => end drift 4.09 > 0.1 => FALLBACK.
+        // After fallback, cursor resets to orig_end = 5.0.
+        // Segment 1 "abcdefghij": aligned_start = 5.0, aligned_end = min(5.0+10*0.909, 10) = 10.0
+        // Original [5, 10] => start drift 0, end drift 0 => CORRECTED (no drift).
         let mut segments = vec![
             make_segment(0.0, 5.0, "a"),
             make_segment(5.0, 10.0, "abcdefghij"),
         ];
         let orig_s0_end = segments[0].end_sec;
-        let orig_s1_start = segments[1].start_sec;
         let report = ctc_forced_align(&mut segments, Some(10.0), &config, &token).unwrap();
 
-        // Both segments should fall back due to tight drift threshold.
+        // Only segment 0 falls back; segment 1 has zero drift after cursor reset.
         assert_eq!(
-            report.segments_fallback, 2,
-            "both segments should fall back"
+            report.segments_fallback, 1,
+            "only first segment should fall back"
+        );
+        assert_eq!(
+            report.segments_corrected, 1,
+            "second segment should be corrected (zero drift)"
         );
         assert_eq!(
             segments[0].end_sec, orig_s0_end,
             "first segment end should be original"
         );
-
-        // Second segment's aligned start would be 0.909s, original is 5.0, drift 4.09 > 0.1 => also fallback.
         assert_eq!(report.segments_fallback + report.segments_corrected, 2);
-        assert_eq!(segments[1].start_sec, orig_s1_start);
     }
 
     #[test]

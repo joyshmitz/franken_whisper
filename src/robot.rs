@@ -37,7 +37,6 @@ pub const RUN_COMPLETE_REQUIRED_FIELDS: &[&str] = &[
     "acceleration",
     "warnings",
     "evidence",
-    "replay",
 ];
 pub const BACKENDS_DISCOVERY_REQUIRED_FIELDS: &[&str] = &["event", "schema_version", "backends"];
 
@@ -636,6 +635,20 @@ pub fn robot_schema_value() -> serde_json::Value {
             },
             "stage": {
                 "required": STAGE_REQUIRED_FIELDS,
+                "ordering_contract": {
+                    "seq": "strictly increasing per run",
+                    "ts": "non-decreasing RFC3339 timestamp per run",
+                    "failure_path_example": [
+                        "orchestration.budgets",
+                        "ingest.start",
+                        "ingest.error"
+                    ],
+                    "cancellation_path_example": [
+                        "orchestration.budgets",
+                        "orchestration.cancelled"
+                    ],
+                    "replay_rule": "persisted stage event order must match streamed stage event order",
+                },
                 "example": json!({
                     "event": "stage",
                     "schema_version": ROBOT_SCHEMA_VERSION,
@@ -664,7 +677,6 @@ pub fn robot_schema_value() -> serde_json::Value {
                     "acceleration": {"backend": "none", "normalized_confidences": true},
                     "warnings": [],
                     "evidence": [],
-                    "replay": {},
                 }),
             },
             "run_error": {
@@ -876,7 +888,6 @@ fn run_complete_value(report: &RunReport) -> serde_json::Value {
         "acceleration": report.result.acceleration,
         "warnings": report.warnings,
         "evidence": report.evidence,
-        "replay": report.replay,
     })
 }
 
@@ -2009,6 +2020,8 @@ mod tests {
 
     #[test]
     fn run_complete_does_not_include_replay_field() {
+        // Replay data is stored-only (persisted to SQLite), not streamed
+        // via robot mode. It must NOT appear in run_complete output.
         let report = test_report(vec![], vec![]);
         let value = run_complete_value(&report);
         assert!(

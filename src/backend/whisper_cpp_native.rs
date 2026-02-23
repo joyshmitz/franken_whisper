@@ -718,4 +718,376 @@ mod tests {
             result.transcript
         );
     }
+
+    // ── Task #223 — whisper_cpp_native pass 2 edge-case tests ──────────
+
+    #[test]
+    fn streaming_raw_output_contains_emitted_segment_count() {
+        let request = native_request();
+        let emitted = Mutex::new(Vec::new());
+
+        let result = run_streaming(
+            &request,
+            Path::new("does-not-need-to-exist.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+            &|seg| emitted.lock().expect("lock").push(seg),
+        )
+        .expect("streaming run should succeed");
+
+        let emitted_count = emitted.lock().expect("lock").len();
+        let recorded = result.raw_output["streaming_emitted_segments"]
+            .as_u64()
+            .expect("streaming_emitted_segments must be a u64");
+        assert_eq!(
+            recorded as usize, emitted_count,
+            "streaming_emitted_segments must match actual emitted count"
+        );
+
+        // Non-streaming run should NOT contain this key.
+        let non_streaming = run(
+            &native_request(),
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run should succeed");
+        assert!(
+            non_streaming
+                .raw_output
+                .get("streaming_emitted_segments")
+                .is_none(),
+            "non-streaming run should not contain streaming_emitted_segments key"
+        );
+    }
+
+    #[test]
+    fn build_native_segmentation_fallback_uses_hint_and_records_reason() {
+        let mut req = native_request();
+        req.backend_params.duration_ms = Some(10_000);
+
+        let pilot =
+            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false);
+        let result = build_native_segmentation(&req, Path::new("no_such_file.wav"), &pilot, None)
+            .expect("fallback path should succeed");
+
+        assert_eq!(result.analysis_provenance["mode"], "duration_fallback");
+        assert_eq!(result.duration_ms, 10_000);
+
+        let reason = result.analysis_provenance["reason"]
+            .as_str()
+            .expect("reason must be a string");
+        assert!(
+            !reason.is_empty(),
+            "fallback reason must be non-empty, got: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_exact_boundary_values() {
+        let mut req = native_request();
+        let no_file = Path::new("no.wav");
+
+        // Exact minimum — passes through unchanged.
+        req.backend_params.duration_ms = Some(MIN_DURATION_MS);
+        assert_eq!(estimate_duration_ms(&req, no_file), MIN_DURATION_MS);
+
+        // One below minimum — clamped up.
+        req.backend_params.duration_ms = Some(MIN_DURATION_MS - 1);
+        assert_eq!(estimate_duration_ms(&req, no_file), MIN_DURATION_MS);
+
+        // Exact maximum — passes through unchanged.
+        req.backend_params.duration_ms = Some(MAX_DURATION_MS);
+        assert_eq!(estimate_duration_ms(&req, no_file), MAX_DURATION_MS);
+
+        // One above maximum — clamped down.
+        req.backend_params.duration_ms = Some(MAX_DURATION_MS + 1);
+        assert_eq!(estimate_duration_ms(&req, no_file), MAX_DURATION_MS);
+    }
+
+    #[test]
+    fn run_with_no_language_preserves_none_in_result() {
+        let mut req = native_request();
+        req.language = None;
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run with language=None should succeed");
+
+        assert!(
+            result.language.is_none(),
+            "language=None must propagate to result, got {:?}",
+            result.language
+        );
+
+        // Streaming path too.
+        let result_streaming = run_streaming(
+            &req,
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+            &|_| {},
+        )
+        .expect("streaming run with language=None should succeed");
+
+        assert!(
+            result_streaming.language.is_none(),
+            "streaming: language=None must propagate, got {:?}",
+            result_streaming.language
+        );
+    }
+
+    #[test]
+    fn build_native_segmentation_segments_within_duration_bound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("short_region.wav");
+        let mut samples = vec![0i16; 4_000];
+        samples.extend((0..1_600).map(|i| if i % 2 == 0 { 9_000i16 } else { -9_000 }));
+        samples.extend(vec![0i16; 4_000]);
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
+
+        let req = native_request();
+        let pilot =
+            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false);
+        let segmentation = build_native_segmentation(&req, &wav, &pilot, None)
+            .expect("segmentation should succeed");
+
+        for seg in &segmentation.pilot_segments {
+            assert!(
+                seg.end_ms <= segmentation.duration_ms,
+                "segment end_ms {} exceeds duration_ms {}",
+                seg.end_ms,
+                segmentation.duration_ms,
+            );
+        }
+        assert_eq!(segmentation.analysis_provenance["mode"], "waveform");
+    }
+
+    // ── Task #233 — whisper_cpp_native pass 3 edge-case tests ──────────
+
+    #[test]
+    fn estimate_duration_ms_header_exact_size_clamps_to_min() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("header_exact.wav");
+        // Exactly 44 bytes (WAV_HEADER_BYTES) → 0 audio bytes → clamped to MIN.
+        std::fs::write(&wav, vec![0u8; 44]).unwrap();
+        let mut req = native_request();
+        req.backend_params.duration_ms = None;
+        assert_eq!(
+            estimate_duration_ms(&req, &wav),
+            1_000,
+            "44-byte file should produce 0 audio bytes, clamped to MIN_DURATION_MS"
+        );
+    }
+
+    #[test]
+    fn run_with_zero_threads_does_not_panic_and_records_zero() {
+        let mut req = native_request();
+        req.backend_params.threads = Some(0);
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("zero threads should not panic");
+
+        assert_eq!(
+            result.raw_output["threads"].as_u64(),
+            Some(0),
+            "raw_output should record threads=0"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_whitespace_only_text_becomes_empty_string() {
+        let pilot_segs = vec![TranscriptSegment {
+            start_ms: 0,
+            end_ms: 1000,
+            text: "  \t\n  ".to_owned(),
+            confidence: 0.8,
+        }];
+        let result = to_transcription_segments(&pilot_segs, None).expect("segments");
+        assert_eq!(
+            result[0].text, "",
+            "whitespace-only text should become empty after trim"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_large_timestamps_convert_correctly() {
+        let pilot_segs = vec![TranscriptSegment {
+            start_ms: 3_600_000, // 1 hour
+            end_ms: 7_200_000,   // 2 hours
+            text: "late".to_owned(),
+            confidence: 0.5,
+        }];
+        let result = to_transcription_segments(&pilot_segs, None).expect("segments");
+        assert!(
+            (result[0].start_sec.unwrap() - 3600.0).abs() < 1e-6,
+            "3_600_000 ms → 3600.0 sec, got {:?}",
+            result[0].start_sec
+        );
+        assert!(
+            (result[0].end_sec.unwrap() - 7200.0).abs() < 1e-6,
+            "7_200_000 ms → 7200.0 sec, got {:?}",
+            result[0].end_sec
+        );
+    }
+
+    #[test]
+    fn streaming_on_segment_callback_receives_all_segments() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("callback_test.wav");
+        // Create a WAV with some sound to produce segments.
+        let mut samples = vec![0i16; 4_000];
+        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 7_000i16 } else { -7_000 }));
+        samples.extend(vec![0i16; 4_000]);
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
+
+        let callback_segs = Mutex::new(Vec::new());
+        let result = run_streaming(
+            &native_request(),
+            &wav,
+            dir.path(),
+            Duration::from_secs(1),
+            None,
+            &|seg| callback_segs.lock().unwrap().push(seg),
+        )
+        .expect("streaming should succeed");
+
+        let received = callback_segs.lock().unwrap();
+        assert_eq!(
+            received.len(),
+            result.segments.len(),
+            "callback should receive exactly as many segments as in result"
+        );
+        // Each callback segment should match the result segment text.
+        for (cb, res) in received.iter().zip(result.segments.iter()) {
+            assert_eq!(
+                cb.text, res.text,
+                "callback segment text should match result"
+            );
+        }
+    }
+
+    // -- bd-243: whisper_cpp_native.rs edge-case tests pass 4 --
+
+    #[test]
+    fn to_transcription_segments_cancellation_token_fires() {
+        let pilot_segs = vec![
+            TranscriptSegment {
+                start_ms: 0,
+                end_ms: 1000,
+                text: "first".to_owned(),
+                confidence: 0.9,
+            },
+            TranscriptSegment {
+                start_ms: 1000,
+                end_ms: 2000,
+                text: "second".to_owned(),
+                confidence: 0.8,
+            },
+        ];
+        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(5));
+        let result = to_transcription_segments(&pilot_segs, Some(&token));
+        assert!(result.is_err(), "should fail with expired token");
+        assert!(
+            matches!(result.unwrap_err(), crate::error::FwError::Cancelled(_)),
+            "expected Cancelled error"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_file_just_above_header_clamps_to_min() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("tiny.wav");
+        // 45 bytes = 44 header + 1 audio byte → 0.03125 ms → rounds to 0 → clamp to MIN
+        std::fs::write(&wav, vec![0u8; 45]).unwrap();
+        let mut req = native_request();
+        req.backend_params.duration_ms = None;
+        assert_eq!(
+            estimate_duration_ms(&req, &wav),
+            1_000,
+            "45-byte file should clamp to MIN_DURATION_MS"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_confidence_extremes_clamped() {
+        let pilot_segs = vec![
+            TranscriptSegment {
+                start_ms: 0,
+                end_ms: 500,
+                text: "high".to_owned(),
+                confidence: 2.5,
+            },
+            TranscriptSegment {
+                start_ms: 500,
+                end_ms: 1000,
+                text: "low".to_owned(),
+                confidence: -1.0,
+            },
+        ];
+        let result = to_transcription_segments(&pilot_segs, None).unwrap();
+        assert_eq!(
+            result[0].confidence,
+            Some(1.0),
+            "confidence > 1.0 should clamp to 1.0"
+        );
+        assert_eq!(
+            result[1].confidence,
+            Some(0.0),
+            "confidence < 0.0 should clamp to 0.0"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_explicit_hint_bypasses_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("ignored.wav");
+        std::fs::write(&wav, vec![0u8; 100_000]).unwrap();
+        let mut req = native_request();
+        req.backend_params.duration_ms = Some(7_500);
+        assert_eq!(
+            estimate_duration_ms(&req, &wav),
+            7_500,
+            "explicit hint should be returned, ignoring file size"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_trims_whitespace() {
+        let pilot_segs = vec![
+            TranscriptSegment {
+                start_ms: 0,
+                end_ms: 1000,
+                text: "   leading and trailing   ".to_owned(),
+                confidence: 0.7,
+            },
+            TranscriptSegment {
+                start_ms: 1000,
+                end_ms: 2000,
+                text: "\n\ttabs and newlines\n\t".to_owned(),
+                confidence: 0.8,
+            },
+        ];
+        let result = to_transcription_segments(&pilot_segs, None).unwrap();
+        assert_eq!(result[0].text, "leading and trailing");
+        assert_eq!(result[1].text, "tabs and newlines");
+        // speaker is always None for whisper_cpp
+        assert!(result[0].speaker.is_none());
+        assert!(result[1].speaker.is_none());
+    }
 }

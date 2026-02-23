@@ -807,4 +807,571 @@ mod tests {
         assert!(srt.contains("World"));
         assert!(!srt.contains("[SPEAKER_") || srt.matches("[SPEAKER_").count() == 1);
     }
+
+    // ── Task #216 — whisper_diarization_native pass 2 edge-case tests ──
+
+    #[test]
+    fn to_transcription_segments_empty_text_after_numeral_suppression_no_period() {
+        let dt = DiarizedTranscript {
+            segments: vec![DiarizedSegment {
+                text: "42".to_owned(),
+                start_ms: 0,
+                end_ms: 1000,
+                speaker_id: "SPEAKER_00".to_owned(),
+                confidence: 0.9,
+            }],
+            speakers: vec![],
+        };
+        let result = to_transcription_segments(&dt, true, true, None).unwrap();
+        // After numeral suppression "42" → "", punctuation should NOT add ".".
+        assert_eq!(
+            result[0].text, "",
+            "empty after suppression should stay empty, not become '.'"
+        );
+    }
+
+    #[test]
+    fn speaker_inventory_zero_lanes_returns_empty() {
+        let inventory = speaker_inventory(&[], 0);
+        assert!(
+            inventory.is_empty(),
+            "zero lanes should produce empty inventory"
+        );
+    }
+
+    #[test]
+    fn speaker_inventory_one_lane_accumulates_duration() {
+        let segments = vec![
+            DiarizedSegment {
+                text: "hello".to_owned(),
+                start_ms: 0,
+                end_ms: 1000,
+                speaker_id: "SPEAKER_00".to_owned(),
+                confidence: 0.9,
+            },
+            DiarizedSegment {
+                text: "world".to_owned(),
+                start_ms: 1000,
+                end_ms: 3000,
+                speaker_id: "SPEAKER_00".to_owned(),
+                confidence: 0.8,
+            },
+        ];
+        let inventory = speaker_inventory(&segments, 1);
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].id, "SPEAKER_00");
+        assert_eq!(inventory[0].total_duration_ms, 3000); // 1000 + 2000
+    }
+
+    #[test]
+    fn estimate_duration_ms_real_file_computes_from_pcm_size() {
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("test.wav");
+        // Write exactly WAV_HEADER_BYTES + 2 seconds of PCM16 mono 16kHz data.
+        let file_size = 44 + 32_000 * 2; // 64_044 bytes
+        std::fs::write(&wav, vec![0u8; file_size as usize]).unwrap();
+
+        let mut req = request();
+        req.backend_params.duration_ms = None;
+        let dur = estimate_duration_ms(&req, &wav);
+        assert_eq!(dur, 2000, "64044 bytes should yield 2000ms");
+    }
+
+    #[test]
+    fn render_srt_sequence_numbers_and_text_trimming() {
+        let segs = vec![
+            TranscriptionSegment {
+                start_sec: Some(0.0),
+                end_sec: Some(1.0),
+                text: "  hello  ".to_owned(),
+                speaker: Some("SPEAKER_00".to_owned()),
+                confidence: Some(0.9),
+            },
+            TranscriptionSegment {
+                start_sec: Some(1.0),
+                end_sec: Some(2.5),
+                text: "\tworld\t".to_owned(),
+                speaker: None,
+                confidence: None,
+            },
+        ];
+        let srt = render_srt(&segs);
+        // First block starts with sequence number 1.
+        assert!(
+            srt.starts_with("1\n"),
+            "first entry should start with '1\\n': {srt}"
+        );
+        // Second block contains sequence number 2.
+        assert!(
+            srt.contains("\n2\n"),
+            "second entry should have sequence number 2: {srt}"
+        );
+        // Text should be trimmed.
+        assert!(srt.contains("hello"), "trimmed 'hello' should appear");
+        assert!(
+            !srt.contains("  hello"),
+            "leading whitespace should be trimmed"
+        );
+        assert!(srt.contains("world"), "trimmed 'world' should appear");
+        assert!(!srt.contains("\tworld"), "tab should be trimmed from text");
+        // Blocks separated by double newline.
+        assert!(
+            srt.contains("\n\n2\n"),
+            "blocks should be separated by blank line"
+        );
+    }
+
+    // ── Task #221 — whisper_diarization_native pass 3 edge-case tests ──
+
+    #[test]
+    fn requested_num_speakers_zero_min_with_some_max_returns_none() {
+        let mut req = request();
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(0),
+            max_speakers: Some(3),
+        });
+        assert_eq!(
+            requested_num_speakers(&req),
+            None,
+            "min=0 with Some(max) must return None (guard min>0 fails)"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_hint_at_boundary_values_passes_through() {
+        let mut req = request();
+
+        req.backend_params.duration_ms = Some(1_000);
+        assert_eq!(
+            estimate_duration_ms(&req, Path::new("no.wav")),
+            1_000,
+            "hint at MIN_DURATION_MS should pass through unchanged"
+        );
+
+        req.backend_params.duration_ms = Some(1_800_000);
+        assert_eq!(
+            estimate_duration_ms(&req, Path::new("no.wav")),
+            1_800_000,
+            "hint at MAX_DURATION_MS should pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_clamps_out_of_range_confidence() {
+        let diarized = DiarizedTranscript {
+            segments: vec![
+                DiarizedSegment {
+                    text: "Too confident".to_owned(),
+                    start_ms: 0,
+                    end_ms: 1000,
+                    speaker_id: "SPEAKER_00".to_owned(),
+                    confidence: 1.5,
+                },
+                DiarizedSegment {
+                    text: "Negative".to_owned(),
+                    start_ms: 1000,
+                    end_ms: 2000,
+                    speaker_id: "SPEAKER_01".to_owned(),
+                    confidence: -0.3,
+                },
+            ],
+            speakers: vec![],
+        };
+        let result = to_transcription_segments(&diarized, false, false, None).unwrap();
+        assert_eq!(
+            result[0].confidence,
+            Some(1.0),
+            "confidence above 1.0 must be clamped to 1.0"
+        );
+        assert_eq!(
+            result[1].confidence,
+            Some(0.0),
+            "negative confidence must be clamped to 0.0"
+        );
+    }
+
+    #[test]
+    fn render_srt_empty_segments_returns_empty_string() {
+        let srt = render_srt(&[]);
+        assert!(
+            srt.is_empty(),
+            "render_srt with no segments should produce empty string, got: {srt:?}"
+        );
+    }
+
+    #[test]
+    fn speaker_inventory_mismatched_speaker_ids_not_counted() {
+        let segments = vec![DiarizedSegment {
+            text: "orphan".to_owned(),
+            start_ms: 0,
+            end_ms: 5000,
+            speaker_id: "SPEAKER_99".to_owned(),
+            confidence: 0.7,
+        }];
+        let inventory = speaker_inventory(&segments, 2);
+        assert_eq!(inventory.len(), 2);
+        assert_eq!(inventory[0].id, "SPEAKER_00");
+        assert_eq!(
+            inventory[0].total_duration_ms, 0,
+            "SPEAKER_00 should have 0 duration"
+        );
+        assert_eq!(inventory[1].id, "SPEAKER_01");
+        assert_eq!(
+            inventory[1].total_duration_ms, 0,
+            "SPEAKER_01 should have 0 duration"
+        );
+    }
+
+    // ── Task #226 — whisper_diarization_native pass 4 edge-case tests ──
+
+    #[test]
+    fn render_srt_none_start_with_some_end_uses_zero_start() {
+        let segs = vec![TranscriptionSegment {
+            start_sec: None,
+            end_sec: Some(2.5),
+            text: "late start".to_owned(),
+            speaker: None,
+            confidence: None,
+        }];
+        let srt = render_srt(&segs);
+        // start_sec = None → unwrap_or(0.0) → "00:00:00,000"
+        assert!(
+            srt.contains("00:00:00,000 --> 00:00:02,500"),
+            "None start_sec should fall back to 0.0 while end_sec stays 2.5: {srt}"
+        );
+    }
+
+    #[test]
+    fn requested_num_speakers_odd_sum_floors_on_average() {
+        let mut req = request();
+        // (1 + 2) / 2 = 1 (integer floor division)
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(1),
+            max_speakers: Some(2),
+        });
+        assert_eq!(
+            requested_num_speakers(&req),
+            Some(1),
+            "(1+2)/2 should floor to 1 via integer division"
+        );
+
+        // (3 + 6) / 2 = 4 (also integer floor)
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(3),
+            max_speakers: Some(6),
+        });
+        assert_eq!(
+            requested_num_speakers(&req),
+            Some(4),
+            "(3+6)/2 should floor to 4"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_no_suppression_no_punctuation_text_passes_through_verbatim() {
+        let diarized = DiarizedTranscript {
+            segments: vec![
+                DiarizedSegment {
+                    text: "  Hello 42 world  ".to_owned(),
+                    start_ms: 0,
+                    end_ms: 1000,
+                    speaker_id: "SPEAKER_00".to_owned(),
+                    confidence: 0.5,
+                },
+                DiarizedSegment {
+                    text: "No trailing dot".to_owned(),
+                    start_ms: 1000,
+                    end_ms: 2000,
+                    speaker_id: "SPEAKER_01".to_owned(),
+                    confidence: 0.6,
+                },
+            ],
+            speakers: vec![],
+        };
+        // Both suppress_numerals=false and punctuation_enabled=false
+        let result = to_transcription_segments(&diarized, false, false, None).unwrap();
+        assert_eq!(
+            result[0].text, "Hello 42 world",
+            "text should be trimmed but numerals kept and no period added"
+        );
+        assert_eq!(
+            result[1].text, "No trailing dot",
+            "text without trailing punctuation should stay as-is"
+        );
+    }
+
+    #[test]
+    fn speaker_inventory_labels_for_many_lanes_wraps_past_z() {
+        // lane >= 26 → (b'A' + 26) = b'[' which is ASCII '['.
+        // This tests the actual behavior: labels use raw arithmetic wrap.
+        let inventory = speaker_inventory(&[], 27);
+        assert_eq!(inventory.len(), 27);
+        assert_eq!(
+            inventory[0].label, "Speaker A",
+            "lane 0 should be Speaker A"
+        );
+        assert_eq!(
+            inventory[25].label, "Speaker Z",
+            "lane 25 should be Speaker Z"
+        );
+        // lane 26 → b'A' + 26 = 91 = '[' in ASCII
+        assert_eq!(
+            inventory[26].label, "Speaker [",
+            "lane 26 wraps past 'Z' to '['"
+        );
+        assert_eq!(inventory[26].id, "SPEAKER_26");
+    }
+
+    #[test]
+    fn build_native_projection_fallback_provenance_includes_reason_and_duration_ms() {
+        // Point to a non-existent WAV to trigger the analysis fallback path.
+        let mut req = request();
+        req.backend_params.duration_ms = Some(5_000);
+        let pilot = DiarizationPilot::new(
+            "whisper-large-v3".to_owned(),
+            "wav2vec2".to_owned(),
+            None,
+            "en".to_owned(),
+        );
+        let projection =
+            build_native_projection(&req, Path::new("/no/such/file.wav"), &pilot, None).unwrap();
+
+        assert_eq!(
+            projection.duration_ms, 5_000,
+            "duration_ms should come from the hint"
+        );
+        // Provenance must contain mode, reason, and duration_ms keys.
+        assert_eq!(
+            projection.analysis_provenance["mode"], "duration_fallback",
+            "provenance mode should be duration_fallback"
+        );
+        assert!(
+            projection.analysis_provenance.get("reason").is_some(),
+            "provenance should include a reason for the fallback"
+        );
+        assert_eq!(
+            projection.analysis_provenance["duration_ms"], 5_000,
+            "provenance should echo the resolved duration_ms"
+        );
+    }
+
+    // ── Task #231 — whisper_diarization_native pass 5 edge-case tests ──
+
+    #[test]
+    fn estimate_duration_ms_file_exactly_header_size_clamps_to_min() {
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("exact_header.wav");
+        // Exactly 44 bytes (WAV_HEADER_BYTES) → 0 audio bytes → 0 ms → clamped to MIN.
+        std::fs::write(&wav, vec![0u8; 44]).unwrap();
+        let mut req = request();
+        req.backend_params.duration_ms = None;
+        assert_eq!(
+            estimate_duration_ms(&req, &wav),
+            1_000,
+            "file of exactly WAV_HEADER_BYTES should produce 0 audio bytes, clamped to MIN_DURATION_MS"
+        );
+    }
+
+    #[test]
+    fn requested_num_speakers_one_speaker_accepted_as_minimum_valid() {
+        let mut req = request();
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: Some(1),
+            min_speakers: None,
+            max_speakers: None,
+        });
+        assert_eq!(
+            requested_num_speakers(&req),
+            Some(1),
+            "num_speakers=1 should be accepted (> 0 guard passes)"
+        );
+    }
+
+    #[test]
+    fn render_srt_both_timestamps_none_with_speaker_emits_prefix() {
+        let segs = vec![TranscriptionSegment {
+            start_sec: None,
+            end_sec: None,
+            text: "hello".to_owned(),
+            speaker: Some("SPEAKER_02".to_owned()),
+            confidence: Some(0.7),
+        }];
+        let srt = render_srt(&segs);
+        // Both timestamps None → both 0.0.
+        assert!(
+            srt.contains("00:00:00,000 --> 00:00:00,000"),
+            "both None timestamps should produce 00:00:00,000: {srt}"
+        );
+        // Speaker prefix should still appear.
+        assert!(
+            srt.contains("[SPEAKER_02]"),
+            "speaker prefix must appear even when timestamps are None: {srt}"
+        );
+        assert!(srt.contains("hello"), "text should appear");
+    }
+
+    #[test]
+    fn to_transcription_segments_whitespace_only_text_stays_empty_with_punctuation() {
+        let diarized = DiarizedTranscript {
+            segments: vec![DiarizedSegment {
+                text: "   \t  ".to_owned(),
+                start_ms: 0,
+                end_ms: 1000,
+                speaker_id: "SPEAKER_00".to_owned(),
+                confidence: 0.8,
+            }],
+            speakers: vec![],
+        };
+        // punctuation_enabled=true, suppress_numerals=false
+        let result = to_transcription_segments(&diarized, true, false, None).unwrap();
+        assert_eq!(
+            result[0].text, "",
+            "whitespace-only text after trim should be empty, not '.'"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_suppress_numerals_on_punctuation_off() {
+        let diarized = DiarizedTranscript {
+            segments: vec![
+                DiarizedSegment {
+                    text: "Room 42 was empty".to_owned(),
+                    start_ms: 0,
+                    end_ms: 1000,
+                    speaker_id: "SPEAKER_00".to_owned(),
+                    confidence: 0.9,
+                },
+                DiarizedSegment {
+                    text: "Check items 1, 2, 3".to_owned(),
+                    start_ms: 1000,
+                    end_ms: 2000,
+                    speaker_id: "SPEAKER_01".to_owned(),
+                    confidence: 0.8,
+                },
+            ],
+            speakers: vec![],
+        };
+        // suppress_numerals=true, punctuation_enabled=false
+        let result = to_transcription_segments(&diarized, false, true, None).unwrap();
+        // "Room 42 was empty" → strip digits → "Room  was empty" → trim → "Room  was empty"
+        assert!(
+            !result[0].text.contains('4'),
+            "numerals should be stripped: got {:?}",
+            result[0].text
+        );
+        assert!(
+            !result[0].text.ends_with('.'),
+            "no period should be added when punctuation is off"
+        );
+        // "Check items 1, 2, 3" → "Check items , , " → trim → "Check items , ,"
+        assert!(
+            !result[1].text.contains('1'),
+            "numerals should be stripped from second segment"
+        );
+    }
+
+    // -- bd-241: whisper_diarization_native.rs edge-case tests pass 6 --
+
+    #[test]
+    fn format_srt_time_exactly_one_hour_boundary() {
+        assert_eq!(format_srt_time(3600.0), "01:00:00,000");
+        assert_eq!(format_srt_time(3661.5), "01:01:01,500");
+        assert_eq!(format_srt_time(7200.0), "02:00:00,000");
+    }
+
+    #[test]
+    fn format_srt_time_negative_input_saturates_to_zero() {
+        assert_eq!(format_srt_time(-5.0), "00:00:00,000");
+        assert_eq!(format_srt_time(-0.001), "00:00:00,000");
+        assert_eq!(format_srt_time(f64::NEG_INFINITY), "00:00:00,000");
+    }
+
+    #[test]
+    fn requested_num_speakers_min_max_averaging() {
+        let mut req = request();
+        // min=2, max=6 → average (2+6)/2 = 4
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(2),
+            max_speakers: Some(6),
+        });
+        assert_eq!(requested_num_speakers(&req), Some(4));
+
+        // min only → returns min
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(3),
+            max_speakers: None,
+        });
+        assert_eq!(requested_num_speakers(&req), Some(3));
+
+        // max only → returns max
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: None,
+            max_speakers: Some(5),
+        });
+        assert_eq!(requested_num_speakers(&req), Some(5));
+
+        // no constraints at all → None
+        req.backend_params.speaker_constraints = None;
+        assert_eq!(requested_num_speakers(&req), None);
+    }
+
+    #[test]
+    fn requested_num_speakers_zero_num_speakers_returns_none() {
+        let mut req = request();
+        // num_speakers=0 should be filtered out (filter(|n| *n > 0))
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: Some(0),
+            min_speakers: None,
+            max_speakers: None,
+        });
+        assert_eq!(requested_num_speakers(&req), None);
+
+        // min=0, max=0 should also return None (guard: min > 0 && max >= min)
+        req.backend_params.speaker_constraints = Some(SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(0),
+            max_speakers: Some(0),
+        });
+        assert_eq!(requested_num_speakers(&req), None);
+    }
+
+    #[test]
+    fn to_transcription_segments_cancellation_token_fires() {
+        let diarized = DiarizedTranscript {
+            segments: vec![
+                DiarizedSegment {
+                    text: "First segment".to_owned(),
+                    start_ms: 0,
+                    end_ms: 1000,
+                    speaker_id: "SPEAKER_00".to_owned(),
+                    confidence: 0.9,
+                },
+                DiarizedSegment {
+                    text: "Second segment".to_owned(),
+                    start_ms: 1000,
+                    end_ms: 2000,
+                    speaker_id: "SPEAKER_01".to_owned(),
+                    confidence: 0.8,
+                },
+            ],
+            speakers: vec![],
+        };
+        let token = crate::orchestrator::CancellationToken::with_deadline_from_now(
+            Duration::from_millis(0),
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        let result = to_transcription_segments(&diarized, false, false, Some(&token));
+        assert!(result.is_err(), "should fail with expired token");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::error::FwError::Cancelled(_)),
+            "expected Cancelled error, got: {err:?}"
+        );
+    }
 }

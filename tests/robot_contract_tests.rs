@@ -121,6 +121,48 @@ fn stage_required_fields_match_schema_declaration() {
     );
 }
 
+#[test]
+fn stage_required_fields_include_deterministic_order_keys() {
+    for field in ["run_id", "seq", "ts", "stage", "code", "payload"] {
+        assert!(
+            STAGE_REQUIRED_FIELDS.contains(&field),
+            "STAGE_REQUIRED_FIELDS must include `{field}`"
+        );
+    }
+}
+
+#[test]
+fn stage_schema_declares_ordering_contract_metadata() {
+    let schema = robot_schema_value();
+    let ordering = &schema["events"]["stage"]["ordering_contract"];
+    assert!(
+        ordering.is_object(),
+        "stage schema must include `ordering_contract` object"
+    );
+
+    assert_eq!(ordering["seq"], "strictly increasing per run");
+    assert_eq!(ordering["ts"], "non-decreasing RFC3339 timestamp per run");
+    assert_eq!(
+        ordering["replay_rule"],
+        "persisted stage event order must match streamed stage event order"
+    );
+
+    let failure_path = ordering["failure_path_example"]
+        .as_array()
+        .expect("failure_path_example should be an array");
+    assert_eq!(failure_path.len(), 3);
+    assert_eq!(failure_path[0], "orchestration.budgets");
+    assert_eq!(failure_path[1], "ingest.start");
+    assert_eq!(failure_path[2], "ingest.error");
+
+    let cancellation_path = ordering["cancellation_path_example"]
+        .as_array()
+        .expect("cancellation_path_example should be an array");
+    assert_eq!(cancellation_path.len(), 2);
+    assert_eq!(cancellation_path[0], "orchestration.budgets");
+    assert_eq!(cancellation_path[1], "orchestration.cancelled");
+}
+
 // ---------------------------------------------------------------------------
 // 4. Required fields are present in run_complete events
 // ---------------------------------------------------------------------------

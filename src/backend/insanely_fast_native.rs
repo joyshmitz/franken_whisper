@@ -726,6 +726,127 @@ mod tests {
         );
     }
 
+    // ── Task #218 — insanely_fast_native edge-case tests pass 2 ────
+
+    #[test]
+    fn run_model_none_defaults_to_large_v3_in_output() {
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.model = None;
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run with model=None should succeed");
+
+        assert_eq!(
+            result.raw_output["model"].as_str(),
+            Some("openai/whisper-large-v3"),
+            "model=None should default to openai/whisper-large-v3 in raw_output"
+        );
+    }
+
+    #[test]
+    fn run_flash_attention_reflected_in_telemetry() {
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.backend_params.flash_attention = Some(true);
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run with flash_attention=true should succeed");
+
+        assert_eq!(
+            result.raw_output["telemetry"]["flash_attention_requested"],
+            serde_json::json!(true),
+            "flash_attention_requested should appear as true in telemetry"
+        );
+
+        // Also verify false variant
+        req.backend_params.flash_attention = Some(false);
+        let result2 = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("run with flash_attention=false should succeed");
+
+        assert_eq!(
+            result2.raw_output["telemetry"]["flash_attention_requested"],
+            serde_json::json!(false),
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_empty_input_returns_empty() {
+        let result = to_transcription_segments(&[], false, None).expect("empty should succeed");
+        assert!(result.is_empty(), "empty pilot segments → empty output");
+
+        let result_diarize =
+            to_transcription_segments(&[], true, None).expect("empty diarize should succeed");
+        assert!(
+            result_diarize.is_empty(),
+            "empty pilot segments with diarize → empty output"
+        );
+    }
+
+    #[test]
+    fn run_confidence_clamped_within_native_bounds() {
+        // build_native_segmentation clamps confidence to [0.5, 0.995] (lines 199-200).
+        // This is tighter than the generic [0.0, 1.0] check in the determinism test.
+        let dir = tempdir().expect("tempdir");
+        let wav = dir.path().join("tone.wav");
+        let mut samples = vec![0i16; 4_000];
+        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 7_000 } else { -7_000 }));
+        samples.extend(vec![0i16; 4_000]);
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
+
+        let result = run(&request(), &wav, dir.path(), Duration::from_secs(1), None).expect("run");
+
+        for seg in &result.segments {
+            if let Some(conf) = seg.confidence {
+                assert!(
+                    (0.5..=0.995).contains(&conf),
+                    "native confidence should be in [0.5, 0.995], got {conf}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn run_cancellation_before_segmentation() {
+        // run() has a checkpoint at lines 55-57 BEFORE build_native_segmentation.
+        // This tests that path (distinct from the build_native_segmentation test at line 471).
+        let tmp = tempdir().expect("tempdir");
+        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(5));
+
+        let result = run(
+            &request(),
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            Some(&token),
+        );
+
+        assert!(result.is_err(), "expired token should cancel run()");
+        assert!(
+            matches!(result.unwrap_err(), crate::error::FwError::Cancelled(_)),
+            "should be FwError::Cancelled"
+        );
+    }
+
     #[test]
     fn to_transcription_segments_diarize_three_alternating_speakers() {
         let pilot_segs = vec![
@@ -758,5 +879,221 @@ mod tests {
         // Non-diarize → no speakers.
         let result_no = to_transcription_segments(&pilot_segs, false, None).unwrap();
         assert_eq!(result_no[0].speaker, None);
+    }
+
+    // ── Task #232 — insanely_fast_native pass 3 edge-case tests ────────
+
+    #[test]
+    fn device_defaults_to_cuda_when_no_gpu_false_and_gpu_device_none() {
+        let dir = tempdir().expect("tempdir");
+        let wav = dir.path().join("test.wav");
+        write_pcm16_mono_wav(&wav, 16_000, &vec![0i16; 16_000]);
+
+        let mut req = request();
+        req.backend_params.no_gpu = false;
+        req.backend_params.gpu_device = None;
+
+        let result = run(&req, &wav, dir.path(), Duration::from_secs(1), None).expect("run");
+        let raw = &result.raw_output;
+        // The telemetry should show device = "cuda:0" and dtype = "float16".
+        assert_eq!(
+            raw["telemetry"]["device"].as_str(),
+            Some("cuda:0"),
+            "default device should be cuda:0 when no_gpu=false and gpu_device=None"
+        );
+        assert_eq!(
+            raw["telemetry"]["dtype"].as_str(),
+            Some("float16"),
+            "dtype should be float16 for cuda device"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_exact_boundary_values_pass_through_unchanged() {
+        let mut req = request();
+
+        // Exactly MIN_DURATION_MS (1_000) → passes through.
+        req.backend_params.duration_ms = Some(1_000);
+        assert_eq!(
+            estimate_duration_ms(&req, Path::new("no.wav")),
+            1_000,
+            "MIN_DURATION_MS should pass through unchanged"
+        );
+
+        // Exactly MAX_DURATION_MS (1_800_000) → passes through.
+        req.backend_params.duration_ms = Some(1_800_000);
+        assert_eq!(
+            estimate_duration_ms(&req, Path::new("no.wav")),
+            1_800_000,
+            "MAX_DURATION_MS should pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_large_timestamps_convert_to_seconds_correctly() {
+        let pilot_segs = vec![TranscriptSegment {
+            start_ms: 3_600_000, // 1 hour
+            end_ms: 7_200_000,   // 2 hours
+            text: "late segment".to_owned(),
+            confidence: 0.8,
+        }];
+
+        let result = to_transcription_segments(&pilot_segs, false, None).expect("segments");
+        assert!(
+            (result[0].start_sec.unwrap() - 3600.0).abs() < 1e-6,
+            "3_600_000 ms should convert to 3600.0 sec, got {:?}",
+            result[0].start_sec
+        );
+        assert!(
+            (result[0].end_sec.unwrap() - 7200.0).abs() < 1e-6,
+            "7_200_000 ms should convert to 7200.0 sec, got {:?}",
+            result[0].end_sec
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_single_diarize_is_speaker_00() {
+        // With only 1 segment, diarize assigns SPEAKER_00 (index 0 % 2 = 0).
+        let pilot_segs = vec![TranscriptSegment {
+            start_ms: 0,
+            end_ms: 1000,
+            text: "solo".to_owned(),
+            confidence: 0.5,
+        }];
+        let result = to_transcription_segments(&pilot_segs, true, None).expect("segments");
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].speaker,
+            Some("SPEAKER_00".to_owned()),
+            "single segment diarized should be SPEAKER_00"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_file_exactly_header_size_clamps_to_min() {
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("header_only.wav");
+        // Exactly 44 bytes → 0 audio bytes → estimated 0 → clamped to MIN_DURATION_MS.
+        std::fs::write(&wav, vec![0u8; 44]).unwrap();
+        let mut req = request();
+        req.backend_params.duration_ms = None;
+        assert_eq!(
+            estimate_duration_ms(&req, &wav),
+            1_000,
+            "44-byte file should estimate 0 audio bytes, clamped to MIN_DURATION_MS"
+        );
+    }
+
+    // -- bd-242: insanely_fast_native.rs edge-case tests pass 4 --
+
+    #[test]
+    fn to_transcription_segments_cancellation_token_fires() {
+        let pilot_segs = vec![
+            TranscriptSegment {
+                start_ms: 0,
+                end_ms: 1000,
+                text: "first".to_owned(),
+                confidence: 0.9,
+            },
+            TranscriptSegment {
+                start_ms: 1000,
+                end_ms: 2000,
+                text: "second".to_owned(),
+                confidence: 0.8,
+            },
+        ];
+        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(5));
+        let result = to_transcription_segments(&pilot_segs, false, Some(&token));
+        assert!(result.is_err(), "should fail with expired token");
+        assert!(
+            matches!(result.unwrap_err(), crate::error::FwError::Cancelled(_)),
+            "expected Cancelled error"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_sub_one_second_file_clamps_to_min() {
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("short.wav");
+        // 800ms of 16kHz mono PCM16 = 0.8 * 32000 = 25600 bytes payload + 44 header
+        std::fs::write(&wav, vec![0u8; 25_644]).unwrap();
+        let mut req = request();
+        req.backend_params.duration_ms = None;
+        let est = estimate_duration_ms(&req, &wav);
+        assert_eq!(
+            est, 1_000,
+            "800ms raw estimate should clamp up to MIN_DURATION_MS (1000)"
+        );
+    }
+
+    #[test]
+    fn to_transcription_segments_no_diarize_speaker_is_none() {
+        let pilot_segs = vec![
+            TranscriptSegment {
+                start_ms: 0,
+                end_ms: 500,
+                text: "hello".to_owned(),
+                confidence: 0.7,
+            },
+            TranscriptSegment {
+                start_ms: 500,
+                end_ms: 1000,
+                text: "world".to_owned(),
+                confidence: 0.8,
+            },
+        ];
+        let result = to_transcription_segments(&pilot_segs, false, None).unwrap();
+        for seg in &result {
+            assert!(
+                seg.speaker.is_none(),
+                "speaker should be None when diarize=false"
+            );
+        }
+    }
+
+    #[test]
+    fn to_transcription_segments_confidence_clamped_to_zero_one() {
+        let pilot_segs = vec![
+            TranscriptSegment {
+                start_ms: 0,
+                end_ms: 1000,
+                text: "over".to_owned(),
+                confidence: 1.5,
+            },
+            TranscriptSegment {
+                start_ms: 1000,
+                end_ms: 2000,
+                text: "under".to_owned(),
+                confidence: -0.3,
+            },
+        ];
+        let result = to_transcription_segments(&pilot_segs, false, None).unwrap();
+        assert_eq!(
+            result[0].confidence,
+            Some(1.0),
+            "confidence > 1.0 should clamp to 1.0"
+        );
+        assert_eq!(
+            result[1].confidence,
+            Some(0.0),
+            "confidence < 0.0 should clamp to 0.0"
+        );
+    }
+
+    #[test]
+    fn estimate_duration_ms_explicit_hint_bypasses_file_size() {
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("dummy.wav");
+        // Write a file that would normally estimate to ~2000ms
+        std::fs::write(&wav, vec![0u8; 64_044]).unwrap();
+        let mut req = request();
+        // But set explicit duration_ms hint
+        req.backend_params.duration_ms = Some(5_000);
+        let est = estimate_duration_ms(&req, &wav);
+        assert_eq!(
+            est, 5_000,
+            "explicit duration_ms hint should be returned directly"
+        );
     }
 }

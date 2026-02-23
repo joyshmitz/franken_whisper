@@ -163,6 +163,8 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 [[package]]
 name = "asupersync"
 version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c7d8c72c8d8a870a9e5a85a57b04d4e8d15d4be238a0a5818e8c87be2a89da"
 dependencies = [
  "base64",
  "bincode-next",
@@ -170,38 +172,6 @@ dependencies = [
  "franken-decision 0.2.5",
  "franken-evidence 0.2.5",
  "franken-kernel 0.2.5",
- "getrandom 0.4.1",
- "hmac",
- "libc",
- "memchr",
- "nix 0.31.1",
- "parking_lot",
- "pin-project",
- "polling",
- "rmp-serde",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "slab",
- "smallvec",
- "socket2",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "asupersync"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08c7d8c72c8d8a870a9e5a85a57b04d4e8d15d4be238a0a5818e8c87be2a89da"
-dependencies = [
- "base64",
- "bincode-next",
- "crossbeam-queue",
- "franken-decision 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "franken-evidence 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "franken-kernel 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "getrandom 0.4.1",
  "hmac",
  "libc",
@@ -222,6 +192,36 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "visibility",
+]
+
+[[package]]
+name = "asupersync"
+version = "0.2.6"
+dependencies = [
+ "base64",
+ "bincode-next",
+ "crossbeam-queue",
+ "franken-decision 0.2.6",
+ "franken-evidence 0.2.6",
+ "franken-kernel 0.2.6",
+ "getrandom 0.4.1",
+ "hmac",
+ "libc",
+ "memchr",
+ "nix 0.31.1",
+ "parking_lot",
+ "pin-project",
+ "polling",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "slab",
+ "smallvec",
+ "socket2",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -862,6 +862,8 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 [[package]]
 name = "franken-decision"
 version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aca82b4b7cfc99b74981d45a26975d9fe4ea7d7b3e3aaba8777178e3d8ea81b0"
 dependencies = [
  "franken-evidence 0.2.5",
  "franken-kernel 0.2.5",
@@ -870,21 +872,11 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aca82b4b7cfc99b74981d45a26975d9fe4ea7d7b3e3aaba8777178e3d8ea81b0"
+version = "0.2.6"
 dependencies = [
- "franken-evidence 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "franken-kernel 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "franken-evidence 0.2.6",
+ "franken-kernel 0.2.6",
  "serde",
-]
-
-[[package]]
-name = "franken-evidence"
-version = "0.2.5"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -898,10 +890,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "franken-kernel"
-version = "0.2.5"
+name = "franken-evidence"
+version = "0.2.6"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -914,10 +907,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "franken-kernel"
+version = "0.2.6"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "franken_whisper"
 version = "0.1.0"
 dependencies = [
- "asupersync 0.2.5",
+ "asupersync 0.2.6",
  "base64",
  "chrono",
  "clap",
@@ -927,9 +927,9 @@ dependencies = [
  "fj-api",
  "fj-core",
  "flate2",
- "franken-decision 0.2.5",
- "franken-evidence 0.2.5",
- "franken-kernel 0.2.5",
+ "franken-decision 0.2.6",
+ "franken-evidence 0.2.6",
+ "franken-kernel 0.2.6",
  "fsqlite",
  "fsqlite-types",
  "ft-api",
@@ -981,7 +981,7 @@ dependencies = [
 name = "fsqlite-core"
 version = "0.1.1"
 dependencies = [
- "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "asupersync 0.2.5",
  "blake3",
  "fsqlite-ast",
  "fsqlite-btree",
@@ -1161,7 +1161,7 @@ dependencies = [
 name = "fsqlite-wal"
 version = "0.1.1"
 dependencies = [
- "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "asupersync 0.2.5",
  "blake3",
  "crc32c",
  "fsqlite-error",

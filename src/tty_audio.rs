@@ -140,6 +140,10 @@ pub enum TtyControlFrame {
     },
 }
 
+/// Backward-compatible alias for older callers/tests that still use the
+/// previous control-frame type name.
+pub type ControlFrameType = TtyControlFrame;
+
 /// Negotiate protocol version from a handshake frame.
 ///
 /// Returns `Ok(version)` if a compatible version exists within both parties'
@@ -602,8 +606,9 @@ fn parse_audio_frames_for_decode<R: Read>(reader: &mut R) -> FwResult<Vec<TtyAud
                         ));
                     }
                     if handshake_seen {
-                        // Allow duplicate handshakes for FEC redundancy.
-                        continue;
+                        return Err(FwError::InvalidRequest(
+                            "duplicate tty-audio handshake".to_owned(),
+                        ));
                     }
 
                     let negotiated = negotiate_version(
@@ -1041,7 +1046,7 @@ impl MicAudioSource for FixedCountMicSource {
 /// 3. `finalize_wav()` -- write the accumulated bytes to a WAV file and return
 ///    the path for the transcription pipeline.
 pub struct TtyAudioPipelineAdapter {
-    raw_pcm: Vec<u8>,
+    raw_pcm: std::collections::BTreeMap<u64, Vec<u8>>,
     temp_dir: tempfile::TempDir,
     finalized: bool,
     frames_ingested: u64,
@@ -1053,7 +1058,7 @@ impl TtyAudioPipelineAdapter {
     pub fn new() -> FwResult<Self> {
         let temp_dir = tempfile::tempdir()?;
         Ok(Self {
-            raw_pcm: Vec::new(),
+            raw_pcm: std::collections::BTreeMap::new(),
             temp_dir,
             finalized: false,
             frames_ingested: 0,
@@ -1061,8 +1066,8 @@ impl TtyAudioPipelineAdapter {
     }
 
     /// Ingest a slice of TTY audio frames.  Each frame is decoded (base64 ->
-    /// zlib decompress) and appended to the internal PCM buffer.  Returns the
-    /// number of frames successfully decoded in this call.
+    /// zlib decompress) and stored by sequence number. Returns the
+    /// number of new frames successfully decoded in this call.
     pub fn ingest_frames(&mut self, frames: &[TtyAudioFrame]) -> FwResult<u64> {
         if self.finalized {
             return Err(FwError::InvalidRequest(
@@ -1075,6 +1080,11 @@ impl TtyAudioPipelineAdapter {
 
         let mut count: u64 = 0;
         for frame in &sorted_frames {
+            // Skip if we already have this frame
+            if self.raw_pcm.contains_key(&frame.seq) {
+                continue;
+            }
+
             let compressed = STANDARD_NO_PAD
                 .decode(&frame.payload_b64)
                 .map_err(|e| FwError::InvalidRequest(format!("invalid base64 payload: {e}")))?;
@@ -1102,7 +1112,7 @@ impl TtyAudioPipelineAdapter {
                 }
             }
 
-            self.raw_pcm.extend_from_slice(&decoded);
+            self.raw_pcm.insert(frame.seq, decoded);
             count += 1;
         }
         self.frames_ingested += count;
@@ -1126,9 +1136,15 @@ impl TtyAudioPipelineAdapter {
 
         self.finalized = true;
 
+        let mut contiguous_pcm = Vec::new();
+        // Since it's a BTreeMap, values are yielded in sequence number order.
+        for decoded in self.raw_pcm.values() {
+            contiguous_pcm.extend_from_slice(decoded);
+        }
+
         let raw_path = self.temp_dir.path().join("decoded.ulaw");
         let wav_path = self.temp_dir.path().join("pipeline_input.wav");
-        fs::write(&raw_path, &self.raw_pcm)?;
+        fs::write(&raw_path, &contiguous_pcm)?;
         transcode_mulaw_to_wav(&raw_path, &wav_path)?;
         Ok(wav_path)
     }
@@ -1148,7 +1164,7 @@ impl TtyAudioPipelineAdapter {
     /// Total bytes of decoded PCM accumulated.
     #[must_use]
     pub fn raw_pcm_len(&self) -> usize {
-        self.raw_pcm.len()
+        self.raw_pcm.values().map(|v| v.len()).sum()
     }
 }
 
@@ -1350,6 +1366,9 @@ pub fn validate_session_close(
             }
             Ok(())
         }
+        _ => Err(FwError::InvalidRequest(
+            "validate_session_close requires a session_close control frame".to_owned(),
+        )),
     }
 }
 
@@ -1735,7 +1754,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_out_of_order_frames_fails() {
+    fn decode_out_of_order_frames_succeeds_after_sort() {
+        // The decoder sorts frames by sequence number before processing,
+        // so out-of-order input [2, 0, 1] becomes [0, 1, 2] and decodes normally.
         let frames = vec![
             make_frame(2, b"chunk-two"),
             make_frame(0, b"chunk-zero"),
@@ -1744,12 +1765,10 @@ mod tests {
         let ndjson = frames_to_ndjson(&frames);
         let mut reader = ndjson.as_bytes();
 
-        let error = decode_frames_to_raw(&mut reader).expect_err("out-of-order should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("missing tty-audio frame sequence")
-        );
+        let (report, raw) =
+            decode_frames_to_raw(&mut reader).expect("sorted decode should succeed");
+        assert_eq!(report.frames_decoded, 3);
+        assert_eq!(raw, b"chunk-zerochunk-onechunk-two");
     }
 
     #[test]
@@ -2118,7 +2137,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_duplicate_handshake_frames() {
+    fn decode_rejects_duplicate_handshake() {
         let handshake = serde_json::to_string(&TtyControlFrame::Handshake {
             min_version: 1,
             max_version: 1,
@@ -2129,7 +2148,7 @@ mod tests {
         let ndjson = format!("{handshake}\n{handshake}\n{frame}\n");
         let mut reader = ndjson.as_bytes();
 
-        let error = decode_frames_to_raw(&mut reader).expect_err("duplicate handshake should fail");
+        let error = decode_frames_to_raw(&mut reader).expect_err("duplicate handshake must fail");
         assert!(error.to_string().contains("duplicate tty-audio handshake"));
     }
 
@@ -2503,8 +2522,9 @@ mod tests {
     }
 
     #[test]
-    fn skip_missing_policy_drops_out_of_order_and_continues() {
-        // Send frames 0, 2, 1, 3 — frame 1 arrives after 2 so it's out of order
+    fn skip_missing_policy_handles_out_of_order_input_via_sort() {
+        // Frames arrive as [0, 2, 1, 3] but the decoder sorts by seq first,
+        // producing [0, 1, 2, 3] — no gaps, no duplicates, all frames decoded.
         let frames = vec![
             make_frame(0, b"a"),
             make_frame(2, b"c"),
@@ -2516,11 +2536,11 @@ mod tests {
 
         let (report, raw) =
             decode_frames_to_raw_with_policy(&mut reader, DecodeRecoveryPolicy::SkipMissing)
-                .expect("skip-missing should recover from out-of-order");
-        assert_eq!(report.gaps.len(), 1, "gap from 1→2");
-        // Frame 1 arrives after seq 2, so it's treated as out-of-order duplicate
-        assert!(report.duplicates.contains(&1));
-        assert_eq!(raw, b"acd");
+                .expect("sorted decode should succeed");
+        assert_eq!(report.gaps.len(), 0, "no gaps after sorting");
+        assert!(report.duplicates.is_empty(), "no duplicates after sorting");
+        assert_eq!(report.frames_decoded, 4);
+        assert_eq!(raw, b"abcd");
     }
 
     #[test]
@@ -4180,10 +4200,10 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Session close (ControlFrameType) tests (bead bd-30v)
+    // Session close (TtyControlFrame) tests (bead bd-30v)
     // ---------------------------------------------------------------
 
-    use super::{ControlFrameType, SessionCloseReason, emit_session_close, validate_session_close};
+    use super::{SessionCloseReason, emit_session_close, validate_session_close};
 
     #[test]
     fn session_close_reason_serde_round_trip_normal() {
@@ -4215,45 +4235,47 @@ mod tests {
 
     #[test]
     fn control_frame_type_session_close_serde_round_trip() {
-        let frame = ControlFrameType::SessionClose {
+        let frame = TtyControlFrame::SessionClose {
             reason: SessionCloseReason::Normal,
             last_data_seq: Some(42),
         };
         let json = serde_json::to_string(&frame).expect("serialize");
-        let parsed: ControlFrameType = serde_json::from_str(&json).expect("deserialize");
+        let parsed: TtyControlFrame = serde_json::from_str(&json).expect("deserialize");
         match parsed {
-            ControlFrameType::SessionClose {
+            TtyControlFrame::SessionClose {
                 reason,
                 last_data_seq,
             } => {
                 assert_eq!(reason, SessionCloseReason::Normal);
                 assert_eq!(last_data_seq, Some(42));
             }
+            other => panic!("expected SessionClose, got: {other:?}"),
         }
     }
 
     #[test]
     fn control_frame_type_session_close_none_last_seq() {
-        let frame = ControlFrameType::SessionClose {
+        let frame = TtyControlFrame::SessionClose {
             reason: SessionCloseReason::Error,
             last_data_seq: None,
         };
         let json = serde_json::to_string(&frame).expect("serialize");
-        let parsed: ControlFrameType = serde_json::from_str(&json).expect("deserialize");
+        let parsed: TtyControlFrame = serde_json::from_str(&json).expect("deserialize");
         match parsed {
-            ControlFrameType::SessionClose {
+            TtyControlFrame::SessionClose {
                 reason,
                 last_data_seq,
             } => {
                 assert_eq!(reason, SessionCloseReason::Error);
                 assert!(last_data_seq.is_none());
             }
+            other => panic!("expected SessionClose, got: {other:?}"),
         }
     }
 
     #[test]
     fn control_frame_type_session_close_json_has_frame_type_field() {
-        let frame = ControlFrameType::SessionClose {
+        let frame = TtyControlFrame::SessionClose {
             reason: SessionCloseReason::Normal,
             last_data_seq: Some(10),
         };
@@ -4298,7 +4320,7 @@ mod tests {
 
     #[test]
     fn validate_session_close_matching_seq() {
-        let frame = ControlFrameType::SessionClose {
+        let frame = TtyControlFrame::SessionClose {
             reason: SessionCloseReason::Normal,
             last_data_seq: Some(42),
         };
@@ -4307,7 +4329,7 @@ mod tests {
 
     #[test]
     fn validate_session_close_both_none() {
-        let frame = ControlFrameType::SessionClose {
+        let frame = TtyControlFrame::SessionClose {
             reason: SessionCloseReason::Normal,
             last_data_seq: None,
         };
@@ -4315,18 +4337,21 @@ mod tests {
     }
 
     #[test]
-    fn validate_session_close_observed_none_claimed_zero() {
-        let frame = ControlFrameType::SessionClose {
+    fn validate_session_close_observed_none_claimed_zero_is_mismatch() {
+        // Some(0) means "I sent a data frame with seq 0" — but observed=None means
+        // the receiver never saw any data frames. This is a legitimate mismatch.
+        let frame = TtyControlFrame::SessionClose {
             reason: SessionCloseReason::Normal,
             last_data_seq: Some(0),
         };
-        // claimed 0 with no observed is acceptable (edge case: zero-indexed seq).
-        validate_session_close(None, &frame).expect("should be valid");
+        let err = validate_session_close(None, &frame)
+            .expect_err("claiming data when none observed should fail");
+        assert!(err.to_string().contains("no data frames were observed"));
     }
 
     #[test]
     fn validate_session_close_mismatch_error() {
-        let frame = ControlFrameType::SessionClose {
+        let frame = TtyControlFrame::SessionClose {
             reason: SessionCloseReason::Normal,
             last_data_seq: Some(100),
         };
@@ -4339,7 +4364,7 @@ mod tests {
 
     #[test]
     fn validate_session_close_no_data_but_claims_data() {
-        let frame = ControlFrameType::SessionClose {
+        let frame = TtyControlFrame::SessionClose {
             reason: SessionCloseReason::Error,
             last_data_seq: Some(10),
         };
@@ -4350,7 +4375,7 @@ mod tests {
 
     #[test]
     fn validate_session_close_observed_some_claimed_none() {
-        let frame = ControlFrameType::SessionClose {
+        let frame = TtyControlFrame::SessionClose {
             reason: SessionCloseReason::Normal,
             last_data_seq: None,
         };

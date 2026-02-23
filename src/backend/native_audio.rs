@@ -553,4 +553,365 @@ mod tests {
         let analysis = analyze_wav(&wav, Some(2_500)).expect("analysis should succeed");
         assert_eq!(analysis.duration_ms, 2_500);
     }
+
+    // ── Task #217 — native_audio.rs edge-case tests ────────────────
+
+    /// Build a custom WAV file with configurable fmt fields.
+    fn custom_wav(
+        audio_format: u16,
+        channels: u16,
+        sample_rate: u32,
+        bits_per_sample: u16,
+        data_bytes: &[u8],
+    ) -> Vec<u8> {
+        let data_len = data_bytes.len() as u32;
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36u32 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&audio_format.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * (channels as u32) * (bits_per_sample as u32 / 8);
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        let block_align = channels * (bits_per_sample / 8);
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.extend_from_slice(data_bytes);
+
+        bytes
+    }
+
+    #[test]
+    fn non_pcm_audio_format_rejected() {
+        let dir = tempdir().unwrap();
+        let wav_path = dir.path().join("float.wav");
+        // audio_format=3 (IEEE float), otherwise valid mono 16-bit.
+        let bytes = custom_wav(3, 1, 16_000, 16, &[0u8; 320]);
+        std::fs::write(&wav_path, bytes).unwrap();
+
+        let err = analyze_wav(&wav_path, None).unwrap_err();
+        let msg = err.clone();
+        assert!(
+            msg.contains("audio_format=3"),
+            "should reject non-PCM format: {msg}"
+        );
+    }
+
+    #[test]
+    fn stereo_and_non_16bit_rejected() {
+        let dir = tempdir().unwrap();
+
+        // Stereo file.
+        let stereo_path = dir.path().join("stereo.wav");
+        let bytes = custom_wav(1, 2, 16_000, 16, &[0u8; 640]);
+        std::fs::write(&stereo_path, bytes).unwrap();
+        let err = analyze_wav(&stereo_path, None).unwrap_err();
+        assert!(err.contains("channels=2"), "should reject stereo: {}", err);
+
+        // 8-bit file.
+        let eight_bit_path = dir.path().join("8bit.wav");
+        let bytes = custom_wav(1, 1, 16_000, 8, &[0u8; 320]);
+        std::fs::write(&eight_bit_path, bytes).unwrap();
+        let err = analyze_wav(&eight_bit_path, None).unwrap_err();
+        assert!(
+            err.contains("bits_per_sample=8"),
+            "should reject 8-bit: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn missing_data_chunk_rejected() {
+        let dir = tempdir().unwrap();
+        let wav_path = dir.path().join("no_data.wav");
+        // Valid RIFF/WAVE with fmt chunk + unknown filler chunk but no data chunk.
+        // Must be ≥ 44 bytes to pass the early size check.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&44u32.to_le_bytes()); // file size - 8
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+        bytes.extend_from_slice(&16_000u32.to_le_bytes());
+        bytes.extend_from_slice(&32_000u32.to_le_bytes()); // byte_rate
+        bytes.extend_from_slice(&2u16.to_le_bytes()); // block_align
+        bytes.extend_from_slice(&16u16.to_le_bytes()); // bits
+        // Filler unknown chunk to pad to ≥ 44 bytes.
+        bytes.extend_from_slice(b"JUNK");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 4]);
+        std::fs::write(&wav_path, bytes).unwrap();
+
+        let err = analyze_wav(&wav_path, None).unwrap_err();
+        assert!(
+            err.contains("data chunk"),
+            "should reject missing data chunk: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn bridge_short_gaps_leading_and_trailing_gaps_not_filled() {
+        use super::bridge_short_gaps;
+
+        // Leading gap: should NOT be bridged.
+        let mut leading = vec![false, false, true, true];
+        bridge_short_gaps(&mut leading, 2);
+        assert_eq!(leading, vec![false, false, true, true]);
+
+        // Trailing gap: should NOT be bridged.
+        let mut trailing = vec![true, true, false, false];
+        bridge_short_gaps(&mut trailing, 2);
+        assert_eq!(trailing, vec![true, true, false, false]);
+    }
+
+    #[test]
+    fn compute_frame_rms_partial_last_frame() {
+        use super::compute_frame_rms;
+
+        // 5 samples with frame_size=3 → 2 frames: [s0,s1,s2] and [s3,s4].
+        // Values normalized by /32768.0 internally.
+        let samples: Vec<i16> = vec![16384, 16384, 16384, 32767, 32767];
+        let rms = compute_frame_rms(&samples, 3);
+        assert_eq!(rms.len(), 2, "should produce 2 frames (one partial)");
+
+        // Frame 1: RMS of [0.5, 0.5, 0.5] = 0.5
+        assert!((rms[0] - 0.5).abs() < 0.01, "frame 0 rms={}", rms[0]);
+        // Frame 2: RMS of [~1.0, ~1.0] ≈ 1.0 (partial frame, only 2 samples)
+        assert!(rms[1] > 0.99, "frame 1 should be ~1.0, got {}", rms[1]);
+    }
+
+    // ── Task #222 — native_audio pass 2 edge-case tests ────────────────
+
+    #[test]
+    fn zero_sample_rate_is_rejected() {
+        let dir = tempdir().unwrap();
+        let wav_path = dir.path().join("zero_rate.wav");
+        let bytes = custom_wav(1, 1, 0, 16, &[0u8; 4]);
+        std::fs::write(&wav_path, bytes).unwrap();
+
+        let err = analyze_wav(&wav_path, None).unwrap_err();
+        assert!(
+            err.contains("sample_rate 0"),
+            "expected sample_rate error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn odd_sized_chunk_word_aligned_parser_continues() {
+        let dir = tempdir().unwrap();
+        let wav_path = dir.path().join("odd_chunk.wav");
+
+        // RIFF/WAVE + fmt(16) + unknown "INFO" chunk (3 bytes, odd) + pad + data(4)
+        let riff_content_size: u32 = 4 + 24 + 12 + 12;
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&riff_content_size.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+
+        // fmt chunk: PCM, mono, 16kHz, 16-bit
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&16_000u32.to_le_bytes());
+        bytes.extend_from_slice(&32_000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+
+        // Unknown chunk "INFO" with odd size = 3 bytes + 1 padding byte
+        bytes.extend_from_slice(b"INFO");
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(b"abc");
+        bytes.push(0x00); // word-alignment padding
+
+        // data chunk: 4 bytes = 2 i16 samples
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x00, 0x10, 0x00, 0x20]);
+
+        std::fs::write(&wav_path, bytes).unwrap();
+
+        let analysis = analyze_wav(&wav_path, None).expect("should find data past odd chunk");
+        assert!(
+            analysis.frame_count >= 1,
+            "should parse samples from data chunk after odd-sized INFO chunk"
+        );
+    }
+
+    #[test]
+    fn active_regions_from_frames_avg_rms_computed_correctly() {
+        use super::active_regions_from_frames;
+
+        let rms = vec![0.2f32, 0.4f32, 0.0f32];
+        let active = vec![true, true, false];
+        // frame_ms=20, min_region_frames=1 (so 2-frame region qualifies)
+        let regions = active_regions_from_frames(&rms, &active, 20, 1);
+
+        assert_eq!(regions.len(), 1);
+        // avg_rms = (0.2 + 0.4) / 2 = 0.3
+        assert!(
+            (regions[0].avg_rms - 0.3).abs() < 1e-6,
+            "expected avg_rms ~0.3, got {}",
+            regions[0].avg_rms
+        );
+        assert_eq!(regions[0].start_ms, 0);
+        assert_eq!(regions[0].end_ms, 40); // 2 frames * 20ms
+    }
+
+    #[test]
+    fn duration_override_on_empty_samples_file() {
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("empty_override.wav");
+        write_pcm16_mono_wav(&wav, 16_000, &[]);
+
+        // Positive override on empty file — used verbatim.
+        let analysis = analyze_wav(&wav, Some(3_000)).expect("should succeed");
+        assert_eq!(
+            analysis.duration_ms, 3_000,
+            "positive override on empty file should be honoured"
+        );
+
+        // Some(0) on empty file — unwrap_or(0) path.
+        let analysis_zero = analyze_wav(&wav, Some(0)).expect("should succeed");
+        assert_eq!(
+            analysis_zero.duration_ms, 0,
+            "Some(0) on empty file should remain 0"
+        );
+    }
+
+    #[test]
+    fn bridge_short_gaps_boundary_at_max_gap_frames() {
+        use super::bridge_short_gaps;
+
+        // Gap of exactly 1 (== max) → bridged.
+        let mut exactly_max = vec![true, false, true];
+        bridge_short_gaps(&mut exactly_max, 1);
+        assert_eq!(
+            exactly_max,
+            vec![true, true, true],
+            "gap of 1 with max=1 should be bridged"
+        );
+
+        // Gap of 2 (== max + 1) → NOT bridged.
+        let mut over_max = vec![true, false, false, true];
+        bridge_short_gaps(&mut over_max, 1);
+        assert_eq!(
+            over_max,
+            vec![true, false, false, true],
+            "gap of 2 with max=1 should NOT be bridged"
+        );
+    }
+
+    // ── Task #227 — native_audio pass 3 edge-case tests ────────────────
+
+    #[test]
+    fn parse_wav_with_max_chunk_size_does_not_panic() {
+        let dir = tempdir().unwrap();
+        let wav_path = dir.path().join("maxchunk.wav");
+
+        // Build a WAV where the data chunk has chunk_size = u32::MAX.
+        // The parser should clamp via .min(bytes.len()) and not panic or loop.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&100u32.to_le_bytes()); // file size (irrelevant)
+        bytes.extend_from_slice(b"WAVE");
+
+        // fmt chunk (16 bytes): PCM, mono, 16kHz, 16-bit
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+        bytes.extend_from_slice(&16000u32.to_le_bytes()); // sample rate
+        bytes.extend_from_slice(&32000u32.to_le_bytes()); // byte rate
+        bytes.extend_from_slice(&2u16.to_le_bytes()); // block align
+        bytes.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+
+        // data chunk with u32::MAX size but only 4 real bytes
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 4]); // 2 samples
+
+        std::fs::write(&wav_path, &bytes).unwrap();
+        // Should not panic — data is clamped to actual file length.
+        let result = analyze_wav(&wav_path, None);
+        assert!(result.is_ok(), "max chunk_size must not panic: {result:?}");
+    }
+
+    #[test]
+    fn odd_byte_data_chunk_trailing_byte_silently_dropped() {
+        let dir = tempdir().unwrap();
+        let wav_path = dir.path().join("odd_data.wav");
+
+        // 5 bytes of data → chunks_exact(2) produces 2 samples, drops 1 trailing byte.
+        let data_bytes: &[u8] = &[0x00, 0x40, 0x00, 0x40, 0xFF]; // 2 valid samples + 1 stray byte
+        let bytes = custom_wav(1, 1, 16000, 16, data_bytes);
+        std::fs::write(&wav_path, &bytes).unwrap();
+
+        let analysis = analyze_wav(&wav_path, None).expect("should parse without error");
+        // 2 samples at 16kHz → 0.000125 sec → 0 ms (rounds to 0), but duration_ms formula:
+        // (2.0 / 16000.0) * 1000 = 0.125 → rounds to 0.
+        // The key assertion: no panic, only 2 samples worth of data processed.
+        assert_eq!(
+            analysis.sample_rate_hz, 16000,
+            "sample rate should be parsed correctly"
+        );
+    }
+
+    #[test]
+    fn bridge_short_gaps_all_inactive_frames_unchanged() {
+        use super::bridge_short_gaps;
+
+        // All false → no mutation, no panic.
+        let mut all_inactive = vec![false, false, false, false, false];
+        let original = all_inactive.clone();
+        bridge_short_gaps(&mut all_inactive, 2);
+        assert_eq!(
+            all_inactive, original,
+            "all-inactive frames should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn active_regions_from_frames_min_region_zero_accepts_all_runs() {
+        use super::active_regions_from_frames;
+
+        // With min_region_frames=0, even single-frame active runs should be kept.
+        let rms = vec![0.1f32, 0.0, 0.2, 0.0, 0.3];
+        let active = vec![true, false, true, false, true];
+        let regions = active_regions_from_frames(&rms, &active, 20, 0);
+        assert_eq!(
+            regions.len(),
+            3,
+            "min_region_frames=0 should accept all 3 single-frame runs"
+        );
+        assert_eq!(regions[0].start_ms, 0);
+        assert_eq!(regions[0].end_ms, 20);
+        assert_eq!(regions[1].start_ms, 40);
+        assert_eq!(regions[1].end_ms, 60);
+        assert_eq!(regions[2].start_ms, 80);
+        assert_eq!(regions[2].end_ms, 100);
+    }
+
+    #[test]
+    fn compute_frame_rms_empty_samples_returns_empty() {
+        use super::compute_frame_rms;
+
+        let rms = compute_frame_rms(&[], 160);
+        assert!(
+            rms.is_empty(),
+            "empty samples should produce no frames, got {} frames",
+            rms.len()
+        );
+    }
 }

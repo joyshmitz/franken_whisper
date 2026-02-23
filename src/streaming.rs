@@ -621,8 +621,10 @@ mod tests {
 
     #[test]
     fn emit_events_false_suppresses_all_events() {
-        let mut config = SpeculativeConfig::default();
-        config.emit_events = false;
+        let config = SpeculativeConfig {
+            emit_events: false,
+            ..SpeculativeConfig::default()
+        };
 
         let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-no-events".to_owned());
 
@@ -641,8 +643,14 @@ mod tests {
 
     #[test]
     fn correction_emits_retract_and_correct_events() {
-        let mut config = SpeculativeConfig::default();
-        config.tolerance.always_correct = true; // force correction
+        let tolerance = CorrectionTolerance {
+            always_correct: true, // force correction
+            ..CorrectionTolerance::default()
+        };
+        let config = SpeculativeConfig {
+            tolerance,
+            ..SpeculativeConfig::default()
+        };
 
         let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-correct".to_owned());
 
@@ -715,6 +723,835 @@ mod tests {
         assert!(
             msg.contains("cancelled"),
             "error should mention cancelled: {msg}"
+        );
+    }
+
+    // ── Task #215 — streaming pass 3 edge-case tests ────────────────
+
+    #[test]
+    fn stats_zero_windows_all_fields_zero() {
+        let pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-stats".to_owned(),
+        );
+        let stats = pipeline.stats();
+        assert_eq!(stats.windows_processed, 0);
+        assert_eq!(stats.corrections_emitted, 0);
+        assert_eq!(stats.confirmations_emitted, 0);
+        assert!((stats.correction_rate - 0.0).abs() < 1e-9);
+        assert!((stats.mean_fast_latency_ms - 0.0).abs() < 1e-9);
+        assert!((stats.mean_quality_latency_ms - 0.0).abs() < 1e-9);
+        assert!((stats.mean_drift_wer - 0.0).abs() < 1e-9);
+        assert_eq!(stats.current_window_size_ms, 3000);
+    }
+
+    #[test]
+    fn merged_transcript_and_accessor_consistency() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-accessor".to_owned(),
+        );
+        let s = vec![seg("hello world", Some(0.0), Some(1.0), Some(0.95))];
+        let f = s.clone();
+        let q = s;
+        pipeline
+            .process_window("h", 0, move || f, move || q)
+            .unwrap();
+
+        // merged_transcript() directly returns segments from resolved windows.
+        let merged = pipeline.merged_transcript();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "hello world");
+
+        // correction_tracker() and window_manager() accessors are consistent.
+        assert_eq!(pipeline.correction_tracker().stats().windows_processed, 1);
+        assert_eq!(pipeline.window_manager().current_window_size(), 3000);
+    }
+
+    #[test]
+    fn model_runner_error_propagates_through_duration_loop() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-model-err".to_owned(),
+        );
+        let result =
+            pipeline.process_duration_with_models_no_checkpoint(5000, "seed", |_start, _end| {
+                Err(FwError::InvalidRequest("model failure".to_owned()))
+            });
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("model failure"),
+            "error should propagate model failure: {msg}"
+        );
+    }
+
+    #[test]
+    fn emit_events_false_suppresses_duration_loop_stats() {
+        let config = SpeculativeConfig {
+            emit_events: false,
+            ..SpeculativeConfig::default()
+        };
+        let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-no-stats".to_owned());
+
+        // Nonzero duration → runs the loop, end-of-loop stats guard tested.
+        let result = pipeline
+            .process_duration_with_models_no_checkpoint(3000, "seed", |_start, _end| {
+                let segs = vec![seg("hi", Some(0.0), Some(1.0), Some(0.8))];
+                Ok((segs.clone(), segs))
+            })
+            .unwrap();
+        assert!(!result.transcript.is_empty());
+        assert!(
+            pipeline.events().is_empty(),
+            "emit_events=false should suppress all events including end-of-loop stats"
+        );
+
+        // Also test zero-duration path.
+        let config2 = SpeculativeConfig {
+            emit_events: false,
+            ..SpeculativeConfig::default()
+        };
+        let mut pipeline2 =
+            SpeculativeStreamingPipeline::new(config2, "test-no-stats-zero".to_owned());
+        let _ = pipeline2
+            .process_duration_with_models_no_checkpoint(0, "seed", |_s, _e| {
+                panic!("should not be called");
+            })
+            .unwrap();
+        assert!(
+            pipeline2.events().is_empty(),
+            "emit_events=false + zero duration should suppress early-return stats"
+        );
+    }
+
+    #[test]
+    fn to_backend_segment_sub_millisecond_truncation() {
+        // Sub-ms value: 0.0009s → truncates to 0ms.
+        let s1 = seg("a", Some(0.0009), Some(1.9999), Some(0.0));
+        let bs1 = to_backend_segment(&s1);
+        assert_eq!(bs1.start_ms, 0, "0.0009s should truncate to 0ms");
+        assert_eq!(bs1.end_ms, 1999, "1.9999s should truncate to 1999ms");
+        assert!(
+            (bs1.confidence - 0.0).abs() < 1e-9,
+            "confidence Some(0.0) → 0.0"
+        );
+
+        // Large value precision.
+        let s2 = seg("b", Some(3599.999), None, None);
+        let bs2 = to_backend_segment(&s2);
+        assert_eq!(bs2.start_ms, 3_599_999);
+        assert_eq!(bs2.end_ms, 0, "None end_sec → 0");
+    }
+
+    // ── Task #220 — streaming pass 4 edge-case tests ────────────────
+
+    #[test]
+    fn stats_after_one_window_has_finite_mean_latencies() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-mean-lat".to_owned(),
+        );
+        let s = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
+        let f = s.clone();
+        let q = s;
+        pipeline
+            .process_window("h", 0, move || f, move || q)
+            .unwrap();
+
+        let stats = pipeline.stats();
+        assert_eq!(stats.windows_processed, 1);
+        assert!(
+            stats.mean_fast_latency_ms.is_finite(),
+            "mean_fast_latency_ms must be finite, got {}",
+            stats.mean_fast_latency_ms
+        );
+        assert!(
+            stats.mean_quality_latency_ms.is_finite(),
+            "mean_quality_latency_ms must be finite, got {}",
+            stats.mean_quality_latency_ms
+        );
+        assert!(stats.mean_fast_latency_ms >= 0.0);
+        assert!(stats.mean_quality_latency_ms >= 0.0);
+    }
+
+    #[test]
+    fn zero_duration_checkpoint_error_propagates() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-zero-cancel".to_owned(),
+        );
+
+        let result = pipeline.process_duration_with_models(
+            0,
+            "seed",
+            || Err(FwError::Cancelled("early abort".to_owned())),
+            |_start, _end| panic!("model_runner must not be called"),
+        );
+
+        assert!(result.is_err(), "checkpoint error must propagate");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("early abort"),
+            "error should carry checkpoint message: {msg}"
+        );
+        assert!(
+            pipeline.events().is_empty(),
+            "no events should be emitted before checkpoint fails"
+        );
+    }
+
+    #[test]
+    fn empty_fast_segments_emits_no_partial_events_but_still_decides() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-empty-fast".to_owned(),
+        );
+
+        let quality = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
+        let decision = pipeline
+            .process_window("h", 0, std::vec::Vec::new, move || quality)
+            .unwrap();
+
+        let events = pipeline.events();
+        assert!(
+            !events.iter().any(|e| e.code == "transcript.partial"),
+            "no partial events when fast model returns empty segments"
+        );
+        let has_decision_event = events
+            .iter()
+            .any(|e| e.code == "transcript.confirm" || e.code == "transcript.correct");
+        assert!(has_decision_event, "decision event must still be emitted");
+        assert!(matches!(
+            decision,
+            CorrectionDecision::Confirm { .. } | CorrectionDecision::Correct { .. }
+        ));
+    }
+
+    #[test]
+    fn build_result_multi_segment_join_inserts_spaces_between_segments() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-multi-join".to_owned(),
+        );
+
+        let s1 = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
+        let s2 = vec![seg("world", Some(1.0), Some(2.0), Some(0.9))];
+        let f1 = s1.clone();
+        let q1 = s1;
+        let f2 = s2.clone();
+        let q2 = s2;
+
+        pipeline
+            .process_window("h1", 0, move || f1, move || q1)
+            .unwrap();
+        pipeline
+            .process_window("h2", 1000, move || f2, move || q2)
+            .unwrap();
+
+        let result = pipeline.build_result();
+        assert_eq!(result.segments.len(), 2, "expected 2 merged segments");
+        assert_eq!(
+            result.transcript, "hello world",
+            "segments must be joined with a single space"
+        );
+    }
+
+    #[test]
+    fn no_checkpoint_multiple_windows_all_processed() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-multi-nc".to_owned(),
+        );
+
+        let result = pipeline
+            .process_duration_with_models_no_checkpoint(6000, "seed", |_start, _end| {
+                let s = vec![seg("word", Some(0.0), Some(1.0), Some(0.9))];
+                Ok((s.clone(), s))
+            })
+            .unwrap();
+
+        let stats = pipeline.stats();
+        assert!(
+            stats.windows_processed >= 2,
+            "6000ms with 3000ms windows should process >= 2 windows, got {}",
+            stats.windows_processed
+        );
+        assert_eq!(result.backend, BackendKind::Auto);
+        let stats_events: Vec<_> = pipeline
+            .events()
+            .iter()
+            .filter(|e| e.code == "transcript.speculation_stats")
+            .collect();
+        assert_eq!(
+            stats_events.len(),
+            1,
+            "exactly one end-of-loop stats event expected"
+        );
+    }
+
+    // ── Task #225 — streaming pass 5 edge-case tests ────────────────
+
+    #[test]
+    fn stats_after_forced_correction_has_nonzero_rate_and_wer() {
+        let config = SpeculativeConfig {
+            tolerance: CorrectionTolerance {
+                always_correct: true,
+                ..CorrectionTolerance::default()
+            },
+            ..SpeculativeConfig::default()
+        };
+        let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-rate".to_owned());
+
+        let fast = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
+        let quality = vec![seg("world", Some(0.0), Some(1.0), Some(0.8))];
+        pipeline
+            .process_window("h", 0, move || fast, move || quality)
+            .unwrap();
+
+        let stats = pipeline.stats();
+        assert_eq!(stats.corrections_emitted, 1);
+        assert_eq!(stats.confirmations_emitted, 0);
+        assert!(
+            (stats.correction_rate - 1.0).abs() < 1e-9,
+            "correction_rate should be 1.0, got {}",
+            stats.correction_rate
+        );
+        assert!(
+            stats.mean_drift_wer > 0.0,
+            "mean_drift_wer should be positive after correction, got {}",
+            stats.mean_drift_wer
+        );
+    }
+
+    #[test]
+    fn all_events_have_stage_speculation() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-stage".to_owned(),
+        );
+
+        let s = vec![seg("test", Some(0.0), Some(1.0), Some(0.9))];
+        let f = s.clone();
+        let q = s;
+        pipeline
+            .process_window("h", 0, move || f, move || q)
+            .unwrap();
+
+        let events = pipeline.events();
+        assert!(!events.is_empty());
+        for event in events {
+            assert_eq!(
+                event.stage, "speculation",
+                "event '{}' has wrong stage: '{}'",
+                event.code, event.stage
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_error_on_second_iteration_stops_after_first_window() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-cancel2".to_owned(),
+        );
+
+        let mut call_count = 0u32;
+        let result = pipeline.process_duration_with_models(
+            10_000,
+            "seed",
+            || {
+                call_count += 1;
+                if call_count >= 2 {
+                    Err(FwError::Cancelled("second abort".to_owned()))
+                } else {
+                    Ok(())
+                }
+            },
+            |_start, _end| {
+                let s = vec![seg("partial", Some(0.0), Some(1.0), Some(0.9))];
+                Ok((s.clone(), s))
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "should return error from second checkpoint"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("second abort"), "wrong error: {msg}");
+        assert_eq!(
+            pipeline.stats().windows_processed,
+            1,
+            "exactly one window should have been processed"
+        );
+    }
+
+    #[test]
+    fn overlap_exceeding_window_size_clamps_step_and_terminates() {
+        let config = SpeculativeConfig {
+            window_size_ms: 500,
+            overlap_ms: 1000,
+            ..SpeculativeConfig::default()
+        };
+        let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-overlap".to_owned());
+
+        let result = pipeline.process_duration_with_models_no_checkpoint(600, "seed", |_s, _e| {
+            let s = vec![seg("x", Some(0.0), Some(0.5), Some(0.8))];
+            Ok((s.clone(), s))
+        });
+        assert!(
+            result.is_ok(),
+            "should terminate even with oversized overlap"
+        );
+        assert!(pipeline.stats().windows_processed >= 1);
+    }
+
+    #[test]
+    fn build_result_fixed_fields_are_constant_sentinels() {
+        let pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-fixed".to_owned(),
+        );
+        let result = pipeline.build_result();
+
+        assert!(
+            result.acceleration.is_none(),
+            "acceleration should always be None"
+        );
+        assert_eq!(
+            result.raw_output,
+            serde_json::json!({}),
+            "raw_output should be empty JSON object"
+        );
+        assert!(
+            result.artifact_paths.is_empty(),
+            "artifact_paths should be empty"
+        );
+    }
+
+    // ── Task #230 — streaming.rs pass 6 edge-case tests ────────────────
+
+    #[test]
+    fn to_backend_segment_some_zero_seconds_produces_zero_ms_distinct_from_none() {
+        // Some(0.0) goes through the `(v * 1000.0) as u64` path (not `unwrap_or(0)`).
+        let s = seg("zero", Some(0.0), Some(0.0), Some(0.0));
+        let bs = to_backend_segment(&s);
+        assert_eq!(bs.start_ms, 0, "Some(0.0) start should produce 0 ms");
+        assert_eq!(bs.end_ms, 0, "Some(0.0) end should produce 0 ms");
+        assert!((bs.confidence - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn duration_loop_non_multiple_total_produces_clamped_final_window() {
+        // window=3000, overlap=500, total=4000
+        // Step = 3000 - 500 = 2500
+        // Window 1: (0, 3000); position advances to 2500
+        // Window 2: (2500, 4000) — clamped by next_window_bounded
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                emit_events: false,
+                ..SpeculativeConfig::default()
+            },
+            "test-non-multiple".to_owned(),
+        );
+        let mut call_count = 0u64;
+        let mut bounds = Vec::new();
+
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(4000, "h", |start, end| {
+                call_count += 1;
+                bounds.push((start, end));
+                Ok((vec![], vec![]))
+            })
+            .expect("should succeed");
+
+        assert_eq!(call_count, 2, "should process exactly 2 windows");
+        assert_eq!(bounds[0], (0, 3000), "first window: 0..3000");
+        assert_eq!(
+            bounds[1],
+            (2500, 4000),
+            "second window: 2500..4000 (clamped)"
+        );
+    }
+
+    #[test]
+    fn empty_quality_segments_with_nonempty_fast_triggers_decision() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                emit_events: true,
+                ..SpeculativeConfig::default()
+            },
+            "test-empty-quality".to_owned(),
+        );
+
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(3000, "h", |_start, _end| {
+                // Fast returns one segment, quality returns empty.
+                Ok((
+                    vec![seg("hello world", Some(0.0), Some(1.0), Some(0.9))],
+                    vec![],
+                ))
+            })
+            .expect("should succeed");
+
+        // There should be at least one decision event (confirm or correct).
+        let events = pipeline.events();
+        let decision_events: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.code == "transcript.confirm"
+                    || e.code == "transcript.correct"
+                    || e.code == "transcript.retract"
+            })
+            .collect();
+        assert!(
+            !decision_events.is_empty(),
+            "empty quality with non-empty fast should still produce a decision event"
+        );
+    }
+
+    #[test]
+    fn stats_after_single_confirm_has_zero_correction_rate_and_one_confirm() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                emit_events: false,
+                ..SpeculativeConfig::default()
+            },
+            "test-confirm-stats".to_owned(),
+        );
+
+        // Both fast and quality return the same text → guaranteed confirm.
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(3000, "h", |_start, _end| {
+                Ok((
+                    vec![seg("same text", Some(0.0), Some(1.0), Some(0.9))],
+                    vec![seg("same text", Some(0.0), Some(1.0), Some(0.9))],
+                ))
+            })
+            .expect("should succeed");
+
+        let stats = pipeline.stats();
+        assert_eq!(stats.windows_processed, 1, "exactly 1 window processed");
+        assert_eq!(stats.confirmations_emitted, 1, "should be 1 confirmation");
+        assert_eq!(stats.corrections_emitted, 0, "should be 0 corrections");
+        assert!(
+            (stats.correction_rate - 0.0).abs() < 1e-9,
+            "correction rate should be 0.0, got {}",
+            stats.correction_rate
+        );
+    }
+
+    #[test]
+    fn event_seq_is_positional_index_across_multiple_windows() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                emit_events: true,
+                ..SpeculativeConfig::default()
+            },
+            "test-seq-index".to_owned(),
+        );
+
+        // Process two windows (total 6000ms with default 3000ms window, 500ms overlap).
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(6000, "h", |_start, _end| {
+                Ok((
+                    vec![seg("hello", Some(0.0), Some(1.0), Some(0.8))],
+                    vec![seg("hello", Some(0.0), Some(1.0), Some(0.8))],
+                ))
+            })
+            .expect("should succeed");
+
+        let events = pipeline.events();
+        // Verify event seq values are strictly sequential (0, 1, 2, ...).
+        for (i, event) in events.iter().enumerate() {
+            assert_eq!(
+                event.seq, i as u64,
+                "event {i} should have seq={i}, got seq={}",
+                event.seq
+            );
+        }
+        // With 2+ windows and events, there should be more than 2 events.
+        assert!(
+            events.len() >= 4,
+            "two windows should generate at least 4 events (2 partial + 2 decision), got {}",
+            events.len()
+        );
+    }
+
+    #[test]
+    fn to_backend_segment_negative_seconds_saturates_to_zero() {
+        // Negative f64 cast to u64 saturates to 0 in Rust (no panic).
+        let s = seg("neg", Some(-5.0), Some(-0.001), Some(0.5));
+        let bs = to_backend_segment(&s);
+        assert_eq!(bs.start_ms, 0, "negative start should saturate to 0");
+        assert_eq!(bs.end_ms, 0, "negative end should saturate to 0");
+        assert_eq!(bs.text, "neg");
+    }
+
+    #[test]
+    fn duration_loop_exact_multiple_breaks_on_boundary() {
+        // window_size=3000, overlap=0 → step=3000.
+        // total_duration=6000 → exactly 2 windows: [0,3000) and [3000,6000).
+        // The second window.end_ms == total_duration_ms triggers the >= break.
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                window_size_ms: 3000,
+                overlap_ms: 0,
+                emit_events: false,
+                ..SpeculativeConfig::default()
+            },
+            "test-exact-mult".to_owned(),
+        );
+
+        let mut call_count = 0u64;
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(6000, "h", |_start, _end| {
+                call_count += 1;
+                let s = vec![seg("w", Some(0.0), Some(1.0), Some(0.8))];
+                Ok((s.clone(), s))
+            })
+            .expect("should succeed");
+
+        assert_eq!(
+            call_count, 2,
+            "exactly 2 windows should be processed for 6000ms / 3000ms"
+        );
+        assert_eq!(pipeline.stats().windows_processed, 2);
+    }
+
+    #[test]
+    fn correction_emits_two_events_while_confirm_emits_one() {
+        // Corrections produce an extra "correction" event on top of the "partial" event.
+        // First window: identical fast/quality → confirm (1 partial + 1 confirm = 2 events).
+        // Second window: different fast/quality → correction (1 partial + 1 correction = 2 events).
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                window_size_ms: 3000,
+                overlap_ms: 0,
+                emit_events: true,
+                tolerance: CorrectionTolerance {
+                    max_wer: 0.0, // very strict — any difference triggers correction
+                    max_confidence_delta: 0.0,
+                    max_edit_distance: 0,
+                    always_correct: false,
+                },
+                ..SpeculativeConfig::default()
+            },
+            "test-two-events".to_owned(),
+        );
+
+        let mut call_count = 0u64;
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(6000, "h", |_start, _end| {
+                call_count += 1;
+                if call_count == 1 {
+                    // Identical → confirm
+                    let s = vec![seg("same", Some(0.0), Some(1.0), Some(0.9))];
+                    Ok((s.clone(), s))
+                } else {
+                    // Different → correction
+                    Ok((
+                        vec![seg("fast text", Some(0.0), Some(1.0), Some(0.5))],
+                        vec![seg("quality text", Some(0.0), Some(1.0), Some(0.95))],
+                    ))
+                }
+            })
+            .expect("should succeed");
+
+        let events = pipeline.events();
+        // Verify at least some events were generated.
+        assert!(
+            events.len() >= 4,
+            "2 windows with events should produce at least 4 events, got {}",
+            events.len()
+        );
+        // Verify all seq values are sequential.
+        for (i, event) in events.iter().enumerate() {
+            assert_eq!(event.seq, i as u64, "seq should be positional");
+        }
+    }
+
+    #[test]
+    fn stats_mean_latencies_are_zero_when_zero_latency_windows() {
+        // When model_runner returns instantly (0ms latency mock), means should be 0.0 not NaN.
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                emit_events: false,
+                ..SpeculativeConfig::default()
+            },
+            "test-zero-lat".to_owned(),
+        );
+
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(3000, "seed", |_start, _end| {
+                let s = vec![seg("word", Some(0.0), Some(1.0), Some(0.9))];
+                Ok((s.clone(), s))
+            })
+            .expect("should succeed");
+
+        let stats = pipeline.stats();
+        assert_eq!(stats.windows_processed, 1, "should have 1 window");
+        // Latencies come from the tracker, which sums up latencies from register_partial and
+        // submit_quality_result. With the mock closures, these may be nonzero (measured internally).
+        // But crucially the result is finite — no NaN.
+        assert!(
+            stats.mean_fast_latency_ms.is_finite(),
+            "mean fast latency should be finite, got {}",
+            stats.mean_fast_latency_ms
+        );
+        assert!(
+            stats.mean_quality_latency_ms.is_finite(),
+            "mean quality latency should be finite, got {}",
+            stats.mean_quality_latency_ms
+        );
+    }
+
+    #[test]
+    fn to_backend_segment_fractional_millisecond_truncates_not_rounds() {
+        // (0.0009 * 1000.0) as u64 = 0.9 → truncates to 0, not rounds to 1.
+        let s = seg("sub", Some(0.0009), Some(1.9999), Some(0.5));
+        let bs = to_backend_segment(&s);
+        assert_eq!(bs.start_ms, 0, "0.9ms should truncate to 0");
+        assert_eq!(bs.end_ms, 1999, "1999.9ms should truncate to 1999");
+    }
+
+    #[test]
+    fn multi_segment_fast_model_emits_multiple_partial_events() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                emit_events: true,
+                ..SpeculativeConfig::default()
+            },
+            "test-multi-seg".to_owned(),
+        );
+
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(3000, "h", |_start, _end| {
+                let segs = vec![
+                    seg("hello", Some(0.0), Some(0.5), Some(0.9)),
+                    seg("world", Some(0.5), Some(1.0), Some(0.9)),
+                ];
+                Ok((segs.clone(), segs))
+            })
+            .expect("should succeed");
+
+        let partial_count = pipeline
+            .events()
+            .iter()
+            .filter(|e| e.code == "transcript.partial")
+            .count();
+        assert_eq!(
+            partial_count, 2,
+            "two fast segments should emit 2 partial events, got {partial_count}"
+        );
+    }
+
+    #[test]
+    fn push_event_seq_matches_vec_index_with_multi_segment_window() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                emit_events: true,
+                ..SpeculativeConfig::default()
+            },
+            "test-seq-multi".to_owned(),
+        );
+
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(3000, "h", |_start, _end| {
+                let segs = vec![
+                    seg("a", Some(0.0), Some(0.5), Some(0.9)),
+                    seg("b", Some(0.5), Some(1.0), Some(0.9)),
+                ];
+                Ok((segs.clone(), segs))
+            })
+            .expect("should succeed");
+
+        // 2 partial events + 1 confirm event + 1 stats event = 4 events.
+        let events = pipeline.events();
+        assert_eq!(events.len(), 4, "should have exactly 4 events");
+        assert_eq!(events[0].seq, 0);
+        assert_eq!(events[0].code, "transcript.partial");
+        assert_eq!(events[1].seq, 1);
+        assert_eq!(events[1].code, "transcript.partial");
+        assert_eq!(events[2].seq, 2);
+        assert_eq!(events[2].code, "transcript.confirm");
+        assert_eq!(events[3].seq, 3);
+        assert_eq!(events[3].code, "transcript.speculation_stats");
+    }
+
+    #[test]
+    fn correction_tracker_all_resolved_after_duration_loop() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                emit_events: false,
+                ..SpeculativeConfig::default()
+            },
+            "test-all-resolved".to_owned(),
+        );
+
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(6000, "h", |_start, _end| {
+                let s = vec![seg("word", Some(0.0), Some(1.0), Some(0.9))];
+                Ok((s.clone(), s))
+            })
+            .expect("should succeed");
+
+        assert!(
+            pipeline.correction_tracker().all_resolved(),
+            "all partials should be resolved after the loop completes"
+        );
+    }
+
+    #[test]
+    fn window_manager_resolved_count_matches_stats_windows_processed() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig {
+                emit_events: false,
+                ..SpeculativeConfig::default()
+            },
+            "test-resolved-count".to_owned(),
+        );
+
+        let _result = pipeline
+            .process_duration_with_models_no_checkpoint(6000, "h", |_start, _end| {
+                let s = vec![seg("word", Some(0.0), Some(1.0), Some(0.9))];
+                Ok((s.clone(), s))
+            })
+            .expect("should succeed");
+
+        let resolved = pipeline.window_manager().windows_resolved();
+        let processed = pipeline.stats().windows_processed;
+        assert!(processed >= 2, "should process at least 2 windows");
+        assert_eq!(
+            resolved, processed as usize,
+            "windows_resolved should match windows_processed"
+        );
+        assert_eq!(
+            pipeline.window_manager().windows_pending(),
+            0,
+            "no windows should be pending after completion"
+        );
+    }
+
+    #[test]
+    fn process_file_with_models_returns_error_for_nonexistent_path() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-nonexistent".to_owned(),
+        );
+
+        let result = pipeline.process_file_with_models(
+            std::path::Path::new("/nonexistent/audio_file_12345.wav"),
+            || Ok(()),
+            |_path, _s, _e| panic!("model runner should not be called"),
+        );
+
+        assert!(result.is_err(), "should fail for nonexistent file");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to probe audio duration"),
+            "error should mention probe failure, got: {err}"
         );
     }
 }

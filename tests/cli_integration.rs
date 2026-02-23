@@ -159,6 +159,29 @@ fn generate_silent_wav(path: &std::path::Path) {
 }
 
 #[cfg(unix)]
+fn generate_voiced_wav(path: &std::path::Path) {
+    let status = ProcessCommand::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=16000:duration=0.3",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+        ])
+        .arg(path)
+        .status()
+        .expect("spawn ffmpeg");
+    assert!(status.success(), "ffmpeg should synthesize voiced wav");
+}
+
+#[cfg(unix)]
 fn run_transcribe_json_with_stub(
     args: &[&str],
     stdin_payload: Option<&[u8]>,
@@ -1727,7 +1750,7 @@ fn transcribe_file_input_crosses_ingest_normalize_backend_with_stub_whisper_cpp(
     let state_root = dir.path().join("state");
     let stub_bin = write_whisper_cpp_stub_binary(dir.path());
     let input_wav = dir.path().join("file_input.wav");
-    generate_silent_wav(&input_wav);
+    generate_voiced_wav(&input_wav);
 
     let report = run_transcribe_json_with_stub(
         &[
@@ -1759,7 +1782,7 @@ fn transcribe_stdin_input_crosses_ingest_normalize_backend_with_stub_whisper_cpp
     let state_root = dir.path().join("state");
     let stub_bin = write_whisper_cpp_stub_binary(dir.path());
     let input_wav = dir.path().join("stdin_input.wav");
-    generate_silent_wav(&input_wav);
+    generate_voiced_wav(&input_wav);
     let wav_bytes = std::fs::read(&input_wav).expect("wav bytes");
 
     let report = run_transcribe_json_with_stub(
@@ -1798,7 +1821,7 @@ fn transcribe_mic_line_in_input_crosses_ingest_normalize_backend_with_stub_whisp
             "--mic-ffmpeg-format",
             "lavfi",
             "--mic-ffmpeg-source",
-            "anullsrc=r=16000:cl=mono",
+            "sine=frequency=440:sample_rate=16000:duration=0.3",
             "--backend",
             "whisper-cpp",
             "--no-persist",
@@ -1825,7 +1848,7 @@ fn transcribe_happy_path_stage_sequence_contract_is_stable() {
     let db_path = dir.path().join("happy_path.sqlite3");
     let stub_bin = write_whisper_cpp_stub_binary(dir.path());
     let input_wav = dir.path().join("happy_path.wav");
-    generate_silent_wav(&input_wav);
+    generate_voiced_wav(&input_wav);
 
     let report = run_transcribe_json_with_stub(
         &[
@@ -1893,7 +1916,7 @@ fn transcribe_backend_stage_payload_exposes_execution_metadata() {
     let state_root = dir.path().join("state");
     let stub_bin = write_whisper_cpp_stub_binary(dir.path());
     let input_wav = dir.path().join("backend_meta.wav");
-    generate_silent_wav(&input_wav);
+    generate_voiced_wav(&input_wav);
 
     let report = run_transcribe_json_with_stub(
         &[
@@ -1962,7 +1985,7 @@ fn transcribe_acceleration_context_telemetry_round_trips_in_run_artifacts() {
     let db_path = dir.path().join("telemetry.sqlite3");
     let stub_bin = write_whisper_cpp_stub_binary(dir.path());
     let input_wav = dir.path().join("telemetry.wav");
-    generate_silent_wav(&input_wav);
+    generate_voiced_wav(&input_wav);
 
     let report = run_transcribe_json_with_stub(
         &[
@@ -2055,7 +2078,7 @@ fn transcribe_backend_routing_stage_event_has_required_decision_contract_fields(
     let state_root = dir.path().join("state");
     let stub_bin = write_whisper_cpp_stub_binary(dir.path());
     let input_wav = dir.path().join("routing.wav");
-    generate_silent_wav(&input_wav);
+    generate_voiced_wav(&input_wav);
 
     let report = run_transcribe_json_with_stub(
         &[

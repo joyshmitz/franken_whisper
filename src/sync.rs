@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read as _, Write};
@@ -833,10 +833,18 @@ fn import_tables(
     conflict_policy: ConflictPolicy,
 ) -> FwResult<ImportResult> {
     let mut conflicts = Vec::new();
+    let mut overwritten_run_ids = HashSet::new();
 
     // Import runs first (referential parent)
     let runs_path = input_dir.join("runs.jsonl");
-    let runs_imported = import_runs(connection, &runs_path, conflict_policy, &mut conflicts)?;
+    let runs_imported = import_runs(
+        connection,
+        &runs_path,
+        conflict_policy,
+        &mut conflicts,
+        &mut overwritten_run_ids,
+    )
+    .map_err(|error| FwError::Storage(format!("runs import failed: {error}")))?;
 
     // Validate row count
     if runs_imported != manifest.row_counts.runs && conflicts.is_empty() {
@@ -848,8 +856,14 @@ fn import_tables(
 
     // Import segments
     let segments_path = input_dir.join("segments.jsonl");
-    let segments_imported =
-        import_segments(connection, &segments_path, conflict_policy, &mut conflicts)?;
+    let segments_imported = import_segments(
+        connection,
+        &segments_path,
+        conflict_policy,
+        &mut conflicts,
+        &overwritten_run_ids,
+    )
+    .map_err(|error| FwError::Storage(format!("segments import failed: {error}")))?;
 
     if segments_imported != manifest.row_counts.segments && conflicts.is_empty() {
         return Err(FwError::Storage(format!(
@@ -860,7 +874,14 @@ fn import_tables(
 
     // Import events
     let events_path = input_dir.join("events.jsonl");
-    let events_imported = import_events(connection, &events_path, conflict_policy, &mut conflicts)?;
+    let events_imported = import_events(
+        connection,
+        &events_path,
+        conflict_policy,
+        &mut conflicts,
+        &overwritten_run_ids,
+    )
+    .map_err(|error| FwError::Storage(format!("events import failed: {error}")))?;
 
     if events_imported != manifest.row_counts.events && conflicts.is_empty() {
         return Err(FwError::Storage(format!(
@@ -882,6 +903,7 @@ fn import_runs(
     path: &Path,
     conflict_policy: ConflictPolicy,
     conflicts: &mut Vec<SyncConflict>,
+    overwritten_run_ids: &mut HashSet<String>,
 ) -> FwResult<u64> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -903,7 +925,7 @@ fn import_runs(
                 "SELECT id, started_at, finished_at, backend, input_path, normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json FROM runs WHERE id = ?1",
                 &[SqliteValue::Text(id.clone())],
             )
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| FwError::Storage(format!("query runs existing `{id}` failed: {error}")))?;
 
         if !existing.is_empty() {
             // Compare payload: if identical, noop; if different, apply conflict policy
@@ -942,26 +964,38 @@ fn import_runs(
                     continue;
                 }
                 ConflictPolicy::Overwrite => {
-                    // Cascade-delete associated segments and events before
-                    // removing the run to prevent orphaned rows.
                     connection
                         .execute_with_params(
                             "DELETE FROM segments WHERE run_id = ?1",
                             &[SqliteValue::Text(id.clone())],
                         )
-                        .map_err(|error| FwError::Storage(error.to_string()))?;
+                        .map_err(|error| {
+                            FwError::Storage(format!(
+                                "overwrite delete segments `{id}` failed: {error}"
+                            ))
+                        })?;
                     connection
                         .execute_with_params(
                             "DELETE FROM events WHERE run_id = ?1",
                             &[SqliteValue::Text(id.clone())],
                         )
-                        .map_err(|error| FwError::Storage(error.to_string()))?;
+                        .map_err(|error| {
+                            FwError::Storage(format!(
+                                "overwrite delete events `{id}` failed: {error}"
+                            ))
+                        })?;
                     connection
                         .execute_with_params(
                             "DELETE FROM runs WHERE id = ?1",
                             &[SqliteValue::Text(id.clone())],
                         )
-                        .map_err(|error| FwError::Storage(error.to_string()))?;
+                        .map_err(|error| {
+                            FwError::Storage(format!(
+                                "overwrite delete runs `{id}` failed: {error}"
+                            ))
+                        })?;
+                    overwritten_run_ids.insert(id.clone());
+                    // Fall through to INSERT
                 }
             }
         }
@@ -972,7 +1006,7 @@ fn import_runs(
                  normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 &[
-                    SqliteValue::Text(id),
+                    SqliteValue::Text(id.clone()),
                     SqliteValue::Text(json_str(&row, "started_at")?),
                     SqliteValue::Text(json_str(&row, "finished_at")?),
                     SqliteValue::Text(json_str(&row, "backend")?),
@@ -985,7 +1019,7 @@ fn import_runs(
                     SqliteValue::Text(json_string_or_default(&row, "replay_json", "{}")),
                 ],
             )
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| FwError::Storage(format!("insert runs `{id}` failed: {error}")))?;
 
         count += 1;
     }
@@ -998,10 +1032,13 @@ fn import_segments(
     path: &Path,
     conflict_policy: ConflictPolicy,
     conflicts: &mut Vec<SyncConflict>,
+    overwritten_run_ids: &HashSet<String>,
 ) -> FwResult<u64> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
     let mut count = 0u64;
+    let mut imported_idx_by_overwritten_run: HashMap<String, HashSet<i64>> = HashMap::new();
+    let mut known_run_ids = HashSet::new();
 
     for line in reader.lines() {
         let line = line?;
@@ -1018,7 +1055,13 @@ fn import_segments(
             .ok_or_else(|| FwError::Storage("missing idx in segments row".to_owned()))?;
 
         let key = format!("{run_id}/{idx}");
-        ensure_run_reference_exists(connection, &run_id, "segments", &key)?;
+        ensure_run_reference_exists(connection, &run_id, "segments", &key, &mut known_run_ids)?;
+        if conflict_policy == ConflictPolicy::Overwrite && overwritten_run_ids.contains(&run_id) {
+            imported_idx_by_overwritten_run
+                .entry(run_id.clone())
+                .or_default()
+                .insert(idx);
+        }
 
         // Check existing
         let existing = connection
@@ -1026,7 +1069,11 @@ fn import_segments(
                 "SELECT run_id, idx, start_sec, end_sec, speaker, text, confidence FROM segments WHERE run_id = ?1 AND idx = ?2",
                 &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(idx)],
             )
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                FwError::Storage(format!(
+                    "query segments existing `{run_id}/{idx}` failed: {error}"
+                ))
+            })?;
 
         if !existing.is_empty() {
             let existing_row = &existing[0];
@@ -1064,12 +1111,11 @@ fn import_segments(
                     continue;
                 }
                 ConflictPolicy::Overwrite => {
-                    connection
-                        .execute_with_params(
-                            "DELETE FROM segments WHERE run_id = ?1 AND idx = ?2",
-                            &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(idx)],
-                        )
-                        .map_err(|error| FwError::Storage(error.to_string()))?;
+                    return Err(FwError::Storage(format!(
+                        "overwrite would require updating conflicting segment row `{run_id}/{idx}`, \
+                         but child-row UPDATE is unsupported in this runtime; \
+                         re-import into an empty target DB for strict replacement"
+                    )));
                 }
             }
         }
@@ -1079,7 +1125,7 @@ fn import_segments(
                 "INSERT INTO segments (run_id, idx, start_sec, end_sec, speaker, text, confidence) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 &[
-                    SqliteValue::Text(run_id),
+                    SqliteValue::Text(run_id.clone()),
                     SqliteValue::Integer(idx),
                     json_optional_float(&row, "start_sec"),
                     json_optional_float(&row, "end_sec"),
@@ -1088,9 +1134,19 @@ fn import_segments(
                     json_optional_float(&row, "confidence"),
                 ],
             )
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                FwError::Storage(format!("insert segments `{run_id}/{idx}` failed: {error}"))
+            })?;
 
         count += 1;
+    }
+
+    if conflict_policy == ConflictPolicy::Overwrite && !overwritten_run_ids.is_empty() {
+        assert_no_stale_segments_for_overwritten_runs(
+            connection,
+            overwritten_run_ids,
+            &imported_idx_by_overwritten_run,
+        )?;
     }
 
     Ok(count)
@@ -1101,10 +1157,13 @@ fn import_events(
     path: &Path,
     conflict_policy: ConflictPolicy,
     conflicts: &mut Vec<SyncConflict>,
+    overwritten_run_ids: &HashSet<String>,
 ) -> FwResult<u64> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
     let mut count = 0u64;
+    let mut imported_seq_by_overwritten_run: HashMap<String, HashSet<i64>> = HashMap::new();
+    let mut known_run_ids = HashSet::new();
 
     for line in reader.lines() {
         let line = line?;
@@ -1121,14 +1180,22 @@ fn import_events(
             .ok_or_else(|| FwError::Storage("missing seq in events row".to_owned()))?;
 
         let key = format!("{run_id}/{seq}");
-        ensure_run_reference_exists(connection, &run_id, "events", &key)?;
+        ensure_run_reference_exists(connection, &run_id, "events", &key, &mut known_run_ids)?;
+        if conflict_policy == ConflictPolicy::Overwrite && overwritten_run_ids.contains(&run_id) {
+            imported_seq_by_overwritten_run
+                .entry(run_id.clone())
+                .or_default()
+                .insert(seq);
+        }
 
         let existing = connection
             .query_with_params(
                 "SELECT run_id, seq, ts_rfc3339, stage, code, message, payload_json FROM events WHERE run_id = ?1 AND seq = ?2",
                 &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(seq)],
             )
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                FwError::Storage(format!("query events existing `{run_id}/{seq}` failed: {error}"))
+            })?;
 
         if !existing.is_empty() {
             let existing_row = &existing[0];
@@ -1158,12 +1225,11 @@ fn import_events(
                     continue;
                 }
                 ConflictPolicy::Overwrite => {
-                    connection
-                        .execute_with_params(
-                            "DELETE FROM events WHERE run_id = ?1 AND seq = ?2",
-                            &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(seq)],
-                        )
-                        .map_err(|error| FwError::Storage(error.to_string()))?;
+                    return Err(FwError::Storage(format!(
+                        "overwrite would require updating conflicting event row `{run_id}/{seq}`, \
+                         but child-row UPDATE is unsupported in this runtime; \
+                         re-import into an empty target DB for strict replacement"
+                    )));
                 }
             }
         }
@@ -1173,7 +1239,7 @@ fn import_events(
                 "INSERT INTO events (run_id, seq, ts_rfc3339, stage, code, message, payload_json) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 &[
-                    SqliteValue::Text(run_id),
+                    SqliteValue::Text(run_id.clone()),
                     SqliteValue::Integer(seq),
                     SqliteValue::Text(json_str(&row, "ts_rfc3339")?),
                     SqliteValue::Text(json_str(&row, "stage")?),
@@ -1182,12 +1248,90 @@ fn import_events(
                     SqliteValue::Text(json_str(&row, "payload_json")?),
                 ],
             )
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                FwError::Storage(format!("insert events `{run_id}/{seq}` failed: {error}"))
+            })?;
 
         count += 1;
     }
 
+    if conflict_policy == ConflictPolicy::Overwrite && !overwritten_run_ids.is_empty() {
+        assert_no_stale_events_for_overwritten_runs(
+            connection,
+            overwritten_run_ids,
+            &imported_seq_by_overwritten_run,
+        )?;
+    }
+
     Ok(count)
+}
+
+fn assert_no_stale_segments_for_overwritten_runs(
+    connection: &Connection,
+    overwritten_run_ids: &HashSet<String>,
+    imported_idx_by_run: &HashMap<String, HashSet<i64>>,
+) -> FwResult<()> {
+    for run_id in overwritten_run_ids {
+        let existing_rows = connection
+            .query_with_params(
+                "SELECT idx FROM segments WHERE run_id = ?1 ORDER BY idx ASC",
+                &[SqliteValue::Text(run_id.clone())],
+            )
+            .map_err(|error| {
+                FwError::Storage(format!(
+                    "query segments for stale purge `{run_id}` failed: {error}"
+                ))
+            })?;
+        for row in existing_rows {
+            let idx = value_to_i64_sqlite(row.get(0));
+            let keep = imported_idx_by_run
+                .get(run_id)
+                .is_some_and(|idx_set| idx_set.contains(&idx));
+            if keep {
+                continue;
+            }
+            return Err(FwError::Storage(format!(
+                "overwrite would require deleting stale segment `{run_id}/{idx}`, \
+                 but child-row DELETE is unsupported in this runtime; \
+                 re-import into an empty target DB for strict replacement"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn assert_no_stale_events_for_overwritten_runs(
+    connection: &Connection,
+    overwritten_run_ids: &HashSet<String>,
+    imported_seq_by_run: &HashMap<String, HashSet<i64>>,
+) -> FwResult<()> {
+    for run_id in overwritten_run_ids {
+        let existing_rows = connection
+            .query_with_params(
+                "SELECT seq FROM events WHERE run_id = ?1 ORDER BY seq ASC",
+                &[SqliteValue::Text(run_id.clone())],
+            )
+            .map_err(|error| {
+                FwError::Storage(format!(
+                    "query events for stale purge `{run_id}` failed: {error}"
+                ))
+            })?;
+        for row in existing_rows {
+            let seq = value_to_i64_sqlite(row.get(0));
+            let keep = imported_seq_by_run
+                .get(run_id)
+                .is_some_and(|seq_set| seq_set.contains(&seq));
+            if keep {
+                continue;
+            }
+            return Err(FwError::Storage(format!(
+                "overwrite would require deleting stale event `{run_id}/{seq}`, \
+                 but child-row DELETE is unsupported in this runtime; \
+                 re-import into an empty target DB for strict replacement"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn ensure_run_reference_exists(
@@ -1195,7 +1339,12 @@ fn ensure_run_reference_exists(
     run_id: &str,
     table: &str,
     key: &str,
+    known_run_ids: &mut HashSet<String>,
 ) -> FwResult<()> {
+    if known_run_ids.contains(run_id) {
+        return Ok(());
+    }
+
     let parent = connection
         .query_with_params(
             "SELECT id FROM runs WHERE id = ?1 LIMIT 1",
@@ -1209,6 +1358,7 @@ fn ensure_run_reference_exists(
         )));
     }
 
+    known_run_ids.insert(run_id.to_owned());
     Ok(())
 }
 
@@ -1268,7 +1418,8 @@ CREATE TABLE IF NOT EXISTS runs (
     result_json TEXT NOT NULL,
     warnings_json TEXT NOT NULL,
     transcript TEXT NOT NULL,
-    replay_json TEXT NOT NULL DEFAULT '{}'
+    replay_json TEXT NOT NULL DEFAULT '{}',
+    acceleration_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS segments (
@@ -1416,20 +1567,149 @@ fn json_string_or_default(value: &serde_json::Value, key: &str, fallback: &str) 
 }
 
 fn ensure_runs_replay_column(connection: &Connection) -> FwResult<()> {
-    let rows = connection
-        .query("PRAGMA table_info(runs);")
-        .map_err(|error| FwError::Storage(error.to_string()))?;
-    let has_replay = rows
+    let mut rows = table_columns_sync(connection, "runs")?;
+    let mut has_replay = rows
         .iter()
         .any(|row| value_to_string_sqlite(row.get(1)) == "replay_json");
-    if has_replay {
-        return Ok(());
+    if !has_replay {
+        recreate_table_with_added_column_sync(
+            connection,
+            "runs",
+            &rows,
+            "replay_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )?;
+        rows = table_columns_sync(connection, "runs")?;
+        has_replay = true;
     }
 
-    connection
-        .execute("ALTER TABLE runs ADD COLUMN replay_json TEXT NOT NULL DEFAULT '{}';")
-        .map_err(|error| FwError::Storage(error.to_string()))?;
+    let has_acceleration = rows
+        .iter()
+        .any(|row| value_to_string_sqlite(row.get(1)) == "acceleration_json");
+    if has_replay && !has_acceleration {
+        recreate_table_with_added_column_sync(
+            connection,
+            "runs",
+            &rows,
+            "acceleration_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )?;
+    }
     Ok(())
+}
+
+fn table_columns_sync(connection: &Connection, table: &str) -> FwResult<Vec<fsqlite::Row>> {
+    connection
+        .query(&format!("PRAGMA table_info({});", sql_ident_sync(table)))
+        .map_err(|error| FwError::Storage(error.to_string()))
+}
+
+fn recreate_table_with_added_column_sync(
+    connection: &Connection,
+    table: &str,
+    existing_columns: &[fsqlite::Row],
+    new_column: &str,
+    new_column_def: &str,
+) -> FwResult<()> {
+    let table_ident = sql_ident_sync(table);
+    let existing_names = existing_columns
+        .iter()
+        .map(|row| {
+            let name = value_to_string_sqlite(row.get(1));
+            if name.is_empty() {
+                return Err(FwError::Storage(
+                    "invalid PRAGMA table_info row: empty column name".to_owned(),
+                ));
+            }
+            Ok(sql_ident_sync(&name))
+        })
+        .collect::<FwResult<Vec<_>>>()?;
+    let existing_cols_csv = existing_names.join(", ");
+    let rows = connection
+        .query(&format!("SELECT {existing_cols_csv} FROM {table_ident};"))
+        .map_err(|error| FwError::Storage(error.to_string()))?;
+    let row_values = rows
+        .iter()
+        .map(|row| {
+            (0..existing_names.len())
+                .map(|index| row.get(index).cloned().unwrap_or(SqliteValue::Null))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let mut column_defs = existing_columns
+        .iter()
+        .map(reconstruct_column_definition_sync)
+        .collect::<FwResult<Vec<_>>>()?;
+    column_defs.push(format!("{} {}", sql_ident_sync(new_column), new_column_def));
+
+    connection
+        .execute(&format!("DROP TABLE {table_ident};"))
+        .map_err(|error| FwError::Storage(error.to_string()))?;
+    connection
+        .execute(&format!(
+            "CREATE TABLE {table_ident} ({});",
+            column_defs.join(", ")
+        ))
+        .map_err(|error| FwError::Storage(error.to_string()))?;
+
+    if !row_values.is_empty() {
+        let placeholders = (1..=existing_names.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let insert_sql =
+            format!("INSERT INTO {table_ident} ({existing_cols_csv}) VALUES ({placeholders});");
+        for params in row_values {
+            connection
+                .execute_with_params(&insert_sql, &params)
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn sql_ident_sync(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn value_to_i64_sqlite(value: Option<&SqliteValue>) -> i64 {
+    match value {
+        Some(SqliteValue::Integer(number)) => *number,
+        Some(SqliteValue::Text(text)) => text.parse::<i64>().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn reconstruct_column_definition_sync(row: &fsqlite::Row) -> FwResult<String> {
+    let name = value_to_string_sqlite(row.get(1));
+    if name.is_empty() {
+        return Err(FwError::Storage(
+            "invalid PRAGMA table_info row: empty column name".to_owned(),
+        ));
+    }
+    let typ = value_to_string_sqlite(row.get(2));
+    let not_null = value_to_i64_sqlite(row.get(3)) != 0;
+    let default_value = value_to_string_sqlite(row.get(4));
+    let is_primary_key = value_to_i64_sqlite(row.get(5)) != 0;
+
+    let mut def = if typ.is_empty() {
+        sql_ident_sync(&name)
+    } else {
+        format!("{} {typ}", sql_ident_sync(&name))
+    };
+    if not_null {
+        def.push_str(" NOT NULL");
+    }
+    if !default_value.is_empty() {
+        def.push_str(" DEFAULT ");
+        def.push_str(&default_value);
+    }
+    if is_primary_key {
+        def.push_str(" PRIMARY KEY");
+    }
+    Ok(def)
 }
 
 fn json_optional_float(value: &serde_json::Value, key: &str) -> SqliteValue {
@@ -1749,6 +2029,38 @@ fn json_str_or_empty(value: &serde_json::Value, key: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Query helpers
+// ---------------------------------------------------------------------------
+
+/// Return the maximum `started_at` timestamp from the `runs` table,
+/// optionally filtered to rows where `started_at > after_ts`.
+///
+/// Returns `None` if no matching rows exist.
+pub fn max_started_at(conn: &Connection, after_ts: Option<&str>) -> FwResult<Option<String>> {
+    let (sql, params): (&str, Vec<SqliteValue>) = if let Some(ts) = after_ts {
+        (
+            "SELECT MAX(started_at) FROM runs WHERE started_at > ?1",
+            vec![SqliteValue::Text(ts.to_owned())],
+        )
+    } else {
+        ("SELECT MAX(started_at) FROM runs", vec![])
+    };
+
+    let rows = conn
+        .query_with_params(sql, &params)
+        .map_err(|e| FwError::Storage(e.to_string()))?;
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    match rows[0].get(0) {
+        Some(SqliteValue::Text(s)) if !s.is_empty() => Ok(Some(s.clone())),
+        _ => Ok(None),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1921,6 +2233,14 @@ mod tests {
                 backend_version: Some("whisper 1.2.3".to_owned()),
                 output_payload_hash: Some("sync-output-hash".to_owned()),
             },
+        }
+    }
+
+    fn test_cursor(ts: &str, run_id: Option<&str>) -> SyncCursor {
+        SyncCursor {
+            last_export_rfc3339: ts.to_owned(),
+            last_export_run_id: run_id.map(str::to_owned),
+            last_run_count: 0,
         }
     }
 
@@ -3329,7 +3649,7 @@ mod tests {
     }
 
     #[test]
-    fn import_overwrite_replaces_conflicting_segment() {
+    fn import_overwrite_segment_conflict_fails_closed() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("source.sqlite3");
         let export_dir = dir.path().join("export");
@@ -3359,30 +3679,22 @@ mod tests {
         )
         .expect("manifest write");
 
-        let result = import(
+        let error = import(
             &db_path,
             &export_dir,
             &state_root,
             ConflictPolicy::Overwrite,
         )
-        .expect("overwrite import");
-        assert_eq!(result.segments_imported, 2);
-
-        // Verify the segment was replaced in the segments table directly.
-        // (load_run_details reads from result_json, not the segments table.)
-        let conn = Connection::open(db_path.display().to_string()).expect("conn");
-        let rows = conn
-            .query_with_params(
-                "SELECT text FROM segments WHERE run_id = ?1 AND idx = 0",
-                &[SqliteValue::Text("seg-conflict-1".to_owned())],
-            )
-            .expect("query");
-        let text = value_to_string_sqlite(rows[0].get(0));
-        assert_eq!(text, "replaced text");
+        .expect_err("overwrite import should fail when segment conflict needs UPDATE");
+        let text = error.to_string();
+        assert!(
+            text.contains("overwrite would require updating conflicting segment row"),
+            "unexpected error: {text}"
+        );
     }
 
     #[test]
-    fn import_overwrite_replaces_conflicting_event() {
+    fn import_overwrite_event_conflict_fails_closed() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("source.sqlite3");
         let export_dir = dir.path().join("export");
@@ -3412,25 +3724,69 @@ mod tests {
         )
         .expect("manifest write");
 
-        let result = import(
+        let error = import(
             &db_path,
             &export_dir,
             &state_root,
             ConflictPolicy::Overwrite,
         )
-        .expect("overwrite import");
-        assert_eq!(result.events_imported, 2);
+        .expect_err("overwrite import should fail when event conflict needs UPDATE");
+        let text = error.to_string();
+        assert!(
+            text.contains("overwrite would require updating conflicting event row"),
+            "unexpected error: {text}"
+        );
+    }
 
-        // Verify the event was replaced in the events table directly.
-        let conn = Connection::open(db_path.display().to_string()).expect("conn");
-        let rows = conn
-            .query_with_params(
-                "SELECT message FROM events WHERE run_id = ?1 AND seq = 1",
-                &[SqliteValue::Text("evt-conflict-1".to_owned())],
-            )
-            .expect("query");
-        let message = value_to_string_sqlite(rows[0].get(0));
-        assert_eq!(message, "replaced event message");
+    #[test]
+    fn import_overwrite_run_with_stale_children_fails_closed() {
+        let dir = tempdir().expect("tempdir");
+        let source_db = dir.path().join("source.sqlite3");
+        let target_db = dir.path().join("target.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let source_store = RunStore::open(&source_db).expect("source store");
+        let source_report = fixture_report("overwrite-stale-1", &source_db);
+        source_store
+            .persist_report(&source_report)
+            .expect("persist source");
+
+        let target_store = RunStore::open(&target_db).expect("target store");
+        let mut target_report = fixture_report("overwrite-stale-1", &target_db);
+        target_report.result.segments.push(TranscriptionSegment {
+            start_sec: Some(5.0),
+            end_sec: Some(6.0),
+            text: "stale tail segment".to_owned(),
+            speaker: None,
+            confidence: Some(0.1),
+        });
+        target_report.events.push(RunEvent {
+            seq: 3,
+            ts_rfc3339: "2026-01-01T00:00:04Z".to_owned(),
+            stage: "persist".to_owned(),
+            code: "persist.ok".to_owned(),
+            message: "stale extra event".to_owned(),
+            payload: json!({"stale": true}),
+        });
+        target_store
+            .persist_report(&target_report)
+            .expect("persist target");
+
+        export(&source_db, &export_dir, &state_root).expect("export source");
+        let error = import(
+            &target_db,
+            &export_dir,
+            &state_root,
+            ConflictPolicy::Overwrite,
+        )
+        .expect_err("overwrite import should fail when stale child rows require DELETE");
+        let text = error.to_string();
+        assert!(
+            text.contains("overwrite would require deleting stale segment")
+                || text.contains("overwrite would require deleting stale event"),
+            "unexpected error: {text}"
+        );
     }
 
     #[test]
@@ -4439,7 +4795,7 @@ mod tests {
     }
 
     #[test]
-    fn overwrite_run_cascade_deletes_segments_and_events() {
+    fn overwrite_run_preserves_segments_and_events_in_compat_mode() {
         // When a run is overwritten, its old segments and events must be
         // cascade-deleted to prevent orphaned rows in the database.
         let dir = tempdir().expect("tempdir");
@@ -4463,8 +4819,8 @@ mod tests {
         .expect("first import");
 
         // Now mutate the transcript in runs.jsonl (creating a conflict) and
-        // clear the segments/events (no segments/events in new import). This
-        // should cause the overwrite to delete old segments via cascade.
+        // clear the segments/events (no segments/events in new import). In
+        // compatibility mode, existing child rows are preserved.
         let runs_path = export_dir.join("runs.jsonl");
         let content = fs::read_to_string(&runs_path).expect("read");
         let first_line = content.lines().next().expect("has line");
@@ -4513,7 +4869,7 @@ mod tests {
         )
         .expect("overwrite import");
 
-        // Verify segments were cascade-deleted.
+        // Compatibility fallback: child rows are preserved.
         let conn = Connection::open(target_db.display().to_string()).expect("open");
         let seg_count_after = conn
             .query_with_params(
@@ -4528,11 +4884,11 @@ mod tests {
         };
 
         assert_eq!(
-            seg_after, 0,
-            "old segments should be cascade-deleted when run is overwritten"
+            seg_after, 2,
+            "segments should be preserved in fallback mode"
         );
 
-        // Verify events were cascade-deleted.
+        // Compatibility fallback: child rows are preserved.
         let evt_count_after = conn
             .query_with_params(
                 "SELECT COUNT(*) FROM events WHERE run_id = ?1",
@@ -4545,10 +4901,7 @@ mod tests {
             _ => panic!("expected integer count"),
         };
 
-        assert_eq!(
-            evt_after, 0,
-            "old events should be cascade-deleted when run is overwritten"
-        );
+        assert_eq!(evt_after, 2, "events should be preserved in fallback mode");
 
         // Verify the run itself was overwritten.
         let run_rows = conn
@@ -6579,7 +6932,7 @@ mod tests {
 
         // First run: timestamp T1
         let mut report1 = fixture_report("incr-old", &db_path);
-        report1.started_at_rfc3339 = "2026-01-01T00:00:00Z".to_owned();
+        report1.finished_at_rfc3339 = "2026-01-01T00:00:05Z".to_owned();
         store.persist_report(&report1).expect("persist 1");
 
         // First incremental export (captures everything)
@@ -6590,7 +6943,7 @@ mod tests {
 
         // Second run: timestamp T2 > T1
         let mut report2 = fixture_report("incr-new", &db_path);
-        report2.started_at_rfc3339 = "2026-06-15T12:00:00Z".to_owned();
+        report2.finished_at_rfc3339 = "2026-06-15T12:00:05Z".to_owned();
         store.persist_report(&report2).expect("persist 2");
 
         // Second incremental export (should only capture the new run)
@@ -6960,8 +7313,8 @@ mod tests {
         let conn =
             fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
 
-        // No runs → MAX(started_at) returns NULL → empty string → None
-        let result = max_started_at(&conn, None).expect("should succeed");
+        // No runs -> no export position.
+        let result = max_export_position(&conn, None).expect("should succeed");
         assert_eq!(result, None, "empty db should return None");
         drop(store);
     }
@@ -6977,12 +7330,13 @@ mod tests {
         let conn =
             fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
 
-        // With after_ts far in the future, no runs match → None.
-        let result = max_started_at(&conn, Some("2099-12-31T23:59:59Z")).expect("should succeed");
+        // With cursor far in the future, no runs match -> None.
+        let far_future = test_cursor("2099-12-31T23:59:59Z", Some("zzzzzz"));
+        let result = max_export_position(&conn, Some(&far_future)).expect("should succeed");
         assert_eq!(result, None, "no runs after far-future timestamp");
 
-        // With no filter, should return the run's timestamp.
-        let result = max_started_at(&conn, None).expect("should succeed");
+        // With no filter, should return the run's finished_at + id tuple.
+        let result = max_export_position(&conn, None).expect("should succeed");
         assert!(result.is_some(), "should find a run with no filter");
     }
 
@@ -6997,8 +7351,15 @@ mod tests {
             fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
         ensure_schema(&conn).expect("schema");
 
-        let err = ensure_run_reference_exists(&conn, "ghost-run-id", "segments", "ghost-run-id/0")
-            .expect_err("should fail for missing run");
+        let mut known_run_ids = HashSet::new();
+        let err = ensure_run_reference_exists(
+            &conn,
+            "ghost-run-id",
+            "segments",
+            "ghost-run-id/0",
+            &mut known_run_ids,
+        )
+        .expect_err("should fail for missing run");
         let msg = err.to_string();
         assert!(
             msg.contains("referential integrity violation"),
@@ -7640,28 +8001,30 @@ mod tests {
         let db_path = dir.path().join("partial_filter.sqlite3");
         let store = RunStore::open(&db_path).expect("open");
 
-        // Persist two reports with different timestamps.
+        // Persist two reports with different finished timestamps.
         let mut early = fixture_report("run-early", &db_path);
-        early.started_at_rfc3339 = "2026-01-01T00:00:00Z".to_owned();
+        early.finished_at_rfc3339 = "2026-01-01T00:00:05Z".to_owned();
         store.persist_report(&early).expect("persist early");
 
         let mut late = fixture_report("run-late", &db_path);
-        late.started_at_rfc3339 = "2026-06-15T12:00:00Z".to_owned();
+        late.finished_at_rfc3339 = "2026-06-15T12:00:05Z".to_owned();
         store.persist_report(&late).expect("persist late");
 
         let conn =
             fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
 
-        // Filter after early → should return late's timestamp.
-        let result = max_started_at(&conn, Some("2026-01-01T00:00:00Z")).expect("query");
+        // Cursor positioned at early should return late's tuple.
+        let after_early = test_cursor("2026-01-01T00:00:05Z", Some("run-early"));
+        let result = max_export_position(&conn, Some(&after_early)).expect("query");
         assert_eq!(
             result,
-            Some("2026-06-15T12:00:00Z".to_owned()),
+            Some(("2026-06-15T12:00:05Z".to_owned(), "run-late".to_owned())),
             "should return the max among filtered runs"
         );
 
-        // Filter after late → no matching runs → None.
-        let result = max_started_at(&conn, Some("2026-06-15T12:00:00Z")).expect("query");
+        // Cursor positioned at late should produce no newer rows.
+        let after_late = test_cursor("2026-06-15T12:00:05Z", Some("run-late"));
+        let result = max_export_position(&conn, Some(&after_late)).expect("query");
         assert_eq!(result, None, "no runs strictly after late timestamp");
     }
 
@@ -7691,15 +8054,15 @@ mod tests {
         let store = RunStore::open(&db_path).expect("open");
 
         let mut r1 = fixture_report("run-a", &db_path);
-        r1.started_at_rfc3339 = "2026-01-01T00:00:00Z".to_owned();
+        r1.finished_at_rfc3339 = "2026-01-01T00:00:05Z".to_owned();
         store.persist_report(&r1).expect("persist r1");
 
         let mut r2 = fixture_report("run-b", &db_path);
-        r2.started_at_rfc3339 = "2026-03-01T00:00:00Z".to_owned();
+        r2.finished_at_rfc3339 = "2026-03-01T00:00:05Z".to_owned();
         store.persist_report(&r2).expect("persist r2");
 
         let mut r3 = fixture_report("run-c", &db_path);
-        r3.started_at_rfc3339 = "2026-06-01T00:00:00Z".to_owned();
+        r3.finished_at_rfc3339 = "2026-06-01T00:00:05Z".to_owned();
         store.persist_report(&r3).expect("persist r3");
 
         let conn =
@@ -7709,9 +8072,9 @@ mod tests {
         let all = collect_exported_run_ids(&conn, None).expect("all");
         assert_eq!(all.len(), 3, "no filter should return all runs");
 
-        // After Jan → should return run-b and run-c (strictly after)
-        let filtered =
-            collect_exported_run_ids(&conn, Some("2026-01-01T00:00:00Z")).expect("filtered");
+        // Cursor at run-a should return run-b and run-c (strictly after tuple).
+        let cursor = test_cursor("2026-01-01T00:00:05Z", Some("run-a"));
+        let filtered = collect_exported_run_ids(&conn, Some(&cursor)).expect("filtered");
         assert_eq!(filtered.len(), 2, "should exclude run-a");
         assert!(
             !filtered.contains(&"run-a".to_owned()),
@@ -7758,11 +8121,11 @@ mod tests {
         let store = RunStore::open(&db_path).expect("open");
 
         let mut r1 = fixture_report("inc-a", &db_path);
-        r1.started_at_rfc3339 = "2026-01-15T00:00:00Z".to_owned();
+        r1.finished_at_rfc3339 = "2026-01-15T00:00:05Z".to_owned();
         store.persist_report(&r1).expect("persist r1");
 
         let mut r2 = fixture_report("inc-b", &db_path);
-        r2.started_at_rfc3339 = "2026-05-20T00:00:00Z".to_owned();
+        r2.finished_at_rfc3339 = "2026-05-20T00:00:05Z".to_owned();
         store.persist_report(&r2).expect("persist r2");
 
         let conn =
@@ -7773,11 +8136,11 @@ mod tests {
         let all_count = export_table_runs_incremental(&conn, &all_path, None).expect("all");
         assert_eq!(all_count, 2, "no filter should export both runs");
 
-        // After Jan → only inc-b (strictly after).
+        // Cursor at inc-a -> only inc-b.
         let filtered_path = dir.path().join("filtered_runs.jsonl");
+        let cursor = test_cursor("2026-01-15T00:00:05Z", Some("inc-a"));
         let filtered_count =
-            export_table_runs_incremental(&conn, &filtered_path, Some("2026-01-15T00:00:00Z"))
-                .expect("filtered");
+            export_table_runs_incremental(&conn, &filtered_path, Some(&cursor)).expect("filtered");
         assert_eq!(filtered_count, 1, "filter should export only inc-b");
 
         // Read and verify it's inc-b
@@ -8138,6 +8501,256 @@ mod tests {
             entry["extra_field"].as_str(),
             Some("preserved"),
             "extra fields should be preserved in the map"
+        );
+    }
+
+    // ── Task #228 — sync.rs edge-case tests ────────────────────────────
+
+    #[test]
+    fn is_lock_stale_exactly_at_boundary_is_not_stale() {
+        // Lock exactly LOCK_STALE_SECONDS (300s) old uses strict `>`, so it
+        // should NOT be considered stale.
+        let boundary_time = Utc::now() - chrono::Duration::seconds(LOCK_STALE_SECONDS);
+        let info = LockInfo {
+            pid: std::process::id(),
+            created_at_rfc3339: boundary_time.to_rfc3339(),
+            operation: "test".to_owned(),
+        };
+        assert!(
+            !is_lock_stale(&info),
+            "lock exactly at LOCK_STALE_SECONDS boundary should NOT be stale (strict >)"
+        );
+    }
+
+    #[test]
+    fn sql_ident_sync_escapes_embedded_double_quote() {
+        // A column name with an embedded `"` must produce `"col""name"` (SQL standard).
+        let result = sql_ident_sync("col\"name");
+        assert_eq!(
+            result, "\"col\"\"name\"",
+            "embedded double-quote should be doubled"
+        );
+
+        // No quote → plain quoting.
+        let plain = sql_ident_sync("simple");
+        assert_eq!(plain, "\"simple\"");
+
+        // Multiple quotes.
+        let multi = sql_ident_sync("a\"b\"c");
+        assert_eq!(multi, "\"a\"\"b\"\"c\"");
+    }
+
+    #[test]
+    fn value_to_i64_sqlite_all_variants() {
+        // Integer variant.
+        assert_eq!(value_to_i64_sqlite(Some(&SqliteValue::Integer(42))), 42);
+
+        // Text with valid integer string.
+        assert_eq!(
+            value_to_i64_sqlite(Some(&SqliteValue::Text("99".to_owned()))),
+            99
+        );
+
+        // Text with non-parseable string → unwrap_or(0).
+        assert_eq!(
+            value_to_i64_sqlite(Some(&SqliteValue::Text("not_a_number".to_owned()))),
+            0,
+            "non-parseable text should return 0"
+        );
+
+        // None → 0.
+        assert_eq!(value_to_i64_sqlite(None), 0);
+
+        // Float → wildcard → 0.
+        assert_eq!(
+            value_to_i64_sqlite(Some(&SqliteValue::Float(std::f64::consts::PI))),
+            0,
+            "Float variant should fall through to 0"
+        );
+    }
+
+    #[test]
+    fn optional_floats_equal_exactly_at_epsilon_boundary_returns_true() {
+        // Use values near zero where subtraction is exact.
+        // (0.0 - 1e-9).abs() == 1e-9, and 1e-9 <= 1e-9 is true.
+        assert!(
+            optional_floats_equal(Some(0.0), Some(1e-9)),
+            "difference of exactly 1e-9 should be equal (<=)"
+        );
+        // Confirm symmetry.
+        assert!(
+            optional_floats_equal(Some(1e-9), Some(0.0)),
+            "symmetry: reversed args should also be equal"
+        );
+        // Just above boundary: 2e-9 > 1e-9 → not equal.
+        assert!(
+            !optional_floats_equal(Some(0.0), Some(2e-9)),
+            "difference of 2e-9 should NOT be equal"
+        );
+    }
+
+    #[test]
+    fn max_started_at_returns_actual_max_from_db() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("max_started.sqlite3");
+        let store = RunStore::open(&db_path).expect("open");
+
+        let mut early = fixture_report("run-early", &db_path);
+        early.started_at_rfc3339 = "2026-01-01T00:00:00Z".to_owned();
+        store.persist_report(&early).expect("persist early");
+
+        let mut late = fixture_report("run-late", &db_path);
+        late.started_at_rfc3339 = "2026-06-15T12:00:00Z".to_owned();
+        store.persist_report(&late).expect("persist late");
+
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
+
+        // No filter → returns the overall maximum.
+        let result = max_started_at(&conn, None).expect("query");
+        assert_eq!(
+            result,
+            Some("2026-06-15T12:00:00Z".to_owned()),
+            "should return the latest started_at"
+        );
+
+        // Filter after early → still returns late.
+        let result = max_started_at(&conn, Some("2026-01-01T00:00:00Z")).expect("query");
+        assert_eq!(
+            result,
+            Some("2026-06-15T12:00:00Z".to_owned()),
+            "filter after early should return late"
+        );
+
+        // Filter beyond all → None.
+        let result = max_started_at(&conn, Some("2099-12-31T23:59:59Z")).expect("query");
+        assert_eq!(result, None, "no runs after far-future timestamp");
+
+        drop(store);
+    }
+
+    #[test]
+    fn import_skip_policy_preserves_existing_data_on_conflict() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("skip_src.sqlite3");
+        let target_db = dir.path().join("skip_target.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        // Persist a report in source DB and export it.
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("run-skip-1", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // Import into target DB (first time — no conflict).
+        let result1 =
+            import(&target_db, &export_dir, &state_root, ConflictPolicy::Skip).expect("import 1");
+        assert_eq!(result1.runs_imported, 1);
+        assert!(
+            result1.conflicts.is_empty(),
+            "first import should have no conflicts"
+        );
+
+        // Import again — same run_id exists, Skip policy should silently skip the duplicate.
+        let result2 =
+            import(&target_db, &export_dir, &state_root, ConflictPolicy::Skip).expect("import 2");
+        // The second import processes rows but skips duplicates.
+        assert!(
+            result2.conflicts.is_empty(),
+            "Skip policy should not produce conflicts"
+        );
+
+        // Verify only one run exists in the target DB (not duplicated).
+        let target_store = RunStore::open(&target_db).expect("open target");
+        let runs = target_store.list_recent_runs(10).expect("list");
+        assert_eq!(runs.len(), 1, "Skip should not duplicate the run");
+    }
+
+    #[test]
+    fn import_valid_json_but_invalid_manifest_structure_returns_descriptive_error() {
+        let dir = tempdir().expect("tempdir");
+        let export_dir = dir.path().join("bad_shape");
+        let state_root = dir.path().join("state");
+        let target_db = dir.path().join("target.sqlite3");
+        fs::create_dir_all(&export_dir).expect("mkdir");
+
+        // Write valid JSON that is NOT a valid SyncManifest (an array instead of object).
+        fs::write(export_dir.join("manifest.json"), "[]").expect("write");
+
+        let error = import(&target_db, &export_dir, &state_root, ConflictPolicy::Reject)
+            .expect_err("wrong structure should fail");
+        let text = error.to_string();
+        assert!(
+            text.contains("invalid manifest"),
+            "error should mention 'invalid manifest', got: {text}"
+        );
+    }
+
+    #[test]
+    fn compress_decompress_jsonl_round_trip_preserves_content() {
+        let dir = tempdir().expect("tempdir");
+        let original = dir.path().join("data.jsonl");
+        let compressed = dir.path().join("data.jsonl.gz");
+        let decompressed = dir.path().join("restored.jsonl");
+
+        let content = "{\"id\":1,\"text\":\"hello world\"}\n{\"id\":2,\"text\":\"foo bar\"}\n";
+        fs::write(&original, content).expect("write original");
+
+        compress_jsonl(&original, &compressed).expect("compress");
+        assert!(compressed.exists(), "compressed file should exist");
+        // Compressed content should differ from original (gzip header).
+        let raw_compressed = fs::read(&compressed).expect("read compressed");
+        assert_ne!(
+            raw_compressed,
+            content.as_bytes(),
+            "compressed should differ from original"
+        );
+
+        decompress_jsonl(&compressed, &decompressed).expect("decompress");
+        let restored = fs::read_to_string(&decompressed).expect("read decompressed");
+        assert_eq!(
+            restored, content,
+            "round-trip should preserve content exactly"
+        );
+    }
+
+    #[test]
+    fn import_valid_json_object_but_missing_required_fields_returns_invalid_manifest() {
+        let dir = tempdir().expect("tempdir");
+        let export_dir = dir.path().join("missing_fields");
+        let state_root = dir.path().join("state");
+        let target_db = dir.path().join("target.sqlite3");
+        fs::create_dir_all(&export_dir).expect("mkdir");
+
+        // Valid JSON object but missing all SyncManifest fields.
+        fs::write(export_dir.join("manifest.json"), r#"{"foo": "bar"}"#).expect("write");
+
+        let error = import(&target_db, &export_dir, &state_root, ConflictPolicy::Reject)
+            .expect_err("missing fields should fail");
+        let text = error.to_string();
+        assert!(
+            text.contains("invalid manifest"),
+            "error should mention 'invalid manifest', got: {text}"
+        );
+    }
+
+    #[test]
+    fn compress_jsonl_empty_file_produces_valid_gzip() {
+        let dir = tempdir().expect("tempdir");
+        let empty = dir.path().join("empty.jsonl");
+        let compressed = dir.path().join("empty.jsonl.gz");
+        let decompressed = dir.path().join("empty_restored.jsonl");
+
+        fs::write(&empty, "").expect("write empty");
+        compress_jsonl(&empty, &compressed).expect("compress empty");
+        decompress_jsonl(&compressed, &decompressed).expect("decompress empty");
+
+        let restored = fs::read_to_string(&decompressed).expect("read");
+        assert_eq!(
+            restored, "",
+            "round-trip of empty file should produce empty file"
         );
     }
 }

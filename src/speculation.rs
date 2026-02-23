@@ -667,6 +667,7 @@ pub enum CorrectionDecision {
 pub struct CorrectionTracker {
     tolerance: CorrectionTolerance,
     partials: HashMap<u64, PartialTranscript>,
+    window_to_seq: HashMap<u64, u64>,
     corrections: Vec<CorrectionEvent>,
     stats: CorrectionStats,
     next_correction_id: u64,
@@ -679,6 +680,7 @@ impl CorrectionTracker {
         Self {
             tolerance,
             partials: HashMap::new(),
+            window_to_seq: HashMap::new(),
             corrections: Vec::new(),
             stats: CorrectionStats {
                 windows_processed: 0,
@@ -699,6 +701,7 @@ impl CorrectionTracker {
     pub fn register_partial(&mut self, partial: PartialTranscript) -> u64 {
         let seq = partial.seq;
         self.stats.total_fast_latency_ms += partial.latency_ms;
+        self.window_to_seq.insert(partial.window_id, seq);
         self.partials.insert(seq, partial);
         seq
     }
@@ -716,15 +719,9 @@ impl CorrectionTracker {
         quality_segments: Vec<TranscriptionSegment>,
         quality_latency_ms: u64,
     ) -> FwResult<CorrectionDecision> {
-        // Find the partial matching this window_id.
-        let seq = self
-            .partials
-            .values()
-            .find(|p| p.window_id == window_id)
-            .map(|p| p.seq)
-            .ok_or_else(|| {
-                FwError::InvalidRequest(format!("no partial registered for window_id {window_id}"))
-            })?;
+        let seq = *self.window_to_seq.get(&window_id).ok_or_else(|| {
+            FwError::InvalidRequest(format!("no partial registered for window_id {window_id}"))
+        })?;
 
         let drift = {
             let partial = self.partials.get(&seq).expect("just found above");
@@ -766,6 +763,7 @@ impl CorrectionTracker {
 
             self.corrections.push(correction.clone());
             self.stats.corrections_emitted += 1;
+            self.window_to_seq.remove(&window_id);
 
             Ok(CorrectionDecision::Correct { correction })
         } else {
@@ -773,6 +771,7 @@ impl CorrectionTracker {
             let partial = self.partials.get_mut(&seq).expect("just found above");
             partial.confirm();
             self.stats.confirmations_emitted += 1;
+            self.window_to_seq.remove(&window_id);
 
             Ok(CorrectionDecision::Confirm { seq, drift })
         }
@@ -1437,25 +1436,25 @@ mod tests {
     #[test]
     #[should_panic(expected = "alpha must be positive")]
     fn beta_posterior_rejects_zero_alpha() {
-        BetaPosterior::new(0.0, 1.0);
+        let _ = BetaPosterior::new(0.0, 1.0);
     }
 
     #[test]
     #[should_panic(expected = "beta must be positive")]
     fn beta_posterior_rejects_negative_beta() {
-        BetaPosterior::new(1.0, -1.0);
+        let _ = BetaPosterior::new(1.0, -1.0);
     }
 
     #[test]
     #[should_panic(expected = "alpha must be positive")]
     fn beta_posterior_rejects_nan_alpha() {
-        BetaPosterior::new(f64::NAN, 1.0);
+        let _ = BetaPosterior::new(f64::NAN, 1.0);
     }
 
     #[test]
     #[should_panic(expected = "beta must be positive")]
     fn beta_posterior_rejects_infinite_beta() {
-        BetaPosterior::new(1.0, f64::INFINITY);
+        let _ = BetaPosterior::new(1.0, f64::INFINITY);
     }
 
     #[test]
@@ -1635,6 +1634,38 @@ mod tests {
     }
 
     #[test]
+    fn correction_tracker_window_lookup_is_removed_after_resolution() {
+        let mut tracker = CorrectionTracker::new(CorrectionTolerance::default());
+        let partial = PartialTranscript::new(
+            0,
+            11,
+            "fast".to_owned(),
+            vec![seg("hello", Some(0.9))],
+            40,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        tracker.register_partial(partial);
+
+        let first = tracker.submit_quality_result(11, "quality", vec![seg("hello", Some(0.9))], 70);
+        assert!(
+            first.is_ok(),
+            "first quality result should resolve window 11"
+        );
+
+        let second =
+            tracker.submit_quality_result(11, "quality", vec![seg("hello", Some(0.9))], 70);
+        let err = match second {
+            Err(e) => e,
+            Ok(_) => panic!("window 11 should be resolved and no longer accepted"),
+        };
+        assert!(
+            err.to_string()
+                .contains("no partial registered for window_id 11"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn is_correction_decision_all_variants_and_normalization() {
         assert!(is_correction_decision("correct"));
         assert!(is_correction_decision("corrected"));
@@ -1647,5 +1678,1108 @@ mod tests {
         assert!(!is_correction_decision("confirmed"));
         assert!(!is_correction_decision(""));
         assert!(!is_correction_decision("   "));
+    }
+
+    fn timed_seg(
+        text: &str,
+        start: f64,
+        end: f64,
+        confidence: Option<f64>,
+    ) -> TranscriptionSegment {
+        TranscriptionSegment {
+            text: text.to_owned(),
+            start_sec: Some(start),
+            end_sec: Some(end),
+            confidence,
+            speaker: None,
+        }
+    }
+
+    #[test]
+    fn window_manager_merge_segments_quality_preferred_and_dedup() {
+        let mut wm = WindowManager::new("run-1", 5000, 0);
+
+        // Create two windows.
+        let w0 = wm.next_window(0, "h0");
+        let w1 = wm.next_window(5000, "h1");
+
+        // Window 0: has both fast and quality results — quality should be used.
+        let fast_partial_0 = PartialTranscript::new(
+            0,
+            w0.window_id,
+            "fast".to_owned(),
+            vec![timed_seg("fast hello", 0.0, 2.0, Some(0.5))],
+            100,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        wm.record_fast_result(w0.window_id, fast_partial_0);
+        wm.record_quality_result(
+            w0.window_id,
+            vec![timed_seg("quality hello", 0.0, 2.0, Some(0.9))],
+        );
+        wm.resolve_window(w0.window_id);
+
+        // Window 1: only fast result — fast should be used as fallback.
+        let fast_partial_1 = PartialTranscript::new(
+            1,
+            w1.window_id,
+            "fast".to_owned(),
+            vec![timed_seg("fast world", 5.0, 7.0, Some(0.6))],
+            100,
+            "2026-01-01T00:00:01Z".to_owned(),
+        );
+        wm.record_fast_result(w1.window_id, fast_partial_1);
+        wm.resolve_window(w1.window_id);
+
+        let merged = wm.merge_segments();
+        assert_eq!(merged.len(), 2);
+        // First segment from quality result (not fast).
+        assert_eq!(merged[0].text, "quality hello");
+        // Second from fast fallback.
+        assert_eq!(merged[1].text, "fast world");
+    }
+
+    #[test]
+    fn window_manager_merge_segments_overlap_dedup_by_confidence() {
+        let mut wm = WindowManager::new("run-1", 5000, 0);
+        let w0 = wm.next_window(0, "h0");
+        let w1 = wm.next_window(5000, "h1");
+
+        // Both windows produce a segment at nearly the same time range.
+        wm.record_quality_result(
+            w0.window_id,
+            vec![timed_seg("low conf", 2.0, 4.0, Some(0.3))],
+        );
+        wm.resolve_window(w0.window_id);
+        // Window 1 produces an overlapping segment with higher confidence.
+        wm.record_quality_result(
+            w1.window_id,
+            vec![timed_seg("high conf", 2.05, 4.05, Some(0.95))],
+        );
+        wm.resolve_window(w1.window_id);
+
+        let merged = wm.merge_segments();
+        // Overlap within 0.1s tolerance → dedup keeps higher confidence.
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "high conf");
+    }
+
+    #[test]
+    fn window_manager_record_and_resolve_nonexistent_window_is_noop() {
+        let mut wm = WindowManager::new("run-1", 5000, 0);
+        let w = wm.next_window(0, "h0");
+
+        // Operate on a window_id that doesn't exist.
+        let bogus_id = w.window_id + 999;
+        let partial = PartialTranscript::new(
+            0,
+            bogus_id,
+            "fast".to_owned(),
+            vec![seg("hello", Some(0.8))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        wm.record_fast_result(bogus_id, partial);
+        wm.record_quality_result(bogus_id, vec![seg("world", Some(0.9))]);
+        wm.resolve_window(bogus_id);
+
+        // Original window should be unaffected (still Pending).
+        assert!(wm.get_window(bogus_id).is_none());
+        let ws = wm.get_window(w.window_id).unwrap();
+        assert_eq!(ws.status, WindowStatus::Pending);
+    }
+
+    #[test]
+    fn correction_tracker_rate_wer_stats_across_multiple_windows() {
+        // Zero state: correction_rate and mean_wer both 0.0.
+        let mut tracker = CorrectionTracker::new(CorrectionTolerance {
+            max_wer: 0.05,
+            max_confidence_delta: 1.0,
+            max_edit_distance: 1000,
+            always_correct: false,
+        });
+        assert!((tracker.correction_rate() - 0.0).abs() < 1e-9);
+        assert!((tracker.mean_wer() - 0.0).abs() < 1e-9);
+
+        // Register two partials.
+        let p0 = PartialTranscript::new(
+            0,
+            0,
+            "fast".to_owned(),
+            vec![seg("hello world", Some(0.8))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        let p1 = PartialTranscript::new(
+            1,
+            1,
+            "fast".to_owned(),
+            vec![seg("foo bar baz", Some(0.7))],
+            50,
+            "2026-01-01T00:00:01Z".to_owned(),
+        );
+        tracker.register_partial(p0);
+        tracker.register_partial(p1);
+
+        // Window 0: identical quality → confirm (WER ≈ 0).
+        let decision0 = tracker
+            .submit_quality_result(0, "quality", vec![seg("hello world", Some(0.9))], 100)
+            .unwrap();
+        let is_confirm = matches!(decision0, CorrectionDecision::Confirm { .. });
+        assert!(is_confirm, "identical text should confirm");
+
+        // Window 1: very different quality → correct (WER high).
+        let decision1 = tracker
+            .submit_quality_result(
+                1,
+                "quality",
+                vec![seg("completely different text", Some(0.95))],
+                100,
+            )
+            .unwrap();
+        let is_correct = matches!(decision1, CorrectionDecision::Correct { .. });
+        assert!(is_correct, "very different text should correct");
+
+        // correction_rate = 1 correction / 2 total = 0.5
+        assert!((tracker.correction_rate() - 0.5).abs() < 1e-9);
+        // mean_wer should be > 0 (one window had WER > 0).
+        assert!(tracker.mean_wer() > 0.0);
+        // max_observed_wer should equal the WER of the divergent window.
+        assert!(tracker.stats().max_observed_wer > 0.0);
+        assert_eq!(tracker.stats().windows_processed, 2);
+    }
+
+    #[test]
+    fn speculation_controller_brier_fallback_resets_window_to_initial() {
+        let initial_ms = 5000;
+        let mut ctrl = SpeculationWindowController::new(initial_ms, 1000, 30_000, 500);
+        assert!(!ctrl.is_fallback_active());
+
+        let drift = CorrectionDrift {
+            wer_approx: 0.05,
+            confidence_delta: 0.01,
+            segment_count_delta: 0,
+            text_edit_distance: 1,
+        };
+
+        // Drive Brier score above 0.25: feed 15 corrections first (pushing
+        // posterior high), then 10 confirmations (posterior-after-update is
+        // still high → each has high Brier contribution). The CalibrationTracker
+        // window is 20, so the earliest 5 correction entries (low Brier) get
+        // evicted, leaving 10 corrections + 10 confirmations in the window.
+        // correction_rate via posterior ≈ 0.6 (below 0.75 runaway threshold).
+
+        for _ in 0..15 {
+            let correction =
+                CorrectionEvent::new(0, 0, 0, "q".to_owned(), vec![], 100, "t".to_owned(), &[]);
+            ctrl.observe(&CorrectionDecision::Correct { correction }, &drift);
+        }
+
+        for _ in 0..10 {
+            let decision = CorrectionDecision::Confirm {
+                seq: 0,
+                drift: drift.clone(),
+            };
+            ctrl.observe(&decision, &drift);
+        }
+
+        let new_size = ctrl.apply();
+        assert!(
+            ctrl.is_fallback_active(),
+            "should be in fallback after poor calibration"
+        );
+        assert_eq!(
+            new_size, initial_ms,
+            "Brier fallback should reset to initial window size"
+        );
+    }
+
+    // ── Task #219 — speculation pass 4 edge-case tests ───────────────
+
+    #[test]
+    fn correction_tracker_always_correct_forces_correction_on_identical_output() {
+        let tol = CorrectionTolerance {
+            always_correct: true,
+            ..CorrectionTolerance::default()
+        };
+        let mut tracker = CorrectionTracker::new(tol);
+
+        let partial = PartialTranscript::new(
+            0,
+            0,
+            "fast".to_owned(),
+            vec![seg("hello world", Some(0.9))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        tracker.register_partial(partial);
+
+        // Identical quality output — normally Confirm, but always_correct forces Correct.
+        let decision = tracker
+            .submit_quality_result(0, "quality", vec![seg("hello world", Some(0.9))], 100)
+            .unwrap();
+
+        assert!(
+            matches!(decision, CorrectionDecision::Correct { .. }),
+            "always_correct=true must force Correct even for identical text"
+        );
+        assert_eq!(tracker.stats().corrections_emitted, 1);
+        assert_eq!(tracker.stats().confirmations_emitted, 0);
+    }
+
+    #[test]
+    fn window_manager_resolved_and_pending_counts_track_lifecycle() {
+        let mut wm = WindowManager::new("run-counts", 5000, 0);
+        let w0 = wm.next_window(0, "h0");
+        let w1 = wm.next_window(5000, "h1");
+        let w2 = wm.next_window(10000, "h2");
+
+        // Nothing resolved yet.
+        assert_eq!(wm.windows_resolved(), 0);
+        assert_eq!(wm.windows_pending(), 3);
+
+        wm.resolve_window(w0.window_id);
+        assert_eq!(wm.windows_resolved(), 1);
+        assert_eq!(wm.windows_pending(), 2);
+
+        wm.resolve_window(w1.window_id);
+        wm.resolve_window(w2.window_id);
+        assert_eq!(wm.windows_resolved(), 3);
+        assert_eq!(wm.windows_pending(), 0);
+    }
+
+    #[test]
+    fn controller_shrink_on_low_correction_rate_and_clamp_to_min() {
+        // initial=5000, min=2000, max=30_000, step=500.
+        let mut ctrl = SpeculationWindowController::new(5000, 2000, 30_000, 500);
+        let drift = CorrectionDrift {
+            wer_approx: 0.0,
+            confidence_delta: 0.0,
+            segment_count_delta: 0,
+            text_edit_distance: 0,
+        };
+
+        // Feed 15 confirmations: correction_rate ≈ 0 (< LOW_CORRECTION_RATE=0.0625),
+        // window_count=15 > 10, confidence=15/20=0.75 >= 0.5.
+        for _ in 0..15 {
+            let decision = CorrectionDecision::Confirm {
+                seq: 0,
+                drift: drift.clone(),
+            };
+            ctrl.observe(&decision, &drift);
+        }
+
+        let action = ctrl.recommend();
+        assert_eq!(
+            action,
+            ControllerAction::Shrink(500),
+            "low correction rate + enough windows should recommend Shrink"
+        );
+
+        let new_size = ctrl.apply();
+        assert_eq!(new_size, 4500, "5000 - 500 = 4500");
+        assert!(
+            !ctrl.is_fallback_active(),
+            "normal shrink should not activate fallback"
+        );
+
+        // Drive window down to min via repeated shrinks.
+        for _ in 0..20 {
+            ctrl.observe(
+                &CorrectionDecision::Confirm {
+                    seq: 0,
+                    drift: drift.clone(),
+                },
+                &drift,
+            );
+            ctrl.apply();
+        }
+        assert!(
+            ctrl.current_window_ms() >= 2000,
+            "window must not go below min_window_ms=2000, got {}",
+            ctrl.current_window_ms()
+        );
+    }
+
+    #[test]
+    fn correction_tracker_get_partial_present_absent_and_retracted() {
+        let mut tracker = CorrectionTracker::new(CorrectionTolerance::default());
+
+        // Unknown seq → None.
+        assert!(tracker.get_partial(42).is_none());
+
+        let partial = PartialTranscript::new(
+            7,
+            0,
+            "fast".to_owned(),
+            vec![seg("hello", Some(0.9))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        tracker.register_partial(partial);
+
+        // Known seq → Some, status Pending.
+        let found = tracker.get_partial(7).expect("should find seq=7");
+        assert_eq!(found.seq, 7);
+        assert_eq!(found.status, PartialStatus::Pending);
+
+        // Force correction via always_correct, verify Retracted status.
+        let tol = CorrectionTolerance {
+            always_correct: true,
+            ..CorrectionTolerance::default()
+        };
+        let mut tracker2 = CorrectionTracker::new(tol);
+        let p2 = PartialTranscript::new(
+            0,
+            0,
+            "fast".to_owned(),
+            vec![seg("foo", Some(0.8))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        tracker2.register_partial(p2);
+        tracker2
+            .submit_quality_result(0, "q", vec![seg("foo", Some(0.8))], 100)
+            .unwrap();
+
+        let p = tracker2.get_partial(0).unwrap();
+        assert_eq!(
+            p.status,
+            PartialStatus::Retracted,
+            "always_correct should retract the partial"
+        );
+        assert!(
+            tracker2.all_resolved(),
+            "retracted partial counts as resolved"
+        );
+    }
+
+    #[test]
+    fn evidence_ledger_window_size_trend_order_and_negative_latency_savings() {
+        let mut ledger = CorrectionEvidenceLedger::new(10);
+
+        let make_entry = |window_id: u64, window_size_ms: u64, fast_ms: u64, quality_ms: u64| {
+            CorrectionEvidenceEntry {
+                entry_id: window_id,
+                window_id,
+                run_id: "r".into(),
+                timestamp_rfc3339: "2026-01-01T00:00:00Z".into(),
+                fast_model_id: "tiny".into(),
+                fast_latency_ms: fast_ms,
+                fast_confidence_mean: 0.8,
+                fast_segment_count: 1,
+                quality_model_id: "large".into(),
+                quality_latency_ms: quality_ms,
+                quality_confidence_mean: 0.9,
+                quality_segment_count: 1,
+                drift: CorrectionDrift {
+                    wer_approx: 0.0,
+                    confidence_delta: 0.0,
+                    segment_count_delta: 0,
+                    text_edit_distance: 0,
+                },
+                decision: "confirm".into(),
+                window_size_ms,
+                correction_rate_at_decision: 0.0,
+                controller_confidence: 1.0,
+                fallback_active: false,
+                fallback_reason: None,
+            }
+        };
+
+        // fast=400ms > quality=300ms → negative latency savings.
+        ledger.record(make_entry(0, 3000, 400, 300));
+        ledger.record(make_entry(1, 4000, 400, 300));
+
+        // window_size_trend preserves insertion order.
+        let trend = ledger.window_size_trend();
+        assert_eq!(trend, vec![(0, 3000), (1, 4000)]);
+
+        // latency_savings_pct: (300-400)/300*100 = -33.3...%
+        let savings = ledger.latency_savings_pct();
+        assert!(
+            savings < 0.0,
+            "fast model slower than quality should yield negative savings: got {savings}"
+        );
+        assert!(
+            (savings - (-100.0 / 3.0)).abs() < 0.01,
+            "expected ~-33.33%, got {savings}"
+        );
+    }
+
+    // ── Task #224 — speculation pass 5 edge-case tests ───────────────
+
+    #[test]
+    fn controller_recommend_grows_on_runaway_correction_rate() {
+        let mut ctrl = SpeculationWindowController::new(5000, 1000, 30_000, 1000);
+        let drift = CorrectionDrift {
+            wer_approx: 0.9,
+            confidence_delta: 0.1,
+            segment_count_delta: 0,
+            text_edit_distance: 50,
+        };
+
+        // 10 corrections → correction_rate > 0.75 (runaway)
+        for _ in 0..10 {
+            let correction =
+                CorrectionEvent::new(0, 0, 0, "q".to_owned(), vec![], 100, "t".to_owned(), &[]);
+            ctrl.observe(&CorrectionDecision::Correct { correction }, &drift);
+        }
+
+        let action = ctrl.recommend();
+        assert_eq!(
+            action,
+            ControllerAction::Grow(1000),
+            "runaway correction rate should recommend Grow"
+        );
+    }
+
+    #[test]
+    fn controller_recommend_force_shrink_after_twenty_consecutive_confirmations() {
+        let mut ctrl = SpeculationWindowController::new(5000, 2000, 30_000, 500);
+        let drift = CorrectionDrift {
+            wer_approx: 0.0,
+            confidence_delta: 0.0,
+            segment_count_delta: 0,
+            text_edit_distance: 0,
+        };
+
+        // 20 consecutive confirmations → consecutive_zero_corrections == 20
+        for _ in 0..20 {
+            ctrl.observe(
+                &CorrectionDecision::Confirm {
+                    seq: 0,
+                    drift: drift.clone(),
+                },
+                &drift,
+            );
+        }
+
+        let action = ctrl.recommend();
+        assert_eq!(
+            action,
+            ControllerAction::Shrink(500),
+            "20 consecutive zero-correction windows should force shrink"
+        );
+
+        // A correction resets the counter.
+        let correction =
+            CorrectionEvent::new(0, 0, 0, "q".to_owned(), vec![], 100, "t".to_owned(), &[]);
+        ctrl.observe(&CorrectionDecision::Correct { correction }, &drift);
+        assert_eq!(ctrl.state().window_count, 21);
+    }
+
+    #[test]
+    fn controller_apply_clears_runaway_fallback_after_rate_drops() {
+        let mut ctrl = SpeculationWindowController::new(5000, 1000, 30_000, 500);
+        let drift = CorrectionDrift {
+            wer_approx: 0.9,
+            confidence_delta: 0.0,
+            segment_count_delta: 0,
+            text_edit_distance: 0,
+        };
+
+        // Drive into runaway: 10 corrections.
+        for _ in 0..10 {
+            let correction =
+                CorrectionEvent::new(0, 0, 0, "q".to_owned(), vec![], 100, "t".to_owned(), &[]);
+            ctrl.observe(&CorrectionDecision::Correct { correction }, &drift);
+        }
+        ctrl.apply();
+        assert!(ctrl.is_fallback_active(), "should be in runaway fallback");
+
+        // Flood with confirmations to drop rate below 0.75.
+        let low_drift = CorrectionDrift {
+            wer_approx: 0.0,
+            confidence_delta: 0.0,
+            segment_count_delta: 0,
+            text_edit_distance: 0,
+        };
+        for _ in 0..40 {
+            ctrl.observe(
+                &CorrectionDecision::Confirm {
+                    seq: 0,
+                    drift: low_drift.clone(),
+                },
+                &low_drift,
+            );
+        }
+
+        ctrl.apply();
+        assert!(
+            !ctrl.is_fallback_active(),
+            "fallback should clear once correction rate drops below 0.75"
+        );
+    }
+
+    #[test]
+    fn correction_event_is_significant_threshold_boundary() {
+        let fast_segs = vec![seg("the cat sat", Some(0.8))];
+        let quality_segs = vec![seg("a dog ran fast", Some(0.95))];
+        let event = CorrectionEvent::new(
+            0,
+            0,
+            0,
+            "quality".to_owned(),
+            quality_segs,
+            200,
+            "2026-01-01T00:00:00Z".to_owned(),
+            &fast_segs,
+        );
+
+        assert!(
+            event.drift.wer_approx > 0.0,
+            "precondition: divergent text must yield positive WER"
+        );
+
+        // Threshold below WER → significant.
+        assert!(event.is_significant(0.0));
+
+        // Threshold at exactly WER → NOT significant (strict >).
+        let exact = event.drift.wer_approx;
+        assert!(
+            !event.is_significant(exact),
+            "WER == threshold should not be significant"
+        );
+
+        // Threshold above WER → not significant.
+        assert!(!event.is_significant(1.0));
+    }
+
+    #[test]
+    fn window_manager_merge_skips_resolved_window_with_no_results() {
+        let mut wm = WindowManager::new("run-skip", 5000, 0);
+
+        // Window 0: resolved with no fast or quality result.
+        let w0 = wm.next_window(0, "h0");
+        wm.resolve_window(w0.window_id);
+
+        // Window 1: resolved with a quality result (distinct timestamps).
+        let w1 = wm.next_window(5000, "h1");
+        wm.record_quality_result(w1.window_id, vec![timed_seg("hello", 5.0, 6.0, Some(0.9))]);
+        wm.resolve_window(w1.window_id);
+
+        let merged = wm.merge_segments();
+        assert_eq!(
+            merged.len(),
+            1,
+            "resolved window with no results must be skipped"
+        );
+        assert_eq!(merged[0].text, "hello");
+    }
+
+    // ── Task #229 — speculation.rs pass 6 edge-case tests ──────────────
+
+    #[test]
+    fn speculation_window_contains_ms_when_overlap_exceeds_duration() {
+        // overlap_ms > duration: contains_ms ignores overlap entirely
+        // and operates only on raw start/end boundaries.
+        let w = SpeculationWindow::new(0, "r".into(), 1000, 4000, 5000, "h".into());
+        assert_eq!(w.duration_ms(), 3000);
+        assert!(w.contains_ms(1000), "start inclusive");
+        assert!(w.contains_ms(3999), "end-1 inclusive");
+        assert!(!w.contains_ms(4000), "end exclusive");
+        assert!(!w.contains_ms(999), "before start");
+    }
+
+    #[test]
+    fn correction_drift_asymmetric_empty_fast_vs_populated_quality() {
+        // Fast is empty, quality has segments → WER should be 1.0 (all words are edits).
+        let fast: Vec<TranscriptionSegment> = vec![];
+        let quality = vec![seg("hello world", Some(0.9)), seg("goodbye", Some(0.8))];
+        let drift = CorrectionDrift::compute(&fast, &quality);
+
+        // max_words = max(0, 3).max(1) = 3; word_edit_dist = 3 (all inserts).
+        assert!(
+            (drift.wer_approx - 1.0).abs() < 1e-9,
+            "empty fast vs populated quality should give WER ≈ 1.0, got {}",
+            drift.wer_approx
+        );
+        // segment_count_delta = quality_count - fast_count = 2 - 0 = 2
+        assert_eq!(
+            drift.segment_count_delta, 2,
+            "delta should be +2 (quality has 2, fast has 0)"
+        );
+        // mean_confidence of empty fast = 0.0, mean of quality = (0.9+0.8)/2 = 0.85
+        assert!(
+            (drift.confidence_delta - 0.85).abs() < 1e-9,
+            "confidence_delta should be 0.85, got {}",
+            drift.confidence_delta
+        );
+    }
+
+    #[test]
+    fn evidence_ledger_capacity_one_always_evicts_previous_entry() {
+        let mut ledger = CorrectionEvidenceLedger::new(1);
+
+        let make_entry = |id: u64| CorrectionEvidenceEntry {
+            entry_id: id,
+            window_id: id,
+            run_id: "r".to_owned(),
+            timestamp_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            fast_model_id: "fast".to_owned(),
+            fast_latency_ms: 10,
+            fast_confidence_mean: 0.9,
+            fast_segment_count: 1,
+            quality_model_id: "quality".to_owned(),
+            quality_latency_ms: 50,
+            quality_confidence_mean: 0.95,
+            quality_segment_count: 1,
+            drift: CorrectionDrift::compute(&[], &[]),
+            decision: "confirm".to_owned(),
+            window_size_ms: 3000,
+            correction_rate_at_decision: 0.0,
+            controller_confidence: 0.5,
+            fallback_active: false,
+            fallback_reason: None,
+        };
+
+        ledger.record(make_entry(1));
+        assert_eq!(ledger.entries().len(), 1);
+        assert_eq!(ledger.total_recorded(), 1);
+
+        // Second record evicts the first (capacity = 1).
+        ledger.record(make_entry(2));
+        assert_eq!(
+            ledger.entries().len(),
+            1,
+            "capacity 1 should only keep 1 entry"
+        );
+        assert_eq!(ledger.entries()[0].entry_id, 2, "should keep the latest");
+        assert_eq!(
+            ledger.total_recorded(),
+            2,
+            "total_recorded should track all, including evicted"
+        );
+
+        // Third record again evicts.
+        ledger.record(make_entry(3));
+        assert_eq!(ledger.entries().len(), 1);
+        assert_eq!(ledger.entries()[0].entry_id, 3);
+        assert_eq!(ledger.total_recorded(), 3);
+    }
+
+    #[test]
+    fn controller_recommend_holds_unconditionally_below_min_windows_for_adapt() {
+        let mut ctrl = SpeculationWindowController::new(3000, 1000, 10000, 500);
+
+        // Feed 4 corrections (all extreme — 100% correction rate, high WER).
+        // MIN_WINDOWS_FOR_ADAPT is 5, so at count 4 we should still get Hold.
+        let drift = CorrectionDrift {
+            wer_approx: 1.0,
+            confidence_delta: 0.5,
+            segment_count_delta: 1,
+            text_edit_distance: 10,
+        };
+        let decision = CorrectionDecision::Confirm {
+            seq: 0,
+            drift: drift.clone(),
+        };
+        for _ in 0..4 {
+            ctrl.observe(&decision, &drift);
+        }
+
+        let action = ctrl.recommend();
+        assert!(
+            matches!(action, ControllerAction::Hold),
+            "below MIN_WINDOWS_FOR_ADAPT (5), should always Hold regardless of rate, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn correction_tracker_register_partial_duplicate_seq_overwrites() {
+        let mut tracker = CorrectionTracker::new(CorrectionTolerance::default());
+
+        let p1 = PartialTranscript::new(
+            1,
+            100,
+            "fast-model".to_owned(),
+            vec![seg("first version", Some(0.8))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        tracker.register_partial(p1);
+
+        let p2 = PartialTranscript::new(
+            1, // same seq
+            100,
+            "fast-model".to_owned(),
+            vec![seg("second version", Some(0.9))],
+            60,
+            "2026-01-01T00:00:01Z".to_owned(),
+        );
+        tracker.register_partial(p2);
+
+        // Only one partial should be stored (the second overwrites the first).
+        let retrieved = tracker.get_partial(1);
+        assert!(retrieved.is_some(), "seq 1 should still be present");
+        assert_eq!(
+            retrieved.unwrap().segments[0].text,
+            "second version",
+            "overwritten partial should have the latest text"
+        );
+
+        // Both latencies were accumulated (50 + 60 = 110).
+        let stats = tracker.stats();
+        assert_eq!(
+            stats.total_fast_latency_ms, 110,
+            "both registrations should accumulate latency"
+        );
+    }
+
+    #[test]
+    fn controller_recommend_grows_on_moderate_correction_rate_and_high_wer() {
+        // Grow path at lines 1085-1090: correction_rate > 0.25 AND mean_wer > 0.125
+        // AND current_window_ms < max_window_ms AND confidence >= 0.5.
+        // Must NOT hit the runaway branch (rate <= 0.75).
+        let mut ctrl = SpeculationWindowController::new(3000, 1000, 10000, 500);
+
+        // Drive 10 observations: 4 corrections, 6 confirmations → rate = 4/10 = 0.4.
+        // Use wer_approx = 0.2 (> 0.125 threshold) for all.
+        let high_wer_drift = CorrectionDrift {
+            wer_approx: 0.2,
+            confidence_delta: 0.0,
+            segment_count_delta: 0,
+            text_edit_distance: 0,
+        };
+        for i in 0..10u64 {
+            let decision = if i < 4 {
+                CorrectionDecision::Correct {
+                    correction: CorrectionEvent::new(
+                        i,
+                        i,
+                        i,
+                        "quality".to_owned(),
+                        vec![],
+                        100,
+                        "2026-01-01T00:00:00Z".to_owned(),
+                        &[],
+                    ),
+                }
+            } else {
+                CorrectionDecision::Confirm {
+                    seq: i,
+                    drift: high_wer_drift.clone(),
+                }
+            };
+            ctrl.observe(&decision, &high_wer_drift);
+        }
+
+        // confidence = 10 / 20.0 = 0.5, correction_rate = 0.4, mean_wer = 0.2
+        let action = ctrl.recommend();
+        assert!(
+            matches!(action, ControllerAction::Grow(500)),
+            "moderate correction rate + high WER should Grow, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn controller_recommend_holds_at_max_window_even_with_runaway_correction_rate() {
+        // Runaway branch (lines 1068-1072): rate > 0.75 AND current < max → Grow.
+        // But when current_window_ms == max_window_ms, it falls through to Hold.
+        let mut ctrl = SpeculationWindowController::new(10000, 1000, 10000, 500);
+
+        let drift = CorrectionDrift {
+            wer_approx: 0.5,
+            confidence_delta: 0.0,
+            segment_count_delta: 0,
+            text_edit_distance: 0,
+        };
+        // 5 corrections, 0 confirmations → rate = 5/5 = 1.0 (well above 0.75).
+        for i in 0..5u64 {
+            let decision = CorrectionDecision::Correct {
+                correction: CorrectionEvent::new(
+                    i,
+                    i,
+                    i,
+                    "quality".to_owned(),
+                    vec![],
+                    100,
+                    "2026-01-01T00:00:00Z".to_owned(),
+                    &[],
+                ),
+            };
+            ctrl.observe(&decision, &drift);
+        }
+
+        let action = ctrl.recommend();
+        // Even though rate is runaway, current_window_ms == max_window_ms so guard fails.
+        // Falls through; confidence = 5/20 = 0.25 < 0.5, so returns Hold.
+        assert!(
+            matches!(action, ControllerAction::Hold),
+            "at max window with runaway rate should Hold, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn correction_tracker_triggers_correction_on_confidence_delta_alone() {
+        // The trigger condition at line 741: confidence_delta > max_confidence_delta.
+        // Here wer and edit_distance are within tolerance; only confidence_delta exceeds.
+        let tolerance = CorrectionTolerance {
+            max_wer: 1.0,              // very lenient
+            max_confidence_delta: 0.1, // tight threshold
+            max_edit_distance: 1000,   // very lenient
+            always_correct: false,
+        };
+        let mut tracker = CorrectionTracker::new(tolerance);
+
+        let p = PartialTranscript::new(
+            0,
+            100,
+            "fast".to_owned(),
+            vec![seg("hello world", Some(0.5))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        tracker.register_partial(p);
+
+        // Quality has same text but much higher confidence → large confidence_delta.
+        let quality_segs = vec![seg("hello world", Some(0.95))];
+        let decision = tracker
+            .submit_quality_result(100, "quality", quality_segs, 200)
+            .unwrap();
+        assert!(
+            matches!(decision, CorrectionDecision::Correct { .. }),
+            "confidence_delta 0.45 > 0.1 should trigger correction, got confirm"
+        );
+    }
+
+    #[test]
+    fn window_manager_status_transitions_through_fast_complete_and_quality_complete() {
+        let mut wm = WindowManager::new("test-run", 3000, 500);
+        let win = wm.next_window(0, "abc123");
+        let wid = win.window_id;
+
+        // Initial status is Pending.
+        let ws = wm.get_window(wid).unwrap();
+        assert_eq!(ws.status, WindowStatus::Pending);
+
+        // After recording fast result → FastComplete.
+        let partial = PartialTranscript::new(
+            0,
+            wid,
+            "fast".to_owned(),
+            vec![seg("fast result", Some(0.8))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        wm.record_fast_result(wid, partial);
+        let ws = wm.get_window(wid).unwrap();
+        assert_eq!(ws.status, WindowStatus::FastComplete);
+
+        // After recording quality result → QualityComplete.
+        wm.record_quality_result(wid, vec![seg("quality result", Some(0.95))]);
+        let ws = wm.get_window(wid).unwrap();
+        assert_eq!(ws.status, WindowStatus::QualityComplete);
+
+        // After resolving → Resolved.
+        wm.resolve_window(wid);
+        let ws = wm.get_window(wid).unwrap();
+        assert_eq!(ws.status, WindowStatus::Resolved);
+    }
+
+    #[test]
+    fn evidence_ledger_to_evidence_json_shape_and_diagnostics_block() {
+        let mut ledger = CorrectionEvidenceLedger::new(10);
+
+        let entry = CorrectionEvidenceEntry {
+            entry_id: 0,
+            window_id: 100,
+            run_id: "test-run".to_owned(),
+            timestamp_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            fast_model_id: "fast".to_owned(),
+            fast_latency_ms: 50,
+            fast_confidence_mean: 0.5,
+            fast_segment_count: 1,
+            quality_model_id: "quality".to_owned(),
+            quality_latency_ms: 200,
+            quality_confidence_mean: 0.95,
+            quality_segment_count: 2,
+            drift: CorrectionDrift {
+                wer_approx: 0.15,
+                confidence_delta: 0.3,
+                segment_count_delta: 1,
+                text_edit_distance: 5,
+            },
+            decision: "correct".to_owned(),
+            window_size_ms: 3000,
+            correction_rate_at_decision: 0.25,
+            controller_confidence: 0.5,
+            fallback_active: false,
+            fallback_reason: None,
+        };
+        ledger.record(entry);
+
+        let json = ledger.to_evidence_json();
+
+        // Top-level keys.
+        assert_eq!(json["type"].as_str(), Some("correction_evidence_ledger"));
+        assert_eq!(json["total_recorded"].as_u64(), Some(1));
+        assert_eq!(json["retained"].as_u64(), Some(1));
+        assert_eq!(json["capacity"].as_u64(), Some(10));
+
+        // Diagnostics block.
+        let diag = &json["diagnostics"];
+        assert!(diag.is_object(), "diagnostics should be an object");
+        assert!(
+            diag.get("correction_rate").is_some(),
+            "missing correction_rate"
+        );
+        assert!(
+            diag.get("mean_fast_latency_ms").is_some(),
+            "missing mean_fast_latency_ms"
+        );
+        assert!(
+            diag.get("mean_quality_latency_ms").is_some(),
+            "missing mean_quality_latency_ms"
+        );
+        assert!(diag.get("mean_wer").is_some(), "missing mean_wer");
+        assert!(
+            diag.get("latency_savings_pct").is_some(),
+            "missing latency_savings_pct"
+        );
+
+        // Entries array.
+        let entries = json["entries"]
+            .as_array()
+            .expect("entries should be an array");
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn partial_transcript_confirm_and_retract_direct() {
+        let mut pt = PartialTranscript::new(
+            0,
+            100,
+            "fast".to_owned(),
+            vec![seg("hello", Some(0.9))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        assert!(matches!(pt.status, PartialStatus::Pending));
+
+        pt.confirm();
+        assert!(matches!(pt.status, PartialStatus::Confirmed));
+        // Idempotent — calling again doesn't panic.
+        pt.confirm();
+        assert!(matches!(pt.status, PartialStatus::Confirmed));
+
+        pt.retract();
+        assert!(matches!(pt.status, PartialStatus::Retracted));
+        // Idempotent.
+        pt.retract();
+        assert!(matches!(pt.status, PartialStatus::Retracted));
+    }
+
+    #[test]
+    fn correction_drift_populated_fast_vs_empty_quality() {
+        let fast = vec![seg("hello world goodbye", Some(0.8))];
+        let quality: Vec<TranscriptionSegment> = vec![];
+        let drift = CorrectionDrift::compute(&fast, &quality);
+
+        assert_eq!(drift.segment_count_delta, -1, "quality(0) - fast(1) = -1");
+        assert!(
+            (drift.wer_approx - 1.0).abs() < 1e-9,
+            "3 fast words, 0 quality → WER ~1.0, got {}",
+            drift.wer_approx
+        );
+        assert_eq!(
+            drift.text_edit_distance,
+            "hello world goodbye".len(),
+            "edit distance should equal fast text length"
+        );
+        assert!(
+            (drift.confidence_delta - 0.8).abs() < 1e-9,
+            "fast conf=0.8, quality conf=0.0 → delta=0.8, got {}",
+            drift.confidence_delta
+        );
+    }
+
+    #[test]
+    fn correction_tracker_rate_zero_after_all_confirmations() {
+        let mut tracker = CorrectionTracker::new(CorrectionTolerance {
+            max_wer: 1.0,
+            max_confidence_delta: 1.0,
+            max_edit_distance: 1000,
+            always_correct: false,
+        });
+
+        // Register two partials with matching quality text.
+        for i in 0..2u64 {
+            let p = PartialTranscript::new(
+                i,
+                i + 100,
+                "fast".to_owned(),
+                vec![seg("same text", Some(0.9))],
+                50,
+                "2026-01-01T00:00:00Z".to_owned(),
+            );
+            tracker.register_partial(p);
+        }
+
+        // Submit identical quality for both → both confirm.
+        for i in 0..2u64 {
+            let decision = tracker
+                .submit_quality_result(i + 100, "quality", vec![seg("same text", Some(0.9))], 200)
+                .expect("should succeed");
+            assert!(matches!(decision, CorrectionDecision::Confirm { .. }));
+        }
+
+        let stats = tracker.stats();
+        assert_eq!(stats.corrections_emitted, 0);
+        assert_eq!(stats.confirmations_emitted, 2);
+        // This exercises the arithmetic branch (line 793), not the total==0 early return.
+        assert!(
+            (tracker.correction_rate() - 0.0).abs() < 1e-9,
+            "all confirmations → correction_rate should be 0.0"
+        );
+    }
+
+    #[test]
+    fn calibration_tracker_window_size_zero_always_empty() {
+        let mut ct = CalibrationTracker::new(0);
+
+        // Every record is immediately evicted.
+        for _ in 0..5 {
+            ct.record(1.0, true);
+        }
+        assert_eq!(ct.sample_count(), 0, "window_size=0 should always evict");
+        assert!(
+            (ct.brier_score() - 0.0).abs() < 1e-9,
+            "empty tracker should return Brier 0.0"
+        );
+    }
+
+    #[test]
+    fn correction_tracker_triggers_correction_on_edit_distance_alone() {
+        let tolerance = CorrectionTolerance {
+            max_wer: 1.0,              // very lenient (> not >=)
+            max_confidence_delta: 1.0, // very lenient
+            max_edit_distance: 2,      // tight
+            always_correct: false,
+        };
+        let mut tracker = CorrectionTracker::new(tolerance);
+
+        let p = PartialTranscript::new(
+            0,
+            100,
+            "fast".to_owned(),
+            vec![seg("abc", Some(0.5))],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        tracker.register_partial(p);
+
+        // Quality text differs by 3 chars → edit_distance = 3 > max_edit_distance (2).
+        // But it's one word vs one word → wer = 1.0, and max_wer = 1.0, so wer check (>) is false.
+        // Confidence_delta = 0.0, max_confidence_delta = 1.0, so that check is false too.
+        let decision = tracker
+            .submit_quality_result(100, "quality", vec![seg("xyz", Some(0.5))], 200)
+            .expect("should succeed");
+        assert!(
+            matches!(decision, CorrectionDecision::Correct { .. }),
+            "edit_distance 3 > max 2 should trigger correction"
+        );
+        assert_eq!(tracker.stats().corrections_emitted, 1);
     }
 }
