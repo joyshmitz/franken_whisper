@@ -376,7 +376,7 @@ pub struct IncrementalExportManifest {
 
 const CURSOR_FILENAME: &str = "sync_cursor.json";
 
-/// Perform an incremental export: only records whose `started_at` is
+/// Perform an incremental export: only records whose `finished_at` is
 /// strictly greater than the cursor timestamp are emitted.  When no cursor
 /// file exists inside `state_root`, all records are exported (equivalent to
 /// a full export) and a new cursor file is written.
@@ -434,9 +434,9 @@ fn export_incremental_inner(
         events_jsonl_sha256: sha256_file(&events_final)?,
     };
 
-    // Determine the new cursor: the maximum started_at of the exported runs,
+    // Determine the new cursor: the maximum finished_at of the exported runs,
     // or the previous cursor if nothing was exported.
-    let new_cursor_ts = max_started_at(&connection, after_ts.as_deref())?.unwrap_or_else(|| {
+    let new_cursor_ts = max_finished_at(&connection, after_ts.as_deref())?.unwrap_or_else(|| {
         cursor_used
             .as_ref()
             .map(|c| c.last_export_rfc3339.clone())
@@ -504,14 +504,14 @@ fn export_table_runs_incremental(
         Some(ts) => (
             "SELECT id, started_at, finished_at, backend, input_path, \
              normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json \
-             FROM runs WHERE started_at > ?1 ORDER BY started_at ASC"
+             FROM runs WHERE finished_at > ?1 ORDER BY finished_at ASC"
                 .to_owned(),
             vec![SqliteValue::Text(ts.to_owned())],
         ),
         None => (
             "SELECT id, started_at, finished_at, backend, input_path, \
              normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json \
-             FROM runs ORDER BY started_at ASC"
+             FROM runs ORDER BY finished_at ASC"
                 .to_owned(),
             vec![],
         ),
@@ -561,11 +561,11 @@ fn collect_exported_run_ids(
 ) -> FwResult<Vec<String>> {
     let (sql, params) = match after_ts {
         Some(ts) => (
-            "SELECT id FROM runs WHERE started_at > ?1 ORDER BY started_at ASC".to_owned(),
+            "SELECT id FROM runs WHERE finished_at > ?1 ORDER BY finished_at ASC".to_owned(),
             vec![SqliteValue::Text(ts.to_owned())],
         ),
         None => (
-            "SELECT id FROM runs ORDER BY started_at ASC".to_owned(),
+            "SELECT id FROM runs ORDER BY finished_at ASC".to_owned(),
             vec![],
         ),
     };
@@ -662,14 +662,14 @@ fn export_table_events_for_runs(
     Ok(count)
 }
 
-/// Find the maximum `started_at` among runs matching the incremental filter.
-fn max_started_at(connection: &Connection, after_ts: Option<&str>) -> FwResult<Option<String>> {
+/// Find the maximum `finished_at` among runs matching the incremental filter.
+fn max_finished_at(connection: &Connection, after_ts: Option<&str>) -> FwResult<Option<String>> {
     let (sql, params) = match after_ts {
         Some(ts) => (
-            "SELECT MAX(started_at) FROM runs WHERE started_at > ?1".to_owned(),
+            "SELECT MAX(finished_at) FROM runs WHERE finished_at > ?1".to_owned(),
             vec![SqliteValue::Text(ts.to_owned())],
         ),
-        None => ("SELECT MAX(started_at) FROM runs".to_owned(), vec![]),
+        None => ("SELECT MAX(finished_at) FROM runs".to_owned(), vec![]),
     };
 
     let rows = if params.is_empty() {
@@ -906,6 +906,20 @@ fn import_runs(
                     continue;
                 }
                 ConflictPolicy::Overwrite => {
+                    // Cascade-delete associated segments and events before
+                    // removing the run to prevent orphaned rows.
+                    connection
+                        .execute_with_params(
+                            "DELETE FROM segments WHERE run_id = ?1",
+                            &[SqliteValue::Text(id.clone())],
+                        )
+                        .map_err(|error| FwError::Storage(error.to_string()))?;
+                    connection
+                        .execute_with_params(
+                            "DELETE FROM events WHERE run_id = ?1",
+                            &[SqliteValue::Text(id.clone())],
+                        )
+                        .map_err(|error| FwError::Storage(error.to_string()))?;
                     connection
                         .execute_with_params(
                             "DELETE FROM runs WHERE id = ?1",
@@ -4358,6 +4372,131 @@ mod tests {
             "overwrite should replace old transcript column"
         );
         assert_eq!(result.runs_imported, 1, "should report 1 run imported");
+    }
+
+    #[test]
+    fn overwrite_run_cascade_deletes_segments_and_events() {
+        // When a run is overwritten, its old segments and events must be
+        // cascade-deleted to prevent orphaned rows in the database.
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("source.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+        let target_db = dir.path().join("target.sqlite3");
+
+        let store = RunStore::open(&db_path).expect("store open");
+        let report = fixture_report("cascade-1", &db_path);
+        store.persist_report(&report).expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        // First import — populates runs, segments, events.
+        import(
+            &target_db,
+            &export_dir,
+            &state_root,
+            ConflictPolicy::Overwrite,
+        )
+        .expect("first import");
+
+        // Now mutate the transcript in runs.jsonl (creating a conflict) and
+        // clear the segments/events (no segments/events in new import). This
+        // should cause the overwrite to delete old segments via cascade.
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read");
+        let first_line = content.lines().next().expect("has line");
+        let mut mutated: serde_json::Value =
+            serde_json::from_str(first_line).expect("valid run");
+        mutated["transcript"] = json!("cascade-overwritten");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("s")),
+        )
+        .expect("write");
+
+        // Empty out segments.jsonl so no segments are re-imported.
+        let seg_path = export_dir.join("segments.jsonl");
+        fs::write(&seg_path, "").expect("write empty segments");
+
+        // Empty out events.jsonl so no events are re-imported.
+        let evt_path = export_dir.join("events.jsonl");
+        fs::write(&evt_path, "").expect("write empty events");
+
+        // Update manifest checksums and row counts.
+        let manifest_path = export_dir.join("manifest.json");
+        let mut manifest_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read"))
+                .expect("parse");
+        manifest_value["checksums"]["runs_jsonl_sha256"] =
+            json!(sha256_file(&runs_path).expect("checksum"));
+        manifest_value["checksums"]["segments_jsonl_sha256"] =
+            json!(sha256_file(&seg_path).expect("checksum"));
+        manifest_value["checksums"]["events_jsonl_sha256"] =
+            json!(sha256_file(&evt_path).expect("checksum"));
+        manifest_value["row_counts"]["runs"] = json!(1);
+        manifest_value["row_counts"]["segments"] = json!(0);
+        manifest_value["row_counts"]["events"] = json!(0);
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest_value).expect("serialize"),
+        )
+        .expect("write manifest");
+
+        // Second import with Overwrite.
+        import(
+            &target_db,
+            &export_dir,
+            &state_root,
+            ConflictPolicy::Overwrite,
+        )
+        .expect("overwrite import");
+
+        // Verify segments were cascade-deleted.
+        let conn = Connection::open(target_db.display().to_string()).expect("open");
+        let seg_count_after = conn
+            .query_with_params(
+                "SELECT COUNT(*) FROM segments WHERE run_id = ?1",
+                &[SqliteValue::Text("cascade-1".to_owned())],
+            )
+            .expect("query segments after");
+
+        let seg_after = match seg_count_after[0].get(0) {
+            Some(SqliteValue::Integer(n)) => *n,
+            _ => panic!("expected integer count"),
+        };
+
+        assert_eq!(
+            seg_after, 0,
+            "old segments should be cascade-deleted when run is overwritten"
+        );
+
+        // Verify events were cascade-deleted.
+        let evt_count_after = conn
+            .query_with_params(
+                "SELECT COUNT(*) FROM events WHERE run_id = ?1",
+                &[SqliteValue::Text("cascade-1".to_owned())],
+            )
+            .expect("query events after");
+
+        let evt_after = match evt_count_after[0].get(0) {
+            Some(SqliteValue::Integer(n)) => *n,
+            _ => panic!("expected integer count"),
+        };
+
+        assert_eq!(
+            evt_after, 0,
+            "old events should be cascade-deleted when run is overwritten"
+        );
+
+        // Verify the run itself was overwritten.
+        let run_rows = conn
+            .query_with_params(
+                "SELECT transcript FROM runs WHERE id = ?1",
+                &[SqliteValue::Text("cascade-1".to_owned())],
+            )
+            .expect("query run");
+        assert!(!run_rows.is_empty(), "run should exist after overwrite");
+        let transcript = value_to_string_sqlite(run_rows[0].get(0));
+        assert_eq!(transcript, "cascade-overwritten");
     }
 
     #[test]
