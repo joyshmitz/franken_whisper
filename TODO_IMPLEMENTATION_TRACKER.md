@@ -1229,3 +1229,60 @@
 - [ ] T8.2 Publish quality gate outcomes (pass/fail + notable long-running suites).
 - [ ] T8.3 Publish residual risks (placeholder stages in `franken_whisper`; long SSI tests runtime cost in `frankensqlite`).
 - [ ] T8.4 Publish next concrete execution packets with clear ownership and verification criteria.
+
+## U. Cross-Repo Completion Packet — Golden Drift + SSI Runtime + Architecture Backlog (2026-02-23)
+
+### U0. Task-control and bookkeeping hygiene
+- [x] U0.1 Open packet `U` as current-turn source-of-truth execution checklist.
+- [x] U0.2 Expand all remaining work into granular sub-tasks before implementation.
+- [x] U0.3 Keep status transitions explicit (`pending` -> `in progress` -> `done`/`blocked`) as work proceeds.
+- [x] U0.4 Record command evidence and file paths for each completed sub-task.
+
+### U1. `frankensqlite` golden-checksum drift resolution (`fsqlite-harness`)
+- [x] U1.1 Reproduce failing test: `cargo test --workspace --exclude fsqlite-e2e` and confirm `bd_1lsfu_2_core_sql_golden_checksums` failure mode.
+- [x] U1.2 Confirm drift category from test diagnostics (parser/execution blake3 mismatches across fuzz fixtures).
+- [ ] U1.3 Quantify drift scope (fixture count and parser-vs-execution breakdown) from failure artifact output.
+- [ ] U1.4 Run controlled checksum refresh flow using project-recommended command for this gate.
+- [ ] U1.5 Re-run `cargo test -p fsqlite-harness --test bd_1lsfu_2_core_sql_golden_checksums` and verify green.
+- [ ] U1.6 Re-run adjacent harness checksum/manifest tests to ensure no partial-update inconsistency.
+- [ ] U1.7 Document whether refreshed checksums are attributable to pre-existing parser/codegen changes in dirty tree.
+
+### U2. `frankensqlite` bd-3plop SSI runtime containment
+- [x] U2.1 Reproduce extreme runtime behavior in `crates/fsqlite-e2e/tests/bd_3plop_5_ssi_serialization_correctness.rs::ssi_serialization_correctness_ci_scale`.
+- [x] U2.2 Verify no hard crash/deadlock signature (active CPU + advancing worker process) during long run.
+- [x] U2.3 Review test workload constants and retry policy to identify worst-case wall-clock amplification vectors.
+- [x] U2.4 Review recent `fsqlite-core` SSI path edits to avoid introducing pathological over-abort behavior.
+- [x] U2.5 Roll back over-eager pre-check abort path in commit planning; keep decision-card semantics tied to actual SSI/FCW outcome path.
+- [x] U2.6 Keep targeted SSI decision tests green after rollback/refinement.
+- [ ] U2.7 Add runtime guardrails for CI-scale test (time budget / workload scaling) if still non-practical after behavioral fix.
+- [ ] U2.8 Validate `ssi_serialization_correctness_ci_scale` and `ssi_serialization_correctness_single_writer_smoke` complete within practical envelope on this host.
+
+### U3. `franken_whisper` architecture backlog from external feedback
+- [ ] U3.1 Add explicit compatibility-envelope doc section with crisp parity definitions:
+  - text parity target
+  - timestamp tolerance bound(s)
+  - diarization label stability envelope
+  - confidence comparability semantics.
+- [ ] U3.2 Define release-gate criteria mapping envelope targets to pass/fail checks.
+- [ ] U3.3 Add/extend deterministic replay/event-order invariant tests covering:
+  - stage ordering monotonicity
+  - event sequence determinism under failure path
+  - event sequence determinism under cancellation path.
+- [ ] U3.4 Add or update robot schema contract assertions for any new/clarified event invariants.
+- [ ] U3.5 Add operator-facing protocol note for tty replay/framing guarantees and link it from README/docs index.
+- [ ] U3.6 Ensure added docs align with existing `docs/tty-audio-protocol.md` semantics (no contradictory claims).
+
+### U4. Cross-repo quality gates and evidence capture
+- [x] U4.1 `frankensqlite`: re-run `cargo fmt --check`.
+- [x] U4.2 `frankensqlite`: re-run `cargo check --all-targets`.
+- [x] U4.3 `frankensqlite`: re-run `cargo clippy --all-targets -- -D warnings`.
+- [~] U4.4 `frankensqlite`: drive `cargo test` to full completion or isolate concrete blockers with reproducible commands and logs.
+- [ ] U4.5 `frankensqlite`: after U1/U2 fixes, re-run mandatory test gates to verify blocker closure.
+- [ ] U4.6 `franken_whisper`: run mandatory gates after U3 edits (`fmt`, `check`, `clippy -D warnings`, `test`).
+
+### U5. Final reconciliation and handoff quality
+- [ ] U5.1 Mark all completed packet rows (`T`, `U`) with final statuses and evidence references.
+- [ ] U5.2 Summarize exact changed files in both repos.
+- [ ] U5.3 Summarize exact pass/fail quality-gate matrix by command.
+- [ ] U5.4 List residual risks and what remains blocked vs completed.
+- [ ] U5.5 Provide concrete next execution packets only for genuinely remaining work.
