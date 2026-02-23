@@ -116,7 +116,11 @@ pub fn probe_duration_seconds_with_timeout(input: &Path, timeout: Duration) -> O
 
     let output = run_command_with_timeout("ffprobe", &args, None, Some(timeout)).ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.trim().parse::<f64>().ok()
+    let secs = stdout.trim().parse::<f64>().ok()?;
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
+    Some(secs)
 }
 
 fn capture_microphone(

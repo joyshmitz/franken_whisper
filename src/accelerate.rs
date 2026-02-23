@@ -4310,4 +4310,94 @@ mod tests {
         let result = harness.benchmark_attention(0, 0);
         assert_eq!(result.recommendation, super::AccelRecommendation::UseCpu);
     }
+
+    #[test]
+    fn benchmark_report_on_empty_harness() {
+        let harness = super::BenchmarkHarness::new();
+        let report = harness.report();
+        assert_eq!(report.overall, super::AccelRecommendation::UseCpu);
+        assert!(
+            !report.notes.is_empty(),
+            "empty harness should emit GPU-unavailable note"
+        );
+        assert!(report.results.is_empty());
+    }
+
+    #[test]
+    fn benchmark_result_from_timings_exact_boundary_values() {
+        // ratio == 1.1 exactly: not > 1.1, so EitherFine
+        let result =
+            super::benchmark_result_from_timings("boundary_high".to_owned(), 1100, Some(1000));
+        assert_eq!(
+            result.recommendation,
+            super::AccelRecommendation::EitherFine
+        );
+
+        // ratio == 0.9 exactly: not < 0.9, so EitherFine
+        let result2 =
+            super::benchmark_result_from_timings("boundary_low".to_owned(), 900, Some(1000));
+        assert_eq!(
+            result2.recommendation,
+            super::AccelRecommendation::EitherFine
+        );
+    }
+
+    #[test]
+    fn benchmark_recommend_backend_all_either_fine_returns_either() {
+        let harness = super::BenchmarkHarness {
+            results: vec![
+                super::BenchmarkResult {
+                    operation: "a".to_owned(),
+                    cpu_time_us: 1000,
+                    gpu_time_us: Some(1000),
+                    speedup_ratio: 1.0,
+                    recommendation: super::AccelRecommendation::EitherFine,
+                },
+                super::BenchmarkResult {
+                    operation: "b".to_owned(),
+                    cpu_time_us: 950,
+                    gpu_time_us: Some(1000),
+                    speedup_ratio: 0.95,
+                    recommendation: super::AccelRecommendation::EitherFine,
+                },
+            ],
+        };
+        assert_eq!(
+            harness.recommend_backend(),
+            super::AccelRecommendation::EitherFine
+        );
+    }
+
+    #[test]
+    fn jit_attention_block_cpu_value_is_shortest() {
+        let q = vec![1.0, 2.0, 3.0, 4.0];
+        let k = vec![0.5, 0.5, 0.5, 0.5];
+        let v = vec![10.0, 20.0]; // shortest
+        let result = super::jit_attention_block_cpu(&q, &k, &v);
+        assert_eq!(result.len(), 2);
+        for val in &result {
+            assert!(val.is_finite() && *val >= 0.0);
+        }
+    }
+
+    #[test]
+    fn jit_cache_key_ignores_label_field() {
+        let spec_no_label =
+            super::InferenceGraphSpec::new(super::InferenceGraphPattern::NormalizeSoftmax, 1, 64);
+        let spec_with_label =
+            super::InferenceGraphSpec::new(super::InferenceGraphPattern::NormalizeSoftmax, 1, 64)
+                .with_label("encoder_attn");
+        let spec_different_label =
+            super::InferenceGraphSpec::new(super::InferenceGraphPattern::NormalizeSoftmax, 1, 64)
+                .with_label("decoder_attn");
+
+        assert_eq!(
+            super::jit_cache_key(&spec_no_label),
+            super::jit_cache_key(&spec_with_label)
+        );
+        assert_eq!(
+            super::jit_cache_key(&spec_with_label),
+            super::jit_cache_key(&spec_different_label)
+        );
+    }
 }
