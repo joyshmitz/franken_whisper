@@ -147,7 +147,7 @@ fn parse_pcm16_mono_wav(path: &Path) -> Result<WavPcm16Mono, String> {
     let mut audio_format: Option<u16> = None;
     let mut data: Option<Vec<u8>> = None;
 
-    while cursor + 8 <= bytes.len() {
+    while cursor.saturating_add(8) <= bytes.len() {
         let chunk_id = &bytes[cursor..cursor + 4];
         let chunk_size = u32::from_le_bytes([
             bytes[cursor + 4],

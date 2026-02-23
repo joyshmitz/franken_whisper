@@ -1795,10 +1795,8 @@ fn probe_system_health_uncached() -> SystemHealthReport {
 
         // Check binary existence.
         let (binary_found, binary_path) = check_binary_for_kind(kind);
-        if !binary_found {
-            if mode == NativeExecutionMode::BridgeOnly || !native_available(kind) {
-                issues.push(format!("{} binary not found in PATH", kind.as_str()));
-            }
+        if !binary_found && (mode == NativeExecutionMode::BridgeOnly || !native_available(kind)) {
+            issues.push(format!("{} binary not found in PATH", kind.as_str()));
         }
 
         // Check version.

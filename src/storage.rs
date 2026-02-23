@@ -716,12 +716,17 @@ CREATE TABLE IF NOT EXISTS _meta (
         let result_json = serde_json::to_string(&report.result)?;
         let warnings_json = serde_json::to_string(&report.warnings)?;
         let has_replay = self.table_has_column("runs", "replay_json")?;
+        
+        let acceleration_json = match &report.result.acceleration {
+            Some(accel) => serde_json::to_string(accel)?,
+            None => "{}".to_owned(),
+        };
 
         if has_replay {
             let replay_json = serde_json::to_string(&report.replay)?;
             self.connection
                 .execute_with_params(
-                    "INSERT INTO runs (id, started_at, finished_at, backend, input_path, normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    "INSERT INTO runs (id, started_at, finished_at, backend, input_path, normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json, acceleration_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     &[
                         text_value(report.run_id.clone()),
                         text_value(report.started_at_rfc3339.clone()),
@@ -734,6 +739,7 @@ CREATE TABLE IF NOT EXISTS _meta (
                         text_value(warnings_json),
                         text_value(report.result.transcript.clone()),
                         text_value(replay_json),
+                        text_value(acceleration_json),
                     ],
                 )
                 .map_err(|error| FwError::Storage(error.to_string()))?;

@@ -834,6 +834,8 @@ fn import_tables(
 ) -> FwResult<ImportResult> {
     let mut conflicts = Vec::new();
     let mut overwritten_run_ids = HashSet::new();
+    let mut overwritten_segment_idxs_before: HashMap<String, HashSet<i64>> = HashMap::new();
+    let mut overwritten_event_seqs_before: HashMap<String, HashSet<i64>> = HashMap::new();
 
     // Import runs first (referential parent)
     let runs_path = input_dir.join("runs.jsonl");
@@ -843,6 +845,8 @@ fn import_tables(
         conflict_policy,
         &mut conflicts,
         &mut overwritten_run_ids,
+        &mut overwritten_segment_idxs_before,
+        &mut overwritten_event_seqs_before,
     )
     .map_err(|error| FwError::Storage(format!("runs import failed: {error}")))?;
 
@@ -862,6 +866,7 @@ fn import_tables(
         conflict_policy,
         &mut conflicts,
         &overwritten_run_ids,
+        &overwritten_segment_idxs_before,
     )
     .map_err(|error| FwError::Storage(format!("segments import failed: {error}")))?;
 
@@ -880,6 +885,7 @@ fn import_tables(
         conflict_policy,
         &mut conflicts,
         &overwritten_run_ids,
+        &overwritten_event_seqs_before,
     )
     .map_err(|error| FwError::Storage(format!("events import failed: {error}")))?;
 
@@ -904,6 +910,8 @@ fn import_runs(
     conflict_policy: ConflictPolicy,
     conflicts: &mut Vec<SyncConflict>,
     overwritten_run_ids: &mut HashSet<String>,
+    overwritten_segment_idxs_before: &mut HashMap<String, HashSet<i64>>,
+    overwritten_event_seqs_before: &mut HashMap<String, HashSet<i64>>,
 ) -> FwResult<u64> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -964,6 +972,28 @@ fn import_runs(
                     continue;
                 }
                 ConflictPolicy::Overwrite => {
+                    let existing_segment_idxs =
+                        query_segment_idxs_for_run(connection, &id).map_err(|error| {
+                            FwError::Storage(format!(
+                                "overwrite capture segments `{id}` failed: {error}"
+                            ))
+                        })?;
+                    overwritten_segment_idxs_before
+                        .entry(id.clone())
+                        .or_default()
+                        .extend(existing_segment_idxs);
+
+                    let existing_event_seqs =
+                        query_event_seqs_for_run(connection, &id).map_err(|error| {
+                            FwError::Storage(format!(
+                                "overwrite capture events `{id}` failed: {error}"
+                            ))
+                        })?;
+                    overwritten_event_seqs_before
+                        .entry(id.clone())
+                        .or_default()
+                        .extend(existing_event_seqs);
+
                     connection
                         .execute_with_params(
                             "DELETE FROM segments WHERE run_id = ?1",
@@ -1033,6 +1063,7 @@ fn import_segments(
     conflict_policy: ConflictPolicy,
     conflicts: &mut Vec<SyncConflict>,
     overwritten_run_ids: &HashSet<String>,
+    overwritten_segment_idxs_before: &HashMap<String, HashSet<i64>>,
 ) -> FwResult<u64> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -1143,8 +1174,8 @@ fn import_segments(
 
     if conflict_policy == ConflictPolicy::Overwrite && !overwritten_run_ids.is_empty() {
         assert_no_stale_segments_for_overwritten_runs(
-            connection,
             overwritten_run_ids,
+            overwritten_segment_idxs_before,
             &imported_idx_by_overwritten_run,
         )?;
     }
@@ -1158,6 +1189,7 @@ fn import_events(
     conflict_policy: ConflictPolicy,
     conflicts: &mut Vec<SyncConflict>,
     overwritten_run_ids: &HashSet<String>,
+    overwritten_event_seqs_before: &HashMap<String, HashSet<i64>>,
 ) -> FwResult<u64> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -1257,8 +1289,8 @@ fn import_events(
 
     if conflict_policy == ConflictPolicy::Overwrite && !overwritten_run_ids.is_empty() {
         assert_no_stale_events_for_overwritten_runs(
-            connection,
             overwritten_run_ids,
+            overwritten_event_seqs_before,
             &imported_seq_by_overwritten_run,
         )?;
     }
@@ -1267,26 +1299,18 @@ fn import_events(
 }
 
 fn assert_no_stale_segments_for_overwritten_runs(
-    connection: &Connection,
     overwritten_run_ids: &HashSet<String>,
+    existing_idx_before_by_run: &HashMap<String, HashSet<i64>>,
     imported_idx_by_run: &HashMap<String, HashSet<i64>>,
 ) -> FwResult<()> {
     for run_id in overwritten_run_ids {
-        let existing_rows = connection
-            .query_with_params(
-                "SELECT idx FROM segments WHERE run_id = ?1 ORDER BY idx ASC",
-                &[SqliteValue::Text(run_id.clone())],
-            )
-            .map_err(|error| {
-                FwError::Storage(format!(
-                    "query segments for stale purge `{run_id}` failed: {error}"
-                ))
-            })?;
-        for row in existing_rows {
-            let idx = value_to_i64_sqlite(row.get(0));
+        let Some(existing_idxs) = existing_idx_before_by_run.get(run_id) else {
+            continue;
+        };
+        for idx in existing_idxs {
             let keep = imported_idx_by_run
                 .get(run_id)
-                .is_some_and(|idx_set| idx_set.contains(&idx));
+                .is_some_and(|idx_set| idx_set.contains(idx));
             if keep {
                 continue;
             }
@@ -1301,26 +1325,18 @@ fn assert_no_stale_segments_for_overwritten_runs(
 }
 
 fn assert_no_stale_events_for_overwritten_runs(
-    connection: &Connection,
     overwritten_run_ids: &HashSet<String>,
+    existing_seq_before_by_run: &HashMap<String, HashSet<i64>>,
     imported_seq_by_run: &HashMap<String, HashSet<i64>>,
 ) -> FwResult<()> {
     for run_id in overwritten_run_ids {
-        let existing_rows = connection
-            .query_with_params(
-                "SELECT seq FROM events WHERE run_id = ?1 ORDER BY seq ASC",
-                &[SqliteValue::Text(run_id.clone())],
-            )
-            .map_err(|error| {
-                FwError::Storage(format!(
-                    "query events for stale purge `{run_id}` failed: {error}"
-                ))
-            })?;
-        for row in existing_rows {
-            let seq = value_to_i64_sqlite(row.get(0));
+        let Some(existing_seqs) = existing_seq_before_by_run.get(run_id) else {
+            continue;
+        };
+        for seq in existing_seqs {
             let keep = imported_seq_by_run
                 .get(run_id)
-                .is_some_and(|seq_set| seq_set.contains(&seq));
+                .is_some_and(|seq_set| seq_set.contains(seq));
             if keep {
                 continue;
             }
@@ -1332,6 +1348,42 @@ fn assert_no_stale_events_for_overwritten_runs(
         }
     }
     Ok(())
+}
+
+fn query_segment_idxs_for_run(connection: &Connection, run_id: &str) -> FwResult<HashSet<i64>> {
+    let rows = connection
+        .query_with_params(
+            "SELECT idx FROM segments WHERE run_id = ?1",
+            &[SqliteValue::Text(run_id.to_owned())],
+        )
+        .map_err(|error| {
+            FwError::Storage(format!(
+                "query existing segments for overwrite `{run_id}` failed: {error}"
+            ))
+        })?;
+    let mut idxs = HashSet::new();
+    for row in rows {
+        idxs.insert(value_to_i64_sqlite(row.get(0)));
+    }
+    Ok(idxs)
+}
+
+fn query_event_seqs_for_run(connection: &Connection, run_id: &str) -> FwResult<HashSet<i64>> {
+    let rows = connection
+        .query_with_params(
+            "SELECT seq FROM events WHERE run_id = ?1",
+            &[SqliteValue::Text(run_id.to_owned())],
+        )
+        .map_err(|error| {
+            FwError::Storage(format!(
+                "query existing events for overwrite `{run_id}` failed: {error}"
+            ))
+        })?;
+    let mut seqs = HashSet::new();
+    for row in rows {
+        seqs.insert(value_to_i64_sqlite(row.get(0)));
+    }
+    Ok(seqs)
 }
 
 fn ensure_run_reference_exists(
