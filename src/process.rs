@@ -39,20 +39,49 @@ pub fn run_command_with_timeout(
         let mut child = command.spawn()?;
         let started_at = Instant::now();
 
+        let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+        let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+
+        let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+        let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+
+        thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = stdout_pipe.read_to_end(&mut buf);
+            let _ = stdout_tx.send(buf);
+        });
+
+        thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = stderr_pipe.read_to_end(&mut buf);
+            let _ = stderr_tx.send(buf);
+        });
+
         loop {
-            if child.try_wait()?.is_some() {
-                let output = child.wait_with_output()?;
-                return validate_command_output(&rendered, output);
+            if let Some(status) = child.try_wait()? {
+                let stdout = stdout_rx.recv().unwrap_or_default();
+                let stderr = stderr_rx.recv().unwrap_or_default();
+                return validate_command_output(
+                    &rendered,
+                    Output {
+                        status,
+                        stdout,
+                        stderr,
+                    },
+                );
             }
 
             if started_at.elapsed() >= limit {
                 let _ = child.kill();
-                let output = child.wait_with_output()?;
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let _ = child.wait();
+                let stderr = stderr_rx.recv().unwrap_or_default();
+                let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
                 return Err(FwError::from_command_timeout(
                     rendered,
                     saturating_duration_ms(limit),
-                    stderr,
+                    stderr_str,
                 ));
             }
 
@@ -95,10 +124,38 @@ pub(crate) fn run_command_cancellable(
     let mut child = command.spawn()?;
     let started_at = Instant::now();
 
+    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+
+    thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        let _ = stdout_tx.send(buf);
+    });
+
+    thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        let _ = stderr_tx.send(buf);
+    });
+
     loop {
-        if child.try_wait()?.is_some() {
-            let output = child.wait_with_output()?;
-            return validate_command_output(&rendered, output);
+        if let Some(status) = child.try_wait()? {
+            let stdout = stdout_rx.recv().unwrap_or_default();
+            let stderr = stderr_rx.recv().unwrap_or_default();
+            return validate_command_output(
+                &rendered,
+                Output {
+                    status,
+                    stdout,
+                    stderr,
+                },
+            );
         }
 
         // Check pipeline deadline via cancellation token.
@@ -113,12 +170,13 @@ pub(crate) fn run_command_cancellable(
             && started_at.elapsed() >= limit
         {
             let _ = child.kill();
-            let output = child.wait_with_output()?;
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let _ = child.wait();
+            let stderr = stderr_rx.recv().unwrap_or_default();
+            let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
             return Err(FwError::from_command_timeout(
                 rendered,
                 saturating_duration_ms(limit),
-                stderr,
+                stderr_str,
             ));
         }
 
