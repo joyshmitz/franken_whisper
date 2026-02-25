@@ -958,13 +958,16 @@ cargo run -- robot run --input audio.mp3 --backend auto
 
 Another franken_whisper process is writing. The storage layer retries with exponential backoff (5-40ms), but simultaneous heavy writes may conflict. Use `--no-persist` to skip persistence, or use separate `--db` paths.
 
-### "automatic migration from legacy v1 is unavailable in this runtime"
+### "safe legacy runs migration failed"
 
-Your DB schema is older than the current `runs` contract (`replay_json` / `acceleration_json` missing). Current migration behavior is fail-closed:
+When opening older DBs missing `runs.replay_json` / `runs.acceleration_json`, franken_whisper now attempts a snapshot/rebuild/swap migration with rollback safety and integrity checks.
 
-1. Export from a known-good source snapshot (or recover from existing JSONL export).
-2. Create a fresh target DB.
-3. Import via:
+If that migration still fails (for example due severe on-disk corruption), recover via snapshot:
+
+1. Preserve the original DB as immutable evidence.
+2. Export from a known-good source snapshot (or recover from existing JSONL export).
+3. Create a fresh target DB.
+4. Import via:
 
 ```bash
 cargo run -- sync import-jsonl --input ./snapshot --conflict-policy reject
@@ -981,7 +984,7 @@ For strict overwrite flows, prefer importing into an empty DB rather than mutati
 - **Path dependencies.** The project depends on sibling Cargo workspace members (`asupersync`, `frankensqlite`, etc.) via relative paths. It is not published to crates.io as a standalone crate.
 - **Native engines are pilots.** Native Rust engine implementations are deterministic conformance pilots. They can execute in-process when `FRANKEN_WHISPER_NATIVE_EXECUTION=1` and rollout stage is `primary|sole`; otherwise bridge adapters remain active.
 - **No bidirectional sync.** JSONL export/import is one-way. There is no merge or conflict resolution beyond the explicit `--conflict-policy` flag.
-- **Legacy schema auto-migration is constrained.** Databases missing modern `runs` columns (`replay_json`, `acceleration_json`) are currently fail-closed and should be recreated from a valid JSONL snapshot/export into a fresh DB.
+- **Legacy schema migration is rollback-safe but not magic.** Legacy `runs` schemas are migrated through snapshot/rebuild/swap with integrity checks; severely corrupted DBs may still require JSONL restore into a fresh DB.
 - **Overwrite import is fail-closed for child-row mutation.** When strict replacement would require child-row `UPDATE`/`DELETE` on `segments`/`events`, import errors by design; use an empty target DB for strict replacement workflows.
 - **Single-machine.** Designed for single-machine use with local SQLite. No distributed or multi-node support.
 

@@ -85,16 +85,17 @@ Procedure:
 ## Scenario F: Legacy Schema Migration Blocked
 
 Symptoms:
-- open/migration fails with legacy-schema message about unavailable automatic migration.
+- open/migration fails with a safe-legacy-migration error.
 
 Procedure:
 1. Preserve original DB as immutable evidence copy.
-2. Locate latest valid JSONL snapshot (`runs.jsonl`, `segments.jsonl`, `events.jsonl`, `manifest.json`).
-3. Create a fresh DB path.
-4. Import snapshot with reject policy:
+2. Attempt reopen once to allow rollback-safe snapshot/rebuild/swap migration to finish.
+3. If failure persists, locate latest valid JSONL snapshot (`runs.jsonl`, `segments.jsonl`, `events.jsonl`, `manifest.json`).
+4. Create a fresh DB path.
+5. Import snapshot with reject policy:
 - `cargo run -- sync import-jsonl --input <snapshot_dir> --conflict-policy reject`
-5. Validate row counts/checksums and basic run queries.
-6. Switch active DB pointer only after successful validation.
+6. Validate row counts/checksums and basic run queries.
+7. Switch active DB pointer only after successful validation.
 
 ## Scenario E: Backend Process Crash/Hang
 

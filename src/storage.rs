@@ -15,6 +15,22 @@ pub struct RunStore {
     connection: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunsMigrationSnapshotRow {
+    id: String,
+    started_at: String,
+    finished_at: String,
+    backend: String,
+    input_path: String,
+    normalized_wav_path: String,
+    request_json: String,
+    result_json: String,
+    warnings_json: String,
+    transcript: String,
+    replay_json: String,
+    acceleration_json: String,
+}
+
 const PERSIST_BUSY_RETRY_ATTEMPTS: usize = 8;
 const PERSIST_BUSY_BASE_BACKOFF_MS: u64 = 5;
 
@@ -476,14 +492,9 @@ CREATE TABLE IF NOT EXISTS _meta (
                 Ok(())
             }
             2 => {
-                // v2: Ensure replay + acceleration columns exist for legacy v1
-                // databases created before these fields were introduced.
-                self.ensure_column_exists("runs", "replay_json", "TEXT NOT NULL DEFAULT '{}'")?;
-                self.ensure_column_exists(
-                    "runs",
-                    "acceleration_json",
-                    "TEXT NOT NULL DEFAULT '{}'",
-                )?;
+                // v2: Legacy-safe migration for runs table replay/acceleration
+                // columns using snapshot -> rebuild -> swap with rollback safety.
+                self.migrate_legacy_runs_schema_v2()?;
                 Ok(())
             }
             3 => {
@@ -583,6 +594,252 @@ CREATE TABLE IF NOT EXISTS _meta (
             .any(|row| value_to_string(row.get(1)) == column))
     }
 
+    fn table_index_definitions(&self, table: &str) -> FwResult<Vec<(String, String)>> {
+        let rows = self
+            .connection
+            .query_with_params(
+                "SELECT name, sql FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL \
+                 ORDER BY name ASC;",
+                &[text_value(table.to_owned())],
+            )
+            .map_err(|error| {
+                FwError::Storage(format!("index introspection for `{table}` failed: {error}"))
+            })?;
+
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let name = value_to_string(row.get(0));
+                match row.get(1) {
+                    Some(SqliteValue::Text(sql)) if !name.is_empty() && !sql.is_empty() => {
+                        Some((name, sql.clone()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect())
+    }
+
+    fn load_runs_snapshot_rows(
+        &self,
+        table: &str,
+        has_replay_column: bool,
+        has_acceleration_column: bool,
+    ) -> FwResult<Vec<RunsMigrationSnapshotRow>> {
+        let table_ident = sql_ident(table);
+        let replay_expr = if has_replay_column {
+            "replay_json"
+        } else {
+            "'{}'"
+        };
+        let acceleration_expr = if has_acceleration_column {
+            "acceleration_json"
+        } else {
+            "'{}'"
+        };
+        let sql = format!(
+            "SELECT id, started_at, finished_at, backend, input_path, normalized_wav_path, \
+             request_json, result_json, warnings_json, transcript, {replay_expr} AS replay_json, \
+             {acceleration_expr} AS acceleration_json \
+             FROM {table_ident} ORDER BY rowid ASC;"
+        );
+        let rows = self
+            .connection
+            .query(&sql)
+            .map_err(|error| FwError::Storage(error.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| RunsMigrationSnapshotRow {
+                id: value_to_string(row.get(0)),
+                started_at: value_to_string(row.get(1)),
+                finished_at: value_to_string(row.get(2)),
+                backend: value_to_string(row.get(3)),
+                input_path: value_to_string(row.get(4)),
+                normalized_wav_path: value_to_string(row.get(5)),
+                request_json: value_to_string(row.get(6)),
+                result_json: value_to_string(row.get(7)),
+                warnings_json: value_to_string(row.get(8)),
+                transcript: value_to_string(row.get(9)),
+                replay_json: value_to_string(row.get(10)),
+                acceleration_json: value_to_string(row.get(11)),
+            })
+            .collect())
+    }
+
+    fn migrate_legacy_runs_schema_v2(&self) -> FwResult<()> {
+        self.migrate_legacy_runs_schema_v2_inner(false)
+    }
+
+    #[cfg(test)]
+    fn migrate_legacy_runs_schema_v2_with_failpoint(&self) -> FwResult<()> {
+        self.migrate_legacy_runs_schema_v2_inner(true)
+    }
+
+    fn migrate_legacy_runs_schema_v2_inner(
+        &self,
+        failpoint_after_swap: bool,
+    ) -> FwResult<()> {
+        let has_replay = self.table_has_column("runs", "replay_json")?;
+        let has_acceleration = self.table_has_column("runs", "acceleration_json")?;
+        if has_replay && has_acceleration {
+            return Ok(());
+        }
+
+        let source_snapshot = self.load_runs_snapshot_rows("runs", has_replay, has_acceleration)?;
+        let expected_rows = source_snapshot.len();
+        let index_defs = self.table_index_definitions("runs")?;
+        let rebuilt_table_name = "__fw_runs_v2_rebuild";
+        let rebuilt_ident = sql_ident(rebuilt_table_name);
+
+        let mut transaction_open = false;
+        let migration_result = (|| -> FwResult<()> {
+            self.connection
+                .execute("BEGIN IMMEDIATE;")
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+            transaction_open = true;
+
+            self.connection
+                .execute(&format!("DROP TABLE IF EXISTS {rebuilt_ident};"))
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+            self.connection
+                .execute(&format!(
+                    "CREATE TABLE {rebuilt_ident} (\
+                        id TEXT PRIMARY KEY,\
+                        started_at TEXT NOT NULL,\
+                        finished_at TEXT NOT NULL,\
+                        backend TEXT NOT NULL,\
+                        input_path TEXT NOT NULL,\
+                        normalized_wav_path TEXT NOT NULL,\
+                        request_json TEXT NOT NULL,\
+                        result_json TEXT NOT NULL,\
+                        warnings_json TEXT NOT NULL,\
+                        transcript TEXT NOT NULL,\
+                        replay_json TEXT NOT NULL DEFAULT '{{}}',\
+                        acceleration_json TEXT NOT NULL DEFAULT '{{}}'\
+                    );"
+                ))
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+
+            for row in &source_snapshot {
+                self.connection
+                    .execute_with_params(
+                        &format!(
+                            "INSERT INTO {rebuilt_ident} (\
+                                id, started_at, finished_at, backend, input_path, normalized_wav_path, \
+                                request_json, result_json, warnings_json, transcript, replay_json, acceleration_json\
+                            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                        ),
+                        &[
+                            text_value(row.id.clone()),
+                            text_value(row.started_at.clone()),
+                            text_value(row.finished_at.clone()),
+                            text_value(row.backend.clone()),
+                            text_value(row.input_path.clone()),
+                            text_value(row.normalized_wav_path.clone()),
+                            text_value(row.request_json.clone()),
+                            text_value(row.result_json.clone()),
+                            text_value(row.warnings_json.clone()),
+                            text_value(row.transcript.clone()),
+                            text_value(row.replay_json.clone()),
+                            text_value(row.acceleration_json.clone()),
+                        ],
+                    )
+                    .map_err(|error| FwError::Storage(error.to_string()))?;
+            }
+
+            let rebuilt_snapshot =
+                self.load_runs_snapshot_rows(rebuilt_table_name, true, true)?;
+            if rebuilt_snapshot.len() != expected_rows {
+                return Err(FwError::Storage(format!(
+                    "legacy migration integrity check failed: rebuilt row count {} != source row count {}",
+                    rebuilt_snapshot.len(),
+                    expected_rows
+                )));
+            }
+            if rebuilt_snapshot != source_snapshot {
+                return Err(FwError::Storage(
+                    "legacy migration integrity check failed: rebuilt runs snapshot differs from source snapshot"
+                        .to_owned(),
+                ));
+            }
+
+            for (index_name, _) in &index_defs {
+                self.connection
+                    .execute(&format!("DROP INDEX IF EXISTS {};", sql_ident(index_name)))
+                    .map_err(|error| {
+                        FwError::Storage(format!(
+                            "drop index `{index_name}` before runs swap failed: {error}"
+                        ))
+                    })?;
+            }
+
+            self.connection
+                .execute(&format!("DROP TABLE IF EXISTS {};", sql_ident("runs")))
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+            self.connection
+                .execute(&format!(
+                    "ALTER TABLE {rebuilt_ident} RENAME TO {};",
+                    sql_ident("runs")
+                ))
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+
+            if failpoint_after_swap {
+                return Err(FwError::Storage(
+                    "simulated migration failure after runs table swap".to_owned(),
+                ));
+            }
+
+            for (_, sql) in &index_defs {
+                self.connection
+                    .execute(sql)
+                    .map_err(|error| {
+                        FwError::Storage(format!(
+                            "recreate index for migrated runs table failed: {error}"
+                        ))
+                    })?;
+            }
+
+            self.connection
+                .execute("COMMIT;")
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+            transaction_open = false;
+            Ok(())
+        })();
+
+        if migration_result.is_err() && transaction_open {
+            let _ = self.connection.execute("ROLLBACK;");
+            let _ = self
+                .connection
+                .execute(&format!("DROP TABLE IF EXISTS {rebuilt_ident};"));
+        }
+        migration_result.map_err(|error| {
+            FwError::Storage(format!(
+                "safe legacy runs migration failed; restore from JSONL snapshot if needed: {error}"
+            ))
+        })?;
+
+        if !self.table_has_column("runs", "replay_json")?
+            || !self.table_has_column("runs", "acceleration_json")?
+        {
+            return Err(FwError::Storage(
+                "legacy migration completed but required columns are still missing on runs table"
+                    .to_owned(),
+            ));
+        }
+
+        let post_snapshot = self.load_runs_snapshot_rows("runs", true, true)?;
+        if post_snapshot.len() != expected_rows {
+            return Err(FwError::Storage(format!(
+                "legacy migration post-check failed: runs row count {} != source row count {}",
+                post_snapshot.len(),
+                expected_rows
+            )));
+        }
+        Ok(())
+    }
+
     fn recreate_table_with_added_column(
         &self,
         table: &str,
@@ -623,29 +880,7 @@ CREATE TABLE IF NOT EXISTS _meta (
             .collect::<FwResult<Vec<_>>>()?;
         let existing_cols_csv = existing_names.join(", ");
 
-        let index_sql_rows = self
-            .connection
-            .query_with_params(
-                "SELECT name, sql FROM sqlite_master \
-                 WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL \
-                 ORDER BY name ASC;",
-                &[text_value(table.to_owned())],
-            )
-            .map_err(|error| {
-                FwError::Storage(format!("index introspection for `{table}` failed: {error}"))
-            })?;
-        let index_defs = index_sql_rows
-            .iter()
-            .filter_map(|row| {
-                let name = value_to_string(row.get(0));
-                match row.get(1) {
-                    Some(SqliteValue::Text(sql)) if !name.is_empty() && !sql.is_empty() => {
-                        Some((name, sql.clone()))
-                    }
-                    _ => None,
-                }
-            })
-            .collect::<Vec<_>>();
+        let index_defs = self.table_index_definitions(table)?;
 
         let mut column_defs = existing_columns
             .iter()
@@ -6447,6 +6682,217 @@ mod tests {
         assert!(
             details.replay.input_content_hash.is_none(),
             "migrated legacy run should have empty replay defaults"
+        );
+    }
+
+    #[test]
+    fn migration_from_partial_v1_preserves_existing_replay_payload() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("partial_v1.sqlite3");
+
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        conn.execute(
+            "CREATE TABLE runs (\
+                id TEXT PRIMARY KEY, \
+                started_at TEXT NOT NULL, \
+                finished_at TEXT NOT NULL, \
+                backend TEXT NOT NULL, \
+                input_path TEXT NOT NULL, \
+                normalized_wav_path TEXT NOT NULL, \
+                request_json TEXT NOT NULL, \
+                result_json TEXT NOT NULL, \
+                warnings_json TEXT NOT NULL, \
+                transcript TEXT NOT NULL, \
+                replay_json TEXT NOT NULL DEFAULT '{}'\
+            );",
+        )
+        .expect("create runs");
+        conn.execute(
+            "CREATE TABLE segments (\
+                run_id TEXT NOT NULL, idx INTEGER NOT NULL, \
+                start_sec REAL, end_sec REAL, speaker TEXT, \
+                text TEXT NOT NULL, confidence REAL, \
+                PRIMARY KEY (run_id, idx)\
+            );",
+        )
+        .expect("create segments");
+        conn.execute(
+            "CREATE TABLE events (\
+                run_id TEXT NOT NULL, seq INTEGER NOT NULL, \
+                ts_rfc3339 TEXT NOT NULL, stage TEXT NOT NULL, \
+                code TEXT NOT NULL, message TEXT NOT NULL, \
+                payload_json TEXT NOT NULL, \
+                PRIMARY KEY (run_id, seq)\
+            );",
+        )
+        .expect("create events");
+        conn.execute(
+            "CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .expect("create _meta");
+
+        let replay_json = serde_json::json!({
+            "input_content_hash": "legacy-input-hash",
+            "backend_identity": "legacy-whisper",
+            "backend_version": "0.9.0",
+            "output_payload_hash": "legacy-output-hash"
+        })
+        .to_string();
+        let result_json = serde_json::json!({
+            "backend": "whisper_cpp",
+            "transcript": "legacy replay run",
+            "language": "en",
+            "segments": [],
+            "acceleration": null,
+            "raw_output": {},
+            "artifact_paths": []
+        })
+        .to_string();
+
+        conn.execute_with_params(
+            "INSERT INTO runs (id, started_at, finished_at, backend, input_path, \
+             normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            &[
+                SqliteValue::Text("partial-legacy-run".to_owned()),
+                SqliteValue::Text("2025-06-02T00:00:00Z".to_owned()),
+                SqliteValue::Text("2025-06-02T00:00:05Z".to_owned()),
+                SqliteValue::Text("whisper_cpp".to_owned()),
+                SqliteValue::Text("old.wav".to_owned()),
+                SqliteValue::Text("old_norm.wav".to_owned()),
+                SqliteValue::Text("{}".to_owned()),
+                SqliteValue::Text(result_json),
+                SqliteValue::Text("[]".to_owned()),
+                SqliteValue::Text("legacy replay run".to_owned()),
+                SqliteValue::Text(replay_json),
+            ],
+        )
+        .expect("insert partial legacy run");
+        drop(conn);
+
+        let store = RunStore::open(&db_path).expect("open after migration");
+        assert!(
+            store
+                .table_has_column("runs", "acceleration_json")
+                .expect("check acceleration column"),
+            "migration should add acceleration_json to partial v1 schema"
+        );
+        let details = store
+            .load_run_details("partial-legacy-run")
+            .expect("query")
+            .expect("row exists");
+        assert_eq!(
+            details.replay.backend_identity.as_deref(),
+            Some("legacy-whisper"),
+            "existing replay payload should survive migration"
+        );
+    }
+
+    #[test]
+    fn migration_v2_failpoint_rolls_back_runs_swap() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("rollback_failpoint.sqlite3");
+
+        let conn =
+            fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        conn.execute(
+            "CREATE TABLE runs (\
+                id TEXT PRIMARY KEY, \
+                started_at TEXT NOT NULL, \
+                finished_at TEXT NOT NULL, \
+                backend TEXT NOT NULL, \
+                input_path TEXT NOT NULL, \
+                normalized_wav_path TEXT NOT NULL, \
+                request_json TEXT NOT NULL, \
+                result_json TEXT NOT NULL, \
+                warnings_json TEXT NOT NULL, \
+                transcript TEXT NOT NULL\
+            );",
+        )
+        .expect("create legacy runs");
+        conn.execute(
+            "CREATE TABLE segments (\
+                run_id TEXT NOT NULL, idx INTEGER NOT NULL, \
+                start_sec REAL, end_sec REAL, speaker TEXT, \
+                text TEXT NOT NULL, confidence REAL, \
+                PRIMARY KEY (run_id, idx)\
+            );",
+        )
+        .expect("create segments");
+        conn.execute(
+            "CREATE TABLE events (\
+                run_id TEXT NOT NULL, seq INTEGER NOT NULL, \
+                ts_rfc3339 TEXT NOT NULL, stage TEXT NOT NULL, \
+                code TEXT NOT NULL, message TEXT NOT NULL, \
+                payload_json TEXT NOT NULL, \
+                PRIMARY KEY (run_id, seq)\
+            );",
+        )
+        .expect("create events");
+        conn.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("create _meta");
+        conn.execute_with_params(
+            "INSERT INTO _meta (key, value) VALUES ('schema_version', ?1)",
+            &[SqliteValue::Text(RunStore::SCHEMA_VERSION.to_string())],
+        )
+        .expect("freeze schema version");
+        conn.execute_with_params(
+            "INSERT INTO runs (id, started_at, finished_at, backend, input_path, \
+             normalized_wav_path, request_json, result_json, warnings_json, transcript) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            &[
+                SqliteValue::Text("rollback-run".to_owned()),
+                SqliteValue::Text("2025-06-03T00:00:00Z".to_owned()),
+                SqliteValue::Text("2025-06-03T00:00:05Z".to_owned()),
+                SqliteValue::Text("whisper_cpp".to_owned()),
+                SqliteValue::Text("legacy.wav".to_owned()),
+                SqliteValue::Text("legacy_norm.wav".to_owned()),
+                SqliteValue::Text("{}".to_owned()),
+                SqliteValue::Text(
+                    serde_json::json!({
+                        "backend": "whisper_cpp",
+                        "transcript": "rollback transcript",
+                        "language": "en",
+                        "segments": [],
+                        "acceleration": null,
+                        "raw_output": {},
+                        "artifact_paths": []
+                    })
+                    .to_string(),
+                ),
+                SqliteValue::Text("[]".to_owned()),
+                SqliteValue::Text("rollback transcript".to_owned()),
+            ],
+        )
+        .expect("insert rollback row");
+        drop(conn);
+
+        let store = RunStore::open(&db_path).expect("open");
+        let error = store
+            .migrate_legacy_runs_schema_v2_with_failpoint()
+            .expect_err("failpoint should abort migration");
+        assert!(
+            error
+                .to_string()
+                .contains("simulated migration failure after runs table swap"),
+            "error should surface failpoint context"
+        );
+        assert!(
+            !store
+                .table_has_column("runs", "replay_json")
+                .expect("check replay column"),
+            "rollback should restore legacy runs schema"
+        );
+        let rows = store
+            .connection
+            .query("SELECT id, transcript FROM runs WHERE id = 'rollback-run';")
+            .expect("query rows after rollback");
+        assert_eq!(rows.len(), 1, "rollback should preserve legacy row");
+        assert_eq!(
+            super::value_to_string(rows[0].get(1)),
+            "rollback transcript",
+            "rollback should preserve legacy row contents"
         );
     }
 
