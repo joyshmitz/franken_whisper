@@ -1280,7 +1280,7 @@
 ### U1. `frankensqlite` golden-checksum drift resolution (`fsqlite-harness`)
 - [x] U1.1 Reproduce failing test: `cargo test --workspace --exclude fsqlite-e2e` and confirm `bd_1lsfu_2_core_sql_golden_checksums` failure mode.
 - [x] U1.2 Confirm drift category from test diagnostics (parser/execution blake3 mismatches across fuzz fixtures).
-- [ ] U1.3 Quantify drift scope (fixture count and parser-vs-execution breakdown) from failure artifact output.
+- [~] U1.3 Quantify drift scope (fixture count and parser-vs-execution breakdown) from failure artifact output. *(2026-02-25: blocked before mismatch emit; `rch exec -- cargo test -p fsqlite-harness --test bd_1lsfu_2_core_sql_golden_checksums -- --nocapture` fails with `case=fuzz_dir_canonicalize` because `fuzz/corpus/fuzz_sql_parser` is absent on local + remote trees.)*
 - [ ] U1.4 Run controlled checksum refresh flow using project-recommended command for this gate.
 - [ ] U1.5 Re-run `cargo test -p fsqlite-harness --test bd_1lsfu_2_core_sql_golden_checksums` and verify green.
 - [ ] U1.6 Re-run adjacent harness checksum/manifest tests to ensure no partial-update inconsistency.
@@ -1320,11 +1320,11 @@
 - [x] U4.6 `franken_whisper`: run mandatory gates after U3 edits (`fmt`, `check`, `clippy -D warnings`, `test`).
 
 ### U5. Final reconciliation and handoff quality
-- [ ] U5.1 Mark all completed packet rows (`T`, `U`) with final statuses and evidence references.
-- [ ] U5.2 Summarize exact changed files in both repos.
-- [ ] U5.3 Summarize exact pass/fail quality-gate matrix by command.
-- [ ] U5.4 List residual risks and what remains blocked vs completed.
-- [ ] U5.5 Provide concrete next execution packets only for genuinely remaining work.
+- [x] U5.1 Mark all completed packet rows (`T`, `U`) with final statuses and evidence references. *(updated in this tracker + bead state: `bd-1a1=blocked`, `bd-244=in_progress`, `bd-217=in_progress`)*
+- [x] U5.2 Summarize exact changed files in both repos. *(updated `docs/cross_repo_change_summary_2026-02-25.md` with current-session file list and command evidence)*
+- [x] U5.3 Summarize exact pass/fail quality-gate matrix by command. *(updated `docs/cross_repo_change_summary_2026-02-25.md` gate matrix)*
+- [x] U5.4 List residual risks and what remains blocked vs completed. *(updated `docs/closeout_residual_risks_2026-02-25.md`)*
+- [x] U5.5 Provide concrete next execution packets only for genuinely remaining work. *(updated `docs/next_execution_packet_2026-02-25.md`)*
 
 ### U-Live Notes (2026-02-23)
 - [x] Restored `RunStore` v2 migration behavior for legacy schemas with deterministic table-rebuild column migration and index recreation in `src/storage.rs`.
@@ -1341,3 +1341,4 @@
 - [x] 2026-02-25: Fixed bounded finalizer zero-budget behavior by running zero-budget cleanup inline (`FinalizerRegistry::run_all_bounded` in `src/orchestrator.rs`).
 - [x] 2026-02-25: Re-ran mandatory gates via `scripts/run_quality_gates_rch.sh`; `fmt`, `check --all-targets`, `clippy --all-targets -- -D warnings`, and full `cargo test` all passed.
 - [x] 2026-02-25 (CobaltHeron): Completed Packet-T T1-T5 audit cycle. 3 defects fixed: zlib bomb DOS guard in `decompress_chunk` (tty_audio.rs), u64→i64 deadline overflow clamp in `PipelineCx::new` (orchestrator.rs), warn-log on silent segment skip in `build_native_segmentation` (whisper_cpp_native.rs). 5 regression tests added and validated via `rch`. Quality gates green (2739/2750 pass; 11 pre-existing failures in storage/sync/replay_pack).
+- [x] 2026-02-25 (PearlAnchor): Created/triaged follow-on beads `bd-1a1`, `bd-244`, and `bd-217` from remaining `U*` rows; marked `bd-1a1` blocked after `rch` reproduction showed missing corpus path (`fuzz/corpus/fuzz_sql_parser`) and updated closeout docs for current ownership/blocker reality.

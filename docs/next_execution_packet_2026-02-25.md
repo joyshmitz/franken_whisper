@@ -1,66 +1,69 @@
-# Next Execution Packet (2026-02-25)
+# Next Execution Packet (2026-02-25, refreshed 20:44 UTC)
 
-This packet fulfills TODO tracker item `T8.4` by defining concrete remaining
-work with owner expectations, file scope, and verification criteria.
+This packet is the current execution source-of-truth for remaining cross-repo
+work after bead reconciliation (`bd-1a1`, `bd-244`, `bd-217`).
 
 ## Remaining Open Work (Current Snapshot)
 
-### EP-01: Determinism Invariants for Cancellation/Failure Paths
+### EP-01: Unblock `bd-1a1` Golden-Checksum Drift Quantification
 
-- Bead: `bd-xp7`
-- Current owner: `CrimsonAspen`
-- Status: `in_progress`
-- Intended scope (from bead): stage-order determinism and robot event-order
-  replay invariants under cancellation/failure; expected touches in
-  `src/orchestrator.rs` and `tests/`.
-- Verification criteria:
-  - targeted tests for stage/event ordering exist and are deterministic across
-    repeated runs;
-  - tests cover both cancellation path and failure path;
-  - no schema-order regressions in robot event assertions.
-
-### EP-02: Remote Quality-Gate Outcome Publication
-
-- Bead: `bd-1q4`
-- Current owner: `MaroonSalmon`
-- Status: `in_progress`
-- Scope: run remote gates through `rch` and publish pass/fail matrix.
-- Required command set (remote/offloaded only):
-  - `cargo fmt --check`
-  - `cargo check --all-targets`
-  - `cargo clippy --all-targets -- -D warnings`
-  - `cargo test`
-- Verification criteria:
-  - each gate outcome recorded as pass/fail;
-  - if any fail, blocker provenance captured with file/error pointers;
-  - runtime or worker instability explicitly distinguished from code defects.
-
-### EP-03: Cross-Repo Change Summary Packet
-
-- TODO item: `T8.1` (currently unclaimed)
-- Recommended owner: next available agent after EP-01/EP-02 publish.
+- Bead: `bd-1a1`
+- Status: `blocked`
+- Owner: `PearlAnchor`
 - Scope:
-  - produce a compact file-level change summary for this repo and dependent
-    cross-repo context referenced in tracker.
+  - restore/provide required fuzz corpus path for `bd_1lsfu_2`:
+    `fuzz/corpus/fuzz_sql_parser`;
+  - rerun checksum gate and collect parser/planner/execution mismatch counts;
+  - perform controlled refresh only after mismatch evidence is captured.
+- Evidence artifact:
+  - `rch exec -- cargo test -p fsqlite-harness --test bd_1lsfu_2_core_sql_golden_checksums -- --nocapture`
+  - current failure: `bead_id=bd-1lsfu.2 case=fuzz_dir_canonicalize ... No such file or directory`.
 - Verification criteria:
-  - references include absolute file paths or clear repo-relative pointers;
-  - summary separates completed, in-progress, and blocked items.
+  - checksum test reaches `case=checksum_mismatch` or pass state (not corpus path failure);
+  - quantified mismatch breakdown is recorded;
+  - update-command path is executed only with explicit artifact capture.
+
+### EP-02: Complete `bd-244` SSI Runtime Containment + Mandatory Gate Closure
+
+- Bead: `bd-244`
+- Status: `in_progress`
+- Owner: `TealCove`
+- Scope:
+  - validate practical runtime envelope for `ssi_serialization_correctness_ci_scale`
+    and `ssi_serialization_correctness_single_writer_smoke`;
+  - add guardrails if CI-scale remains non-practical;
+  - rerun mandatory gates after U1/U2 closure.
+- Required command style:
+  - all cargo gates offloaded via `rch exec -- ...`.
+- Verification criteria:
+  - runtime findings + guardrail decisions documented with command evidence;
+  - mandatory gate matrix reported with explicit pass/fail + blocker provenance.
+
+### EP-03: Close `bd-217` Reconciliation Packet
+
+- Bead: `bd-217`
+- Status: `in_progress`
+- Owner: `PearlAnchor`
+- Scope:
+  - keep tracker/doc packet aligned to real bead/mail state;
+  - ensure only genuinely remaining work appears as open.
+- Verification criteria:
+  - `TODO_IMPLEMENTATION_TRACKER.md` reflects real status/evidence;
+  - cross-repo summary + residual-risk + next-execution docs are synchronized;
+  - bead is closed once synchronization is complete.
 
 ## Suggested Execution Order
 
-1. Finish EP-01 (`bd-xp7`) to lock deterministic behavior coverage.
-2. Finish EP-02 (`bd-1q4`) to establish current quality-gate truth.
-3. Execute EP-03 (`T8.1`) using outputs from EP-01 and EP-02.
+1. Resolve EP-01 blocker precondition (corpus source path) so U1 can emit real drift diagnostics.
+2. Finish EP-02 runtime containment and gate reruns.
+3. Close EP-03 packet once EP-01/EP-02 states are stable.
 
 ## Done/Blocked Decision Rule
 
-- Mark a packet item `done` only when both implementation and evidence are
-  present.
-- Mark `blocked` only with a concrete blocker artifact (command output, worker
-  failure, or dependency drift evidence), not with a generic status note.
+- Mark `done` only with command evidence and updated documentation.
+- Mark `blocked` only with concrete artifact evidence (error text + command + path).
 
 ## Coordination Notes
 
-- If Agent Mail state resets, re-register agent identities and re-announce open
-  bead ownership before editing to avoid collisions.
-- Continue using `br`/`bv --robot-*` as source of truth for issue state.
+- Continue `br` as issue source of truth and `bv --robot-*` for prioritization.
+- Continue Agent Mail thread updates per bead id to avoid duplicate cross-repo edits.

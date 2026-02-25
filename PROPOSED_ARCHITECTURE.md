@@ -45,7 +45,7 @@ and integrates with:
 5. `persistence` (`src/storage.rs`, `frankensqlite` only):
 - run metadata, segments, events, and artifacts index in `fsqlite` DB via `RunStore`.
 - schema versioning through `_meta` table with forward migration system.
-- current schema version: 2 (v1 = base tables, v2 = acceleration_json + replay_json columns).
+- current schema version: 3 (v1 = base tables, v2 = legacy-safe `runs` rebuild for `replay_json` + `acceleration_json`, v3 = query indexes for `runs`/`events` hot paths).
 - `persist_report_with_token` accepts `CancellationToken` for deadline-aware persistence.
 - JSONL sync/export as adjunct audit stream via `src/sync.rs`.
 
@@ -121,15 +121,20 @@ Stage contracts:
 
 ### 3.1 Default Stage Budgets
 
-| Stage         | Default (ms) | Env Override                                      |
-|---------------|-------------|--------------------------------------------------|
-| Ingest        | 15,000      | `FRANKEN_WHISPER_STAGE_BUDGET_INGEST_MS`         |
-| Normalize     | 180,000     | `FRANKEN_WHISPER_STAGE_BUDGET_NORMALIZE_MS`      |
-| Probe         | 8,000       | `FRANKEN_WHISPER_STAGE_BUDGET_PROBE_MS`          |
-| Backend       | 900,000     | `FRANKEN_WHISPER_STAGE_BUDGET_BACKEND_MS`        |
-| Acceleration  | 20,000      | `FRANKEN_WHISPER_STAGE_BUDGET_ACCELERATION_MS`   |
-| Align         | 30,000      | `FRANKEN_WHISPER_STAGE_BUDGET_ALIGN_MS`          |
-| Persist       | 20,000      | `FRANKEN_WHISPER_STAGE_BUDGET_PERSIST_MS`        |
+| Budget Key                 | Default (ms) | Env Override                                      | Notes |
+|----------------------------|-------------:|--------------------------------------------------|-------|
+| Ingest                     | 15,000       | `FRANKEN_WHISPER_STAGE_BUDGET_INGEST_MS`         | Pipeline stage |
+| Normalize                  | 180,000      | `FRANKEN_WHISPER_STAGE_BUDGET_NORMALIZE_MS`      | Pipeline stage |
+| Vad                        | 10,000       | `FRANKEN_WHISPER_STAGE_BUDGET_VAD_MS`            | Pipeline stage |
+| Separate                   | 30,000       | `FRANKEN_WHISPER_STAGE_BUDGET_SEPARATE_MS`       | Pipeline stage |
+| Backend                    | 900,000      | `FRANKEN_WHISPER_STAGE_BUDGET_BACKEND_MS`        | Pipeline stage |
+| Acceleration               | 20,000       | `FRANKEN_WHISPER_STAGE_BUDGET_ACCELERATION_MS`   | Pipeline stage |
+| Align                      | 30,000       | `FRANKEN_WHISPER_STAGE_BUDGET_ALIGN_MS`          | Pipeline stage |
+| Punctuate                  | 10,000       | `FRANKEN_WHISPER_STAGE_BUDGET_PUNCTUATE_MS`      | Pipeline stage |
+| Diarize                    | 30,000       | `FRANKEN_WHISPER_STAGE_BUDGET_DIARIZE_MS`        | Pipeline stage |
+| Persist                    | 20,000       | `FRANKEN_WHISPER_STAGE_BUDGET_PERSIST_MS`        | Pipeline stage |
+| Probe policy budget        | 8,000        | `FRANKEN_WHISPER_STAGE_BUDGET_PROBE_MS`          | Policy/diagnostic budget knob (not a `PipelineStage`) |
+| Finalizer cleanup budget   | 5,000        | `FRANKEN_WHISPER_STAGE_BUDGET_CLEANUP_MS`        | Bounded finalizer execution budget |
 
 ## 3.2 Compatibility Envelope + Conformance Harness
 

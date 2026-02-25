@@ -897,16 +897,16 @@ Stages don't catch signals directly. Instead, they poll `token.checkpoint()` at 
 
 | Metric | Value |
 |--------|-------|
-| Total source lines (src/) | 107,244 |
-| Library tests | 2,026+ |
-| Integration test files | 17 |
+| Total source lines (src/) | 84,687 |
+| Library tests (`#[test]` in `src/`) | 2,954 |
+| Integration test files (`tests/*.rs`) | 23 |
 | Benchmark suites | 5 (criterion) |
-| Public modules | 15 |
+| Public modules | 18 |
 | Error variants | 12 (each with structured code) |
 | Backend engines | 6 (3 bridge + 3 native pilot) |
 | Pipeline stages | 10 |
 | CLI subcommands | 6 (transcribe, robot, runs, sync, tty-audio, tui) |
-| TTY control frame types | 7 (handshake, ack, backpressure, retransmit req/resp, session close, handshake ack) |
+| TTY control frame types | 10 (handshake, handshake_ack, retransmit_request, retransmit_response, ack, backpressure, transcript_partial, transcript_retract, transcript_correct, session_close) |
 | Clippy lints enforced | 7 targeted + deny unsafe_code |
 | Cargo features | 3 (tui, gpu-frankentorch, gpu-frankenjax) |
 | Release optimizations | opt-level z, LTO, single codegen unit, panic=abort, stripped |

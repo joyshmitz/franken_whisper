@@ -157,6 +157,8 @@ impl RunStore {
             tok.checkpoint()?;
         }
 
+        // Use ASC ordering + reverse in Rust to work around fsqlite
+        // ORDER BY DESC returning insertion order (bd-2oe).
         let rows = self
             .connection
             .query(
@@ -204,6 +206,7 @@ impl RunStore {
             tok.checkpoint()?;
         }
 
+        // ASC + last() to work around fsqlite ORDER BY DESC bug (bd-2oe).
         let rows = self
             .connection
             .query("SELECT id FROM runs ORDER BY started_at ASC, id ASC")
@@ -3429,8 +3432,8 @@ mod tests {
         early.result.transcript = "early run".to_owned();
         store.persist_report(&early).expect("persist early");
 
-        // load_latest uses ORDER BY started_at DESC, so it should return
-        // the chronologically-later run regardless of insertion order.
+        // load_latest uses ASC ordering + rows.last() (bd-2oe workaround),
+        // so it should return the chronologically-later run regardless of insertion order.
         let latest = store
             .load_latest_run_details()
             .expect("query")
@@ -3481,7 +3484,7 @@ mod tests {
 
         let runs = store.list_recent_runs(5).expect("list");
         assert_eq!(runs.len(), 5, "limit==count should return all runs");
-        // Verify DESC order: run-5 (Jan 5) first.
+        // Verify reverse-chronological order: eq-4 (Jan 5) first.
         assert_eq!(runs[0].run_id, "eq-4");
         assert_eq!(runs[4].run_id, "eq-0");
     }

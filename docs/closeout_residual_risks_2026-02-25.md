@@ -1,17 +1,16 @@
-# Closeout Residual Risks Snapshot (2026-02-25)
+# Closeout Residual Risks Snapshot (2026-02-25, refreshed 20:44 UTC)
 
-This packet satisfies TODO tracker item `T8.3` by documenting concrete,
-currently active residual risks with code-anchored evidence and next actions.
+This packet documents current residual risk after bead reconciliation
+(`bd-1a1`, `bd-244`, `bd-217`).
 
 ## Scope
 
-- Repository: `franken_whisper`
-- Snapshot date: `2026-02-25`
-- Source inputs:
-  - `src/orchestrator.rs` placeholder-stage implementations
-  - active beads from `br`/`bv` (`bd-xp7`, `bd-1q4`)
-  - cross-repo blocker notes recorded in
-    `TODO_IMPLEMENTATION_TRACKER.md:1247-1249`
+- Repository: `franken_whisper` (primary), with active cross-repo dependency on
+  `frankensqlite`.
+- Active status inputs:
+  - `bd-1a1`: blocked
+  - `bd-244`: in progress
+  - `bd-217`: in progress (closeout synchronization)
 
 ## Risk Register
 
@@ -19,80 +18,55 @@ currently active residual risks with code-anchored evidence and next actions.
 
 - Severity: high
 - Evidence:
-  - source separation is explicitly placeholder/no-op style:
-    `src/orchestrator.rs:2399-2425`
-  - punctuation restoration is rule-based placeholder:
-    `src/orchestrator.rs:2516-2517`
-  - diarization uses simplified placeholder embeddings/notes:
-    `src/orchestrator.rs:2672-2742`
+  - source separation placeholder behavior in `src/orchestrator.rs`;
+  - punctuation/diarization stages still include simplified placeholder paths.
 - Impact:
-  - feature-parity claims for Demucs/TitaNet/neural punctuation remain partial;
-  - downstream quality and speaker-label reliability can diverge from intended
-    architecture under noisy/complex audio.
-- Mitigation path:
-  - replace placeholder implementations with model-backed adapters;
-  - keep deterministic fallback/no-regression tests for cancellation and stage
-    budgets before promotion.
+  - parity expectations for separation/punctuation/diarization remain partial;
+  - quality drift risk remains on complex/noisy audio.
+- Mitigation:
+  - replace placeholder branches with model-backed adapters behind deterministic
+    fallback contracts.
 - Exit criteria:
-  - placeholder notes removed from stage outputs;
-  - model-backed stage tests pass for happy-path + error + cancellation.
+  - placeholder stage notes removed and replacement tests pass (happy/error/cancel paths).
 
-### RR-02: Determinism invariant coverage is still in flight
+### RR-02: Golden-checksum drift lane is blocked by missing corpus artifact
+
+- Severity: high
+- Evidence:
+  - offloaded command:
+    `rch exec -- cargo test -p fsqlite-harness --test bd_1lsfu_2_core_sql_golden_checksums -- --nocapture`
+  - failure:
+    `bead_id=bd-1lsfu.2 case=fuzz_dir_canonicalize ... No such file or directory`.
+  - missing path:
+    `fuzz/corpus/fuzz_sql_parser`.
+- Impact:
+  - parser/planner/execution mismatch counts cannot be generated;
+  - checksum refresh cannot be safely attributed or validated.
+- Mitigation:
+  - restore/generate corpus directory before rerunning checksum lane.
+- Exit criteria:
+  - test advances to mismatch diff or pass state (no corpus-path failure).
+
+### RR-03: SSI runtime containment remains open
 
 - Severity: medium-high
 - Evidence:
-  - `bd-xp7` is currently `in_progress` (owner: `CrimsonAspen`):
-    stage/event-order determinism tests for cancellation/failure.
+  - `bd-244` remains `in_progress` for CI-scale runtime containment and gate closure.
 - Impact:
-  - regression window remains for subtle stage-order/event-order drift in edge
-    paths until the dedicated tests land.
-- Mitigation path:
-  - complete `bd-xp7` and keep tests in CI-facing gates.
+  - practical CI runtime envelope is not yet proven for the SSI-scale lane.
+- Mitigation:
+  - finish runtime validation + guardrails and rerun mandatory gates via `rch`.
 - Exit criteria:
-  - `bd-xp7` closed with test evidence and stable reproducible results.
+  - both `ci_scale` and `single_writer_smoke` outcomes documented with practical runtime evidence.
 
-### RR-03: Mandatory quality-gate publication is still in flight
+## Remaining Work Boundary
 
-- Severity: medium
-- Evidence:
-  - `bd-1q4` is currently `in_progress` (owner: `MaroonSalmon`) for remote
-    quality gates via `rch`.
-  - AGENTS gate requirements remain strict (`fmt`, `check`, `clippy`, `test`).
-- Impact:
-  - release-readiness and hardening status cannot be declared complete until
-    gate outcomes are published.
-- Mitigation path:
-  - finish `bd-1q4` with pass/fail matrix and blocker detail capture.
-- Exit criteria:
-  - gate summary published with command-level outcomes and blocker provenance.
+- Completed: tracker/doc synchronization and ownership clarity (`bd-217` workstream).
+- Blocked: `bd-1a1` pending corpus source restoration.
+- Active: `bd-244` runtime containment + mandatory-gate completion.
 
-### RR-04: Cross-repo test-runtime and golden-drift blockers remain unresolved
+## Next Steps (Concrete)
 
-- Severity: medium
-- Evidence:
-  - `TODO_IMPLEMENTATION_TRACKER.md:1248` documents extremely long-running SSI
-    test on host (`ssi_serialization_correctness_ci_scale`).
-  - `TODO_IMPLEMENTATION_TRACKER.md:1249` documents checksum drift failures in
-    `fsqlite-harness` due pre-existing parser/codegen dirty state.
-- Impact:
-  - full cross-repo completion signal can remain blocked by environment/runtime
-    debt outside this repository's direct code path.
-- Mitigation path:
-  - keep this risk visible in closeout packets (`T8.1/T8.2/T8.4`);
-  - separate repo-local completion from cross-repo blocker closure.
-- Exit criteria:
-  - long SSI test runtime reduced to practical envelope and checksum drift
-    reconciled/attributed with clean rerun evidence.
-
-## Already Mitigated in This Session
-
-- TTY replayability guidance is present in
-  `docs/tty-replay-guarantees.md` and was revalidated against current
-  implementation semantics while closing bead `bd-2kt`.
-
-## Next Execution Packet (Concrete)
-
-1. Close `bd-xp7` with deterministic test artifacts and touched-file summary.
-2. Close `bd-1q4` with `rch` gate matrix and blocker provenance.
-3. Publish `T8.1` cross-repo change summary tying changed files to the risk
-   register above and explicitly marking blocked vs complete items.
+1. Unblock `bd-1a1` by restoring `fuzz/corpus/fuzz_sql_parser`.
+2. Complete `bd-244` and publish runtime + gate evidence.
+3. Close `bd-217` once packet docs remain synchronized with the above outcomes.

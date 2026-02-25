@@ -10,11 +10,15 @@ remains the wire-format source of truth.
 
 ## Version
 
-- Current protocol: `1`
-- Field: `protocol_version` on every frame.
-- Decoder behavior:
+- Audio frame protocol (`TtyAudioFrame.protocol_version`): `1`
+- Transcript control extension protocol constant: `2` (`TRANSCRIPT_PROTOCOL_VERSION`)
+- Field behavior:
+  - audio frames carry `protocol_version`
+  - control frames are selected by `frame_type`
+- Decoder behavior for the audio decode path (`decode_tty_audio_from_reader`):
   - accepts only `protocol_version == 1`
-  - rejects any other version with a deterministic non-zero error.
+  - rejects any other audio-frame version with a deterministic non-zero error
+- Transcript correction control frames (`transcript_partial`, `transcript_retract`, `transcript_correct`) are parsed on the control channel and validated for framing/order; they are not negotiated via audio-frame `protocol_version`.
 
 ---
 
@@ -134,6 +138,56 @@ Sent by the decoder to signal flow control.
 
 ```json
 {"frame_type":"backpressure","remaining_capacity":64}
+```
+
+### Transcript Partial
+
+Sent by the speculative/fast transcript lane to provide provisional text for a window.
+
+| Field         | Type       | Description                                      |
+|---------------|------------|--------------------------------------------------|
+| `frame_type`  | `string`   | Always `"transcript_partial"`                    |
+| `seq`         | `u64`      | Transcript sequence number                        |
+| `window_id`   | `u64`      | Correlation window identifier                     |
+| `segments`    | `object[]` | Compact segments with short keys (`s`,`e`,`t`,`sp`,`c`) |
+| `model_id`    | `string`   | Origin model identifier                           |
+| `speculative` | `bool`     | Whether this partial is speculative               |
+
+```json
+{"frame_type":"transcript_partial","seq":42,"window_id":7,"segments":[{"s":0.0,"e":0.8,"t":"helo wrld","c":0.62}],"model_id":"fast-v1","speculative":true}
+```
+
+### Transcript Retract
+
+Sent to retract a previous speculative partial when quality checks fail.
+
+| Field           | Type     | Description                                |
+|-----------------|----------|--------------------------------------------|
+| `frame_type`    | `string` | Always `"transcript_retract"`              |
+| `retracted_seq` | `u64`    | Transcript sequence being retracted        |
+| `window_id`     | `u64`    | Correlation window identifier               |
+| `reason`        | `string` | Deterministic reason for retraction         |
+
+```json
+{"frame_type":"transcript_retract","retracted_seq":42,"window_id":7,"reason":"quality_model_disagreed"}
+```
+
+### Transcript Correct
+
+Sent after a retract to provide corrected segments from the quality lane.
+
+| Field           | Type       | Description                                      |
+|-----------------|------------|--------------------------------------------------|
+| `frame_type`    | `string`   | Always `"transcript_correct"`                    |
+| `correction_id` | `u64`      | Unique correction identifier                      |
+| `replaces_seq`  | `u64`      | Retracted transcript sequence being replaced      |
+| `window_id`     | `u64`      | Correlation window identifier                     |
+| `segments`      | `object[]` | Corrected compact segments (`s`,`e`,`t`,`sp`,`c`)|
+| `model_id`      | `string`   | Quality model identifier                          |
+| `drift_wer`     | `f64`      | Approximate drift/error estimate                  |
+
+```json
+{"frame_type":"transcript_correct","correction_id":10,"replaces_seq":42,"window_id":7,"segments":[{"s":0.0,"e":0.8,"t":"hello world","c":0.89}],"model_id":"quality-v2","drift_wer":0.12}
 ```
 
 ### Session Close

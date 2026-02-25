@@ -1,52 +1,44 @@
-# Cross-Repo Change Summary (2026-02-25)
+# Cross-Repo Change Summary (2026-02-25, refreshed 20:44 UTC)
 
-This packet satisfies TODO tracker item `T8.1` by publishing file-level
-change context across the active `franken_whisper` workflow and its immediate
-cross-repo dependencies.
+This packet provides the current file-level and command-level reconciliation
+for open cross-repo beads.
 
 ## Scope
 
 - Primary repo: `/data/projects/franken_whisper`
-- Cross-repo context: `/data/projects/frankensqlite`, `/data/projects/asupersync`
-- Evidence sources:
-  - tracker rows in `TODO_IMPLEMENTATION_TRACKER.md`
-  - closeout packets in `docs/closeout_residual_risks_2026-02-25.md` and
-    `docs/next_execution_packet_2026-02-25.md`
-  - remote gate run via `scripts/run_quality_gates_rch.sh`
+- Cross-repo workstream: `/data/projects/frankensqlite`
+- Active beads in scope:
+  - `bd-1a1` (`blocked`)
+  - `bd-244` (`in_progress`)
+  - `bd-217` (`in_progress`, reconciliation packet)
 
-## File-Level Summary
+## File-Level Summary (Current Session)
 
 | Repo | Status | Files | Notes |
 |---|---|---|---|
-| `franken_whisper` | completed | `docs/engine_compatibility_spec.md` | Added/retained explicit compatibility envelope release-gate execution checklist (`9.6`). |
-| `franken_whisper` | completed | `docs/tty-replay-guarantees.md` | Added/retained operator-facing verification hooks for replay/framing guarantees. |
-| `franken_whisper` | completed | `TODO_IMPLEMENTATION_TRACKER.md` | Reconciled `T7.5`/`T7.7` as done, marked `T7.6` in progress (`bd-xp7`), and published `T8.2` gate outcomes. |
-| `franken_whisper` | completed | `docs/closeout_residual_risks_2026-02-25.md` | Residual-risk packet with code-anchored risk register and mitigations. |
-| `franken_whisper` | completed | `docs/next_execution_packet_2026-02-25.md` | Next execution packet with explicit bead scope and verification criteria. |
-| `franken_whisper` | in progress | `src/orchestrator.rs`, `tests/` | `bd-xp7` (owner `CrimsonAspen`): determinism/event-order tests + safety guards; still actively changing. |
-| `frankensqlite` | prior completed context | `/data/projects/frankensqlite/crates/fsqlite-parser/src/parser.rs` | Prior unblock note captured in tracker (`err_here` -> `err_msg`) to restore upstream compile flow during cross-repo gates. |
-| `asupersync` | active blocker signal | `/data/projects/asupersync/src/runtime/scheduler/three_lane.rs` | Remote `rch` run observed type-mismatch compile failures on one worker attempt (`Ok(Some(_))` vs `Result<usize, io::Error>` shape). |
+| `franken_whisper` | updated | `TODO_IMPLEMENTATION_TRACKER.md` | Reconciled U1/U5 status rows with current bead state and blocker evidence. |
+| `franken_whisper` | updated | `docs/next_execution_packet_2026-02-25.md` | Replaced stale packet items with current remaining-work plan (`bd-1a1`, `bd-244`, `bd-217`). |
+| `franken_whisper` | updated | `docs/closeout_residual_risks_2026-02-25.md` | Refreshed risk register to include missing-corpus blocker and active ownership. |
+| `franken_whisper` | updated | `docs/cross_repo_change_summary_2026-02-25.md` | This refreshed packet. |
+| `frankensqlite` | no file edits in this session | _none_ | Execution evidence gathered via `rch` commands only; current blocker is missing corpus artifact, not code changes from this session. |
 
-## Quality-Gate Snapshot (Remote `rch`)
+## Quality/Gate Evidence Matrix (Current Session)
 
-Executed from `franken_whisper` using `scripts/run_quality_gates_rch.sh`:
-
-- `cargo fmt --check`: pass
-- `cargo check --all-targets`: pass (after worker retry)
-- `cargo clippy --all-targets -- -D warnings`: pass
-- `cargo test`: fail at compile time in `src/orchestrator.rs:1111` with `E0277`
-  (`spawn_blocking` future `Unpin` bound at `timeout(...).await`) while
-  `bd-xp7` changes are in flight
+| Repo | Command (offloaded where applicable) | Result | Evidence |
+|---|---|---|---|
+| `frankensqlite` | `rch doctor` | pass | All diagnostics passed; worker pool healthy. |
+| `frankensqlite` | `rch exec -- cargo test -p fsqlite-harness --test bd_1lsfu_2_core_sql_golden_checksums -- --nocapture` | fail | `case=fuzz_dir_canonicalize` due missing `fuzz/corpus/fuzz_sql_parser`; exit `101`. |
 
 ## Completed vs In-Progress vs Blocked
 
-- Completed:
-  - documentation/tracker reconciliation for compatibility envelope and replay
-    guarantees (`T7.5`, `T7.7`)
-  - quality-gate publication row (`T8.2`) with pass/fail evidence
+- Completed in this session:
+  - beadization of remaining tracker work into `bd-1a1`, `bd-244`, `bd-217`;
+  - explicit ownership/coordinator updates via Agent Mail threads;
+  - tracker/docs reconciliation for current execution truth.
 - In progress:
-  - orchestrator determinism hardening (`bd-xp7`)
-- Blocked (current snapshot):
-  - full `cargo test` completion pending resolution of the orchestrator compile
-    error introduced during in-progress orchestrator edits
-
+  - `bd-244` runtime containment + mandatory-gate closure (owner: `TealCove`);
+  - `bd-217` documentation closeout synchronization (owner: `PearlAnchor`).
+- Blocked:
+  - `bd-1a1` cannot proceed to checksum mismatch quantification until
+    `fuzz/corpus/fuzz_sql_parser` corpus path is restored or regenerated in
+    `frankensqlite`.
