@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tracing::warn;
 
 use crate::error::FwResult;
 use crate::model::{BackendKind, TranscribeRequest, TranscriptionResult, TranscriptionSegment};
@@ -167,23 +168,22 @@ fn build_native_segmentation(
             .saturating_sub(region.start_ms)
             .max(MIN_REGION_DURATION_MS);
         let mut region_segments = pilot.transcribe(region_duration_ms);
-        for (segment_index, mut segment) in region_segments.drain(..).enumerate() {
+        for (segment_index, segment) in region_segments.drain(..).enumerate() {
             if let Some(tok) = token {
                 tok.checkpoint()?;
             }
-            let start_ms = region.start_ms.saturating_add(segment.start_ms);
-            let mut end_ms = region.start_ms.saturating_add(segment.end_ms);
-            if end_ms > region.end_ms {
-                end_ms = region.end_ms;
-            }
-            if end_ms <= start_ms {
+            let Some(mut segment) = align_segment_to_region(
+                segment,
+                region.start_ms,
+                region.end_ms,
+                region_index,
+                segment_index,
+            ) else {
                 continue;
-            }
+            };
 
             let energy_bonus = (region.avg_rms as f64 * 4.0).clamp(0.0, 0.08);
             let continuity_penalty = ((region_index + segment_index) as f64) * 0.003;
-            segment.start_ms = start_ms;
-            segment.end_ms = end_ms;
             segment.confidence =
                 (segment.confidence + energy_bonus - continuity_penalty).clamp(0.45, 0.99);
             pilot_segments.push(segment);
@@ -203,6 +203,34 @@ fn build_native_segmentation(
             "segments_from_active_regions": segment_count,
         }),
     })
+}
+
+fn align_segment_to_region(
+    mut segment: super::TranscriptSegment,
+    region_start_ms: u64,
+    region_end_ms: u64,
+    region_index: usize,
+    segment_index: usize,
+) -> Option<super::TranscriptSegment> {
+    let start_ms = region_start_ms.saturating_add(segment.start_ms);
+    let mut end_ms = region_start_ms.saturating_add(segment.end_ms);
+    if end_ms > region_end_ms {
+        end_ms = region_end_ms;
+    }
+    if end_ms <= start_ms {
+        warn!(
+            region_index,
+            segment_index,
+            start_ms,
+            end_ms,
+            "dropping segment with inverted timestamps after region offset"
+        );
+        return None;
+    }
+
+    segment.start_ms = start_ms;
+    segment.end_ms = end_ms;
+    Some(segment)
 }
 
 fn estimate_duration_ms(request: &TranscribeRequest, normalized_wav: &Path) -> u64 {
@@ -1168,6 +1196,38 @@ mod tests {
                 "segments must be sorted by start_ms"
             );
         }
+    }
+
+    #[test]
+    fn align_segment_to_region_clamps_end_to_region_boundary() {
+        let segment = TranscriptSegment {
+            start_ms: 200,
+            end_ms: 800,
+            text: "hello".to_owned(),
+            confidence: 0.9,
+        };
+
+        let adjusted = align_segment_to_region(segment, 1_000, 1_500, 0, 0)
+            .expect("segment should remain valid after clamp");
+        assert_eq!(adjusted.start_ms, 1_200);
+        assert_eq!(adjusted.end_ms, 1_500);
+        assert_eq!(adjusted.text, "hello");
+    }
+
+    #[test]
+    fn align_segment_to_region_drops_inverted_segment() {
+        let segment = TranscriptSegment {
+            start_ms: 900,
+            end_ms: 100,
+            text: "bad".to_owned(),
+            confidence: 0.5,
+        };
+
+        let adjusted = align_segment_to_region(segment, 1_000, 1_500, 1, 2);
+        assert!(
+            adjusted.is_none(),
+            "inverted segments should be dropped instead of emitted silently"
+        );
     }
 
     #[test]

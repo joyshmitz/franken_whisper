@@ -89,6 +89,22 @@ fn mocks_available() -> bool {
     true
 }
 
+/// Return true when ffmpeg is available on PATH for normalization.
+fn ffmpeg_available() -> bool {
+    std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Return true when all e2e pipeline external prerequisites are available.
+fn pipeline_prereqs_available() -> bool {
+    mocks_available() && ffmpeg_available()
+}
+
 /// Build a `TranscribeRequest` for end-to-end use.
 fn build_e2e_request(
     wav_path: &std::path::Path,
@@ -127,8 +143,8 @@ fn state_dir_from_env() -> PathBuf {
 #[test]
 fn e2e_pipeline_with_mock_whisper_cpp() {
     if !is_subprocess() {
-        if !mocks_available() {
-            eprintln!("Skipping: mock backends not available or not executable");
+        if !pipeline_prereqs_available() {
+            eprintln!("Skipping: mock backends or ffmpeg not available");
             return;
         }
         let state_tmp = tempfile::tempdir().expect("create state temp dir");
@@ -182,8 +198,8 @@ fn e2e_pipeline_with_mock_whisper_cpp() {
 #[test]
 fn e2e_pipeline_with_mock_insanely_fast() {
     if !is_subprocess() {
-        if !mocks_available() {
-            eprintln!("Skipping: mock backends not available or not executable");
+        if !pipeline_prereqs_available() {
+            eprintln!("Skipping: mock backends or ffmpeg not available");
             return;
         }
         let state_tmp = tempfile::tempdir().expect("create state temp dir");
@@ -226,8 +242,8 @@ fn e2e_pipeline_with_mock_insanely_fast() {
 #[test]
 fn e2e_pipeline_generates_run_id() {
     if !is_subprocess() {
-        if !mocks_available() {
-            eprintln!("Skipping: mock backends not available or not executable");
+        if !pipeline_prereqs_available() {
+            eprintln!("Skipping: mock backends or ffmpeg not available");
             return;
         }
         let state_tmp = tempfile::tempdir().expect("create state temp dir");
@@ -283,8 +299,8 @@ fn e2e_pipeline_generates_run_id() {
 #[test]
 fn e2e_pipeline_populates_trace_id() {
     if !is_subprocess() {
-        if !mocks_available() {
-            eprintln!("Skipping: mock backends not available or not executable");
+        if !pipeline_prereqs_available() {
+            eprintln!("Skipping: mock backends or ffmpeg not available");
             return;
         }
         let state_tmp = tempfile::tempdir().expect("create state temp dir");
@@ -326,8 +342,8 @@ fn e2e_pipeline_populates_trace_id() {
 #[test]
 fn e2e_pipeline_events_are_monotonic() {
     if !is_subprocess() {
-        if !mocks_available() {
-            eprintln!("Skipping: mock backends not available or not executable");
+        if !pipeline_prereqs_available() {
+            eprintln!("Skipping: mock backends or ffmpeg not available");
             return;
         }
         let state_tmp = tempfile::tempdir().expect("create state temp dir");
@@ -382,8 +398,8 @@ fn e2e_pipeline_events_are_monotonic() {
 #[test]
 fn e2e_pipeline_with_persist() {
     if !is_subprocess() {
-        if !mocks_available() {
-            eprintln!("Skipping: mock backends not available or not executable");
+        if !pipeline_prereqs_available() {
+            eprintln!("Skipping: mock backends or ffmpeg not available");
             return;
         }
         let state_tmp = tempfile::tempdir().expect("create state temp dir");
@@ -440,8 +456,8 @@ fn e2e_pipeline_with_persist() {
 #[test]
 fn e2e_pipeline_with_timeout() {
     if !is_subprocess() {
-        if !mocks_available() {
-            eprintln!("Skipping: mock backends not available or not executable");
+        if !pipeline_prereqs_available() {
+            eprintln!("Skipping: mock backends or ffmpeg not available");
             return;
         }
         let state_tmp = tempfile::tempdir().expect("create state temp dir");
@@ -553,8 +569,8 @@ fn e2e_pipeline_nonexistent_input_fails_cleanly() {
 #[test]
 fn e2e_pipeline_consecutive_runs_have_unique_ids() {
     if !is_subprocess() {
-        if !mocks_available() {
-            eprintln!("Skipping: mock backends not available or not executable");
+        if !pipeline_prereqs_available() {
+            eprintln!("Skipping: mock backends or ffmpeg not available");
             return;
         }
         let state_tmp = tempfile::tempdir().expect("create state temp dir");
@@ -600,8 +616,8 @@ fn e2e_pipeline_consecutive_runs_have_unique_ids() {
 #[test]
 fn e2e_pipeline_with_silence_wav() {
     if !is_subprocess() {
-        if !mocks_available() {
-            eprintln!("Skipping: mock backends not available or not executable");
+        if !pipeline_prereqs_available() {
+            eprintln!("Skipping: mock backends or ffmpeg not available");
             return;
         }
         let state_tmp = tempfile::tempdir().expect("create state temp dir");
@@ -656,8 +672,8 @@ fn e2e_pipeline_with_silence_wav() {
 #[test]
 fn e2e_pipeline_no_persist_skips_db_creation() {
     if !is_subprocess() {
-        if !mocks_available() {
-            eprintln!("Skipping: mock backends not available or not executable");
+        if !pipeline_prereqs_available() {
+            eprintln!("Skipping: mock backends or ffmpeg not available");
             return;
         }
         let state_tmp = tempfile::tempdir().expect("create state temp dir");

@@ -159,13 +159,14 @@ impl RunStore {
 
         let rows = self
             .connection
-            .query_with_params(
-                "SELECT id, started_at, finished_at, backend, transcript FROM runs ORDER BY started_at DESC LIMIT ?1",
-                &[SqliteValue::Integer(limit as i64)],
+            .query(
+                "SELECT id, started_at, finished_at, backend, transcript \
+                 FROM runs ORDER BY started_at ASC, id ASC",
             )
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
-        rows.into_iter()
+        let mut summaries: Vec<RunSummary> = rows
+            .into_iter()
             .map(|row| {
                 let run_id = value_to_string(row.get(0));
                 let started = value_to_string(row.get(1));
@@ -182,7 +183,13 @@ impl RunStore {
                     transcript_preview: preview,
                 })
             })
-            .collect()
+            .collect::<FwResult<Vec<_>>>()?;
+
+        summaries.reverse();
+        if limit > 0 && summaries.len() > limit {
+            summaries.truncate(limit);
+        }
+        Ok(summaries)
     }
 
     pub fn load_latest_run_details(&self) -> FwResult<Option<StoredRunDetails>> {
@@ -199,10 +206,10 @@ impl RunStore {
 
         let rows = self
             .connection
-            .query("SELECT id FROM runs ORDER BY started_at DESC LIMIT 1")
+            .query("SELECT id FROM runs ORDER BY started_at ASC, id ASC")
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
-        let Some(row) = rows.first() else {
+        let Some(row) = rows.last() else {
             return Ok(None);
         };
         let run_id = value_to_string(row.get(0));

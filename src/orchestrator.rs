@@ -327,7 +327,13 @@ impl PipelineCx {
         let random = (uuid::Uuid::new_v4().as_u128()) & 0xFFFF_FFFF_FFFF_FFFF_FFFF;
         let trace_id = TraceId::from_parts(ts_ms, random);
 
-        let deadline = timeout_ms.map(|ms| now + chrono::Duration::milliseconds(ms as i64));
+        let deadline = timeout_ms.map(|ms| {
+            let clamped = ms.min(i64::MAX as u64);
+            let duration = chrono::Duration::milliseconds(clamped as i64);
+            // Saturate on chrono range overflow so very large budgets remain future-deadline safe.
+            now.checked_add_signed(duration)
+                .unwrap_or(chrono::DateTime::<Utc>::MAX_UTC)
+        });
         let budget = match timeout_ms {
             Some(ms) => Budget::new(ms),
             None => Budget::UNLIMITED,
@@ -525,6 +531,36 @@ pub(crate) struct FinalizerRegistry {
     entries: Vec<(String, Finalizer)>,
 }
 
+fn sanitize_process_pid(pid: u32) -> Option<u32> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        None
+    } else {
+        Some(pid)
+    }
+}
+
+#[cfg(unix)]
+fn send_kill_signal_best_effort(pid: u32) {
+    match sanitize_process_pid(pid) {
+        Some(safe_pid) => {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &safe_pid.to_string()])
+                .output();
+        }
+        None => {
+            tracing::warn!(
+                pid = pid,
+                "finalizer: skipping process kill for invalid/out-of-range pid"
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn send_kill_signal_best_effort(pid: u32) {
+    let _ = pid;
+}
+
 impl FinalizerRegistry {
     fn new() -> Self {
         Self {
@@ -557,18 +593,9 @@ impl FinalizerRegistry {
                         pid = pid,
                         "finalizer: sending kill to process"
                     );
-                    // Best-effort kill; ignore errors (process may already be
-                    // dead or the PID may have been recycled).
-                    #[cfg(unix)]
-                    {
-                        let _ = std::process::Command::new("kill")
-                            .args(["-9", &pid.to_string()])
-                            .output();
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let _ = pid; // no-op on non-unix
-                    }
+                    // Best-effort kill; ignore errors (process may already be dead).
+                    // Guard against pid 0 or values that overflow pid_t semantics.
+                    send_kill_signal_best_effort(pid);
                 }
                 Finalizer::Custom(f) => {
                     tracing::info!(
@@ -585,6 +612,12 @@ impl FinalizerRegistry {
     /// Execute all registered finalizers with a per-finalizer time budget
     /// (bd-38c.4).  Finalizers that exceed the budget are warned but still run.
     pub(crate) fn run_all_bounded(&mut self, budget_ms: u64) {
+        if budget_ms == 0 {
+            // Deterministic fallback: a zero budget still must run finalizers.
+            self.run_all();
+            return;
+        }
+
         let budget = budget_duration(budget_ms);
         while let Some((label, finalizer)) = self.entries.pop() {
             let start = std::time::Instant::now();
@@ -606,16 +639,7 @@ impl FinalizerRegistry {
                         budget_ms = budget_ms,
                         "finalizer(bounded): sending kill to process"
                     );
-                    #[cfg(unix)]
-                    {
-                        let _ = std::process::Command::new("kill")
-                            .args(["-9", &pid.to_string()])
-                            .output();
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let _ = pid;
-                    }
+                    send_kill_signal_best_effort(pid);
                 }
                 Finalizer::Custom(f) => {
                     tracing::info!(
@@ -1107,7 +1131,9 @@ where
     T: Send + 'static,
     F: FnOnce() -> FwResult<T> + Send + 'static,
 {
-    let wrapped = spawn_blocking(operation);
+    // Keep compatibility across asupersync timeout implementations that
+    // require `Unpin` futures by boxing the spawned future.
+    let wrapped = Box::pin(spawn_blocking(operation));
     match timeout(wall_now(), budget_duration(budget_ms), wrapped).await {
         Ok(result) => result,
         Err(_) => Err(FwError::StageTimeout {
@@ -2989,9 +3015,10 @@ mod tests {
         acceleration_cancellation_fence_payload, acceleration_context_payload,
         acceleration_stream_owner_id, budget_duration, checkpoint_or_emit, ctc_forced_align,
         diarize_segments, event_elapsed_ms, parse_budget_ms, parse_event_ts_ms, punctuate_segments,
-        recommended_budget, run_pipeline, run_stage_with_budget, sha256_bytes_hex, sha256_file,
-        sha256_json_value, source_separate, stage_budget_ms, stage_failure_code,
-        stage_failure_message, stage_latency_profile, state_root, vad_energy_detect,
+        recommended_budget, run_pipeline, run_stage_with_budget, sanitize_process_pid,
+        sha256_bytes_hex, sha256_file, sha256_json_value, source_separate, stage_budget_ms,
+        stage_failure_code, stage_failure_message, stage_latency_profile, state_root,
+        vad_energy_detect,
     };
 
     #[test]
@@ -4914,6 +4941,44 @@ mod tests {
     fn budget_duration_u64_max_does_not_panic() {
         let d = budget_duration(u64::MAX);
         assert!(d.as_millis() > 0);
+    }
+
+    #[test]
+    fn pipeline_cx_deadline_u64_max_does_not_wrap_to_past() {
+        // Before the fix, `timeout_ms as i64` with u64::MAX would wrap
+        // to -1, creating a deadline in the past.  The fix clamps to
+        // i64::MAX so the deadline is always in the future.
+        let pcx = PipelineCx::new(Some(u64::MAX));
+        assert!(
+            pcx.deadline.is_some(),
+            "u64::MAX timeout should produce a deadline"
+        );
+        let deadline = pcx.deadline.unwrap();
+        assert!(
+            deadline > chrono::Utc::now(),
+            "deadline with huge timeout should be in the future, not wrapped to past"
+        );
+    }
+
+    #[test]
+    fn pipeline_cx_deadline_u64_max_saturates_to_max_utc() {
+        let pcx = PipelineCx::new(Some(u64::MAX));
+        assert_eq!(
+            pcx.deadline,
+            Some(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+            "overflowing deadline math should saturate to MAX_UTC"
+        );
+    }
+
+    #[test]
+    fn pipeline_cx_deadline_i64_max_plus_one_does_not_wrap() {
+        let val = (i64::MAX as u64) + 1;
+        let pcx = PipelineCx::new(Some(val));
+        let deadline = pcx.deadline.unwrap();
+        assert!(
+            deadline > chrono::Utc::now(),
+            "deadline should be in the future for values just above i64::MAX"
+        );
     }
 
     #[test]
@@ -8921,6 +8986,14 @@ mod tests {
     }
 
     // ── Task #313 — orchestrator edge-case tests pass 7 ──────────────────
+
+    #[test]
+    fn sanitize_process_pid_rejects_zero_and_out_of_range_values() {
+        assert_eq!(sanitize_process_pid(0), None);
+        assert_eq!(sanitize_process_pid(u32::MAX), None);
+        assert_eq!(sanitize_process_pid(i32::MAX as u32), Some(i32::MAX as u32));
+        assert_eq!(sanitize_process_pid(1), Some(1));
+    }
 
     #[test]
     fn finalizer_process_via_run_all_does_not_panic() {

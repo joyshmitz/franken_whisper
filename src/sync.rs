@@ -2253,8 +2253,6 @@ pub fn max_started_at(conn: &Connection, after_ts: Option<&str>) -> FwResult<Opt
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     use serde_json::json;
@@ -2942,7 +2940,6 @@ mod tests {
         assert!(!text.contains("row count mismatch"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn import_surfaces_error_when_conflicts_file_cannot_be_written() {
         let dir = tempdir().expect("tempdir");
@@ -2983,21 +2980,19 @@ mod tests {
         )
         .expect("manifest write");
 
-        let original_permissions = fs::metadata(&export_dir).expect("metadata").permissions();
-        let mut read_only = original_permissions.clone();
-        read_only.set_mode(0o555);
-        fs::set_permissions(&export_dir, read_only).expect("set readonly dir");
+        // Deterministically block conflict artifact creation by occupying
+        // the expected file path with a directory.
+        let conflict_path = export_dir.join("sync_conflicts.jsonl");
+        fs::create_dir(&conflict_path).expect("create conflict path directory");
 
         let result = import(&db_path, &export_dir, &state_root, ConflictPolicy::Reject);
-
-        let mut writable = original_permissions;
-        writable.set_mode(0o755);
-        fs::set_permissions(&export_dir, writable).expect("restore writable dir");
 
         let error = result.expect_err("conflict artifact write should fail");
         let text = error.to_string();
         assert!(
-            text.contains("Permission denied") || text.contains("permission denied"),
+            text.contains("directory")
+                || text.contains("Directory")
+                || text.contains("sync_conflicts.jsonl"),
             "unexpected error: {text}"
         );
     }

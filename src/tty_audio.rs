@@ -774,10 +774,28 @@ fn compress_chunk(input: &[u8]) -> FwResult<Vec<u8>> {
     Ok(encoder.finish()?)
 }
 
+/// Maximum decompressed frame size: 5 seconds of 8 kHz mono mulaw = 40 000 bytes.
+/// A 2× safety margin gives 80 000 bytes.  Anything larger is treated as a
+/// decompression bomb and rejected.
+const MAX_DECOMPRESSED_FRAME_BYTES: usize = 80_000;
+
 fn decompress_chunk(input: &[u8]) -> FwResult<Vec<u8>> {
     let mut decoder = ZlibDecoder::new(input);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out)?;
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = decoder.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+        if out.len() > MAX_DECOMPRESSED_FRAME_BYTES {
+            return Err(FwError::InvalidRequest(format!(
+                "decompressed frame exceeds {MAX_DECOMPRESSED_FRAME_BYTES} byte limit \
+                 (possible decompression bomb)"
+            )));
+        }
+    }
     Ok(out)
 }
 
@@ -4806,5 +4824,41 @@ mod tests {
         assert_eq!(plan.requested_ranges.len(), 1);
         assert_eq!(plan.requested_ranges[0].start_seq, 1);
         assert_eq!(plan.requested_ranges[0].end_seq, 1);
+    }
+
+    #[test]
+    fn decompress_chunk_rejects_oversized_output() {
+        // Create zlib-compressed data that decompresses to more than
+        // MAX_DECOMPRESSED_FRAME_BYTES.  A run of zeros compresses very well.
+        let big = vec![0u8; super::MAX_DECOMPRESSED_FRAME_BYTES + 1];
+        let compressed = super::compress_chunk(&big).expect("compress should succeed");
+        let result = super::decompress_chunk(&compressed);
+        assert!(result.is_err(), "oversized decompression should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("decompression bomb"),
+            "error should mention decompression bomb, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn decompress_chunk_accepts_normal_frame() {
+        // 40 000 bytes = 5 seconds of 8 kHz mulaw (maximum normal frame size).
+        let normal = vec![0u8; 40_000];
+        let compressed = super::compress_chunk(&normal).expect("compress should succeed");
+        let result = super::decompress_chunk(&compressed);
+        assert!(
+            result.is_ok(),
+            "normal-sized frame should decompress successfully"
+        );
+        assert_eq!(result.unwrap().len(), 40_000);
+    }
+
+    #[test]
+    fn decompress_chunk_accepts_exact_size_limit() {
+        let normal = vec![0u8; super::MAX_DECOMPRESSED_FRAME_BYTES];
+        let compressed = super::compress_chunk(&normal).expect("compress should succeed");
+        let result = super::decompress_chunk(&compressed).expect("exact-limit frame should pass");
+        assert_eq!(result.len(), super::MAX_DECOMPRESSED_FRAME_BYTES);
     }
 }

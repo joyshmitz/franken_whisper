@@ -653,21 +653,15 @@ mod tests {
 
     #[test]
     fn write_replay_pack_to_read_only_dir_fails() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().expect("tempdir");
         let locked_dir = dir.path().join("locked");
         std::fs::create_dir(&locked_dir).expect("mkdir");
-        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o444))
-            .expect("chmod");
+        let blocker_file = locked_dir.join("blocker");
+        std::fs::write(&blocker_file, "not-a-directory").expect("write blocker");
 
         let report = fixture_report();
-        let result = write_replay_pack(&report, &locked_dir.join("subdir"));
-        assert!(result.is_err(), "should fail on read-only parent");
-
-        // Restore write permission so tempdir cleanup works.
-        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755))
-            .expect("restore perms");
+        let result = write_replay_pack(&report, &blocker_file.join("subdir"));
+        assert!(result.is_err(), "should fail when parent path is a file");
     }
 
     // ── Second-pass edge case tests ──
