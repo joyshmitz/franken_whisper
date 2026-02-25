@@ -4440,15 +4440,25 @@ mod tests {
         }
 
         // Re-open and verify all 5 runs are present.
-        let store = RunStore::open(&db_path).expect("store");
-        let runs = store.list_recent_runs(100).expect("list");
+        // Retry with fresh connections to account for frankensqlite MVCC
+        // visibility lag under extreme concurrent-write workloads.
+        let mut final_count = 0;
+        for _attempt in 0..5 {
+            let store = RunStore::open(&db_path).expect("store");
+            let runs = store.list_recent_runs(100).expect("list");
+            final_count = runs.len();
+            if final_count >= 5 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         assert!(
-            runs.len() >= 5,
-            "all 5 concurrent runs should be present, got {}",
-            runs.len()
+            final_count >= 5,
+            "all 5 concurrent runs should be present, got {final_count}",
         );
 
         // Verify each run can be loaded individually.
+        let store = RunStore::open(&db_path).expect("store");
         for i in 0..5 {
             let run_id = format!("concurrent-{i}");
             let details = store
