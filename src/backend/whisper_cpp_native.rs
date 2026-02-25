@@ -1154,8 +1154,7 @@ mod tests {
             .expect("segmentation should succeed");
 
         assert_eq!(seg.analysis_provenance["mode"], "waveform");
-        let seg_count = seg
-            .analysis_provenance["segments_from_active_regions"]
+        let seg_count = seg.analysis_provenance["segments_from_active_regions"]
             .as_u64()
             .expect("segments_from_active_regions must be u64");
         assert!(
@@ -1209,7 +1208,10 @@ mod tests {
                 actual.confidence,
                 "confidence must match"
             );
-            assert!(raw["speaker"].is_null(), "speaker should be null for whisper.cpp");
+            assert!(
+                raw["speaker"].is_null(),
+                "speaker should be null for whisper.cpp"
+            );
         }
     }
 

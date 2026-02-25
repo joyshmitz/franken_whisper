@@ -677,10 +677,7 @@ CREATE TABLE IF NOT EXISTS _meta (
         self.migrate_legacy_runs_schema_v2_inner(true)
     }
 
-    fn migrate_legacy_runs_schema_v2_inner(
-        &self,
-        failpoint_after_swap: bool,
-    ) -> FwResult<()> {
+    fn migrate_legacy_runs_schema_v2_inner(&self, failpoint_after_swap: bool) -> FwResult<()> {
         let has_replay = self.table_has_column("runs", "replay_json")?;
         let has_acceleration = self.table_has_column("runs", "acceleration_json")?;
         if has_replay && has_acceleration {
@@ -749,8 +746,7 @@ CREATE TABLE IF NOT EXISTS _meta (
                     .map_err(|error| FwError::Storage(error.to_string()))?;
             }
 
-            let rebuilt_snapshot =
-                self.load_runs_snapshot_rows(rebuilt_table_name, true, true)?;
+            let rebuilt_snapshot = self.load_runs_snapshot_rows(rebuilt_table_name, true, true)?;
             if rebuilt_snapshot.len() != expected_rows {
                 return Err(FwError::Storage(format!(
                     "legacy migration integrity check failed: rebuilt row count {} != source row count {}",
@@ -792,13 +788,11 @@ CREATE TABLE IF NOT EXISTS _meta (
             }
 
             for (_, sql) in &index_defs {
-                self.connection
-                    .execute(sql)
-                    .map_err(|error| {
-                        FwError::Storage(format!(
-                            "recreate index for migrated runs table failed: {error}"
-                        ))
-                    })?;
+                self.connection.execute(sql).map_err(|error| {
+                    FwError::Storage(format!(
+                        "recreate index for migrated runs table failed: {error}"
+                    ))
+                })?;
             }
 
             self.connection
@@ -6271,8 +6265,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("idx_preserve.sqlite3");
 
-        let conn =
-            fsqlite::Connection::open(db_path.display().to_string()).expect("open");
+        let conn = fsqlite::Connection::open(db_path.display().to_string()).expect("open");
         // Create v1 schema (no replay_json, no acceleration_json).
         conn.execute(
             "CREATE TABLE runs (\
@@ -6339,8 +6332,16 @@ mod tests {
         );
 
         // Also verify the new columns exist.
-        assert!(store.table_has_column("runs", "replay_json").expect("check"));
-        assert!(store.table_has_column("runs", "acceleration_json").expect("check"));
+        assert!(
+            store
+                .table_has_column("runs", "replay_json")
+                .expect("check")
+        );
+        assert!(
+            store
+                .table_has_column("runs", "acceleration_json")
+                .expect("check")
+        );
     }
 
     #[test]
@@ -6401,10 +6402,7 @@ mod tests {
         let store = RunStore::open(&db_path).expect("store");
 
         let columns = store.table_columns("runs").expect("columns");
-        assert!(
-            !columns.is_empty(),
-            "runs table should have columns"
-        );
+        assert!(!columns.is_empty(), "runs table should have columns");
 
         let mut names = Vec::new();
         for row in &columns {
@@ -6462,7 +6460,9 @@ mod tests {
         let db_path = dir.path().join("mig_v1.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
         // Directly invoke the v1 migration — it should succeed as a no-op.
-        store.apply_migration(1).expect("v1 migration should be a no-op");
+        store
+            .apply_migration(1)
+            .expect("v1 migration should be a no-op");
         // Schema should still be intact and usable.
         store
             .persist_report(&minimal_report("after-v1", &db_path))
@@ -6481,8 +6481,7 @@ mod tests {
 
         // Create a "fresh shape" DB at version 0: tables with both columns
         // present but no schema_version key in _meta.
-        let conn =
-            fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        let conn = fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
         conn.execute(
             "CREATE TABLE runs (\
                 id TEXT PRIMARY KEY, \
@@ -6521,10 +6520,8 @@ mod tests {
             );",
         )
         .expect("create events");
-        conn.execute(
-            "CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-        )
-        .expect("create _meta");
+        conn.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("create _meta");
         // Crucially: do NOT insert a schema_version row → version == 0.
         drop(conn);
 
@@ -6598,8 +6595,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("v1_data.sqlite3");
 
-        let conn =
-            fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        let conn = fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
         // Create v1 schema.
         conn.execute(
             "CREATE TABLE runs (\
@@ -6635,10 +6631,8 @@ mod tests {
             );",
         )
         .expect("create events");
-        conn.execute(
-            "CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-        )
-        .expect("create _meta");
+        conn.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("create _meta");
 
         // Insert a v1 row (no replay_json or acceleration_json columns).
         let result_json = serde_json::json!({
@@ -6690,8 +6684,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("partial_v1.sqlite3");
 
-        let conn =
-            fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        let conn = fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
         conn.execute(
             "CREATE TABLE runs (\
                 id TEXT PRIMARY KEY, \
@@ -6727,10 +6720,8 @@ mod tests {
             );",
         )
         .expect("create events");
-        conn.execute(
-            "CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-        )
-        .expect("create _meta");
+        conn.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("create _meta");
 
         let replay_json = serde_json::json!({
             "input_content_hash": "legacy-input-hash",
@@ -6794,8 +6785,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("rollback_failpoint.sqlite3");
 
-        let conn =
-            fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        let conn = fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
         conn.execute(
             "CREATE TABLE runs (\
                 id TEXT PRIMARY KEY, \
@@ -6906,12 +6896,9 @@ mod tests {
         let db_path = dir.path().join("ver_insert.sqlite3");
 
         // Create a bare DB with _meta but no schema_version row.
-        let conn =
-            fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
-        conn.execute(
-            "CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-        )
-        .expect("create _meta");
+        let conn = fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        conn.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("create _meta");
         // Also create required tables so RunStore operations work.
         conn.execute(
             "CREATE TABLE runs (\
@@ -6979,10 +6966,14 @@ mod tests {
         let store = RunStore::open(&db_path).expect("store");
 
         // apply_migration(2) should be idempotent — columns already exist.
-        store.apply_migration(2).expect("v2 migration should succeed when columns exist");
+        store
+            .apply_migration(2)
+            .expect("v2 migration should succeed when columns exist");
 
         // Verify data operations still work after the idempotent migration.
-        store.persist_report(&minimal_report("after-v2", &db_path)).expect("persist");
+        store
+            .persist_report(&minimal_report("after-v2", &db_path))
+            .expect("persist");
         let runs = store.list_recent_runs(10).expect("list");
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, "after-v2");
@@ -7017,7 +7008,9 @@ mod tests {
         let db_path = dir.path().join("no_such_table.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
 
-        let columns = store.table_columns("completely_fictional_table").expect("columns");
+        let columns = store
+            .table_columns("completely_fictional_table")
+            .expect("columns");
         assert!(
             columns.is_empty(),
             "nonexistent table should return empty column list"

@@ -3698,7 +3698,10 @@ mod tests {
     fn check_database_nonexistent_parent_reports_issue() {
         use std::path::Path;
         let dep = super::check_database(Path::new("/nonexistent_xyzzy_dir/test.db"));
-        assert!(!dep.available, "should be unavailable for nonexistent parent");
+        assert!(
+            !dep.available,
+            "should be unavailable for nonexistent parent"
+        );
         assert!(
             !dep.issues.is_empty(),
             "should have issues for nonexistent parent"

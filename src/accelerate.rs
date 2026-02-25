@@ -4457,7 +4457,10 @@ mod tests {
         assert!(!result.gpu_accelerated);
         // With zero epsilon and constant input, (v - mean) / 0.0 = NaN or 0/0 = NaN.
         for v in &result.normalized {
-            assert!(v.is_nan(), "expected NaN from zero-epsilon constant input, got {v}");
+            assert!(
+                v.is_nan(),
+                "expected NaN from zero-epsilon constant input, got {v}"
+            );
         }
     }
 
@@ -4475,7 +4478,6 @@ mod tests {
             "operation should mention d_model=128, got: {}",
             result.operation
         );
-        assert!(result.cpu_time_us > 0 || result.cpu_time_us == 0); // just exercises the path
     }
 
     #[test]

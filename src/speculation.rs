@@ -2866,7 +2866,11 @@ mod tests {
 
         // Register and submit two partials that trigger corrections.
         let p0 = PartialTranscript::new(
-            0, 100, "fast".to_owned(), vec![seg("hello", Some(0.5))], 50,
+            0,
+            100,
+            "fast".to_owned(),
+            vec![seg("hello", Some(0.5))],
+            50,
             "2026-01-01T00:00:00Z".to_owned(),
         );
         tracker.register_partial(p0);
@@ -2875,7 +2879,11 @@ mod tests {
             .unwrap();
 
         let p1 = PartialTranscript::new(
-            1, 101, "fast".to_owned(), vec![seg("foo", Some(0.5))], 50,
+            1,
+            101,
+            "fast".to_owned(),
+            vec![seg("foo", Some(0.5))],
+            50,
             "2026-01-01T00:00:01Z".to_owned(),
         );
         tracker.register_partial(p1);
@@ -3018,8 +3026,14 @@ mod tests {
             let decision = if i < 4 {
                 CorrectionDecision::Correct {
                     correction: CorrectionEvent::new(
-                        i, i, i, "quality".to_owned(), vec![], 100,
-                        "2026-01-01T00:00:00Z".to_owned(), &[],
+                        i,
+                        i,
+                        i,
+                        "quality".to_owned(),
+                        vec![],
+                        100,
+                        "2026-01-01T00:00:00Z".to_owned(),
+                        &[],
                     ),
                 }
             } else {
@@ -3120,9 +3134,8 @@ mod tests {
             text_edit_distance: 5,
         };
         for _ in 0..10u64 {
-            let correction = CorrectionEvent::new(
-                0, 0, 0, "q".to_owned(), vec![], 100, "t".to_owned(), &[],
-            );
+            let correction =
+                CorrectionEvent::new(0, 0, 0, "q".to_owned(), vec![], 100, "t".to_owned(), &[]);
             ctrl.observe(&CorrectionDecision::Correct { correction }, &drift);
         }
         // Brier should still be high (mix of 10 bad + 10 good-ish calibration records,
@@ -3149,9 +3162,8 @@ mod tests {
             text_edit_distance: 5,
         };
         for _ in 0..10u64 {
-            let correction = CorrectionEvent::new(
-                0, 0, 0, "q".to_owned(), vec![], 100, "t".to_owned(), &[],
-            );
+            let correction =
+                CorrectionEvent::new(0, 0, 0, "q".to_owned(), vec![], 100, "t".to_owned(), &[]);
             ctrl.observe(&CorrectionDecision::Correct { correction }, &drift);
         }
         assert!(ctrl.state().correction_rate > 0.75);
@@ -3216,10 +3228,20 @@ mod tests {
         let mut tracker = CorrectionTracker::new(tolerance);
         // Register two partials with different seqs but same window_id.
         let p0 = PartialTranscript::new(
-            0, 10, "fast".to_owned(), vec![], 50, "2026-01-01T00:00:00Z".to_owned(),
+            0,
+            10,
+            "fast".to_owned(),
+            vec![],
+            50,
+            "2026-01-01T00:00:00Z".to_owned(),
         );
         let p1 = PartialTranscript::new(
-            1, 10, "fast".to_owned(), vec![], 60, "2026-01-01T00:00:01Z".to_owned(),
+            1,
+            10,
+            "fast".to_owned(),
+            vec![],
+            60,
+            "2026-01-01T00:00:01Z".to_owned(),
         );
         tracker.register_partial(p0);
         tracker.register_partial(p1);
@@ -3236,11 +3258,7 @@ mod tests {
 
     #[test]
     fn partial_transcript_confidence_mean_zero_when_all_segments_have_none_confidence() {
-        let segments = vec![
-            seg("hello", None),
-            seg("world", None),
-            seg("foo", None),
-        ];
+        let segments = vec![seg("hello", None), seg("world", None), seg("foo", None)];
         let pt = PartialTranscript::new(
             0,
             0,
@@ -3275,7 +3293,10 @@ mod tests {
             vec![timed_seg("not resolved seg", 5.0, 7.0, Some(0.9))],
         );
         // Do NOT resolve w1 — it stays at QualityComplete.
-        assert_eq!(wm.get_window(w1.window_id).unwrap().status, WindowStatus::QualityComplete);
+        assert_eq!(
+            wm.get_window(w1.window_id).unwrap().status,
+            WindowStatus::QualityComplete
+        );
 
         let merged = wm.merge_segments();
         assert_eq!(
@@ -3424,7 +3445,7 @@ mod tests {
     fn correction_tracker_triggers_correction_on_wer_alone() {
         // Symmetric with existing _on_confidence_delta_alone and _on_edit_distance_alone.
         let tolerance = CorrectionTolerance {
-            max_wer: 0.01,            // tight — any word difference triggers
+            max_wer: 0.01,             // tight — any word difference triggers
             max_confidence_delta: 1.0, // very lenient
             max_edit_distance: 1000,   // very lenient
             always_correct: false,
@@ -3444,12 +3465,7 @@ mod tests {
         // Quality text differs by 1 word out of 2 → wer ≈ 0.5 > 0.01.
         // But confidence is the same (delta=0.0 < 1.0) and edit_distance is small (< 1000).
         let decision = tracker
-            .submit_quality_result(
-                100,
-                "quality",
-                vec![seg("hello earth", Some(0.8))],
-                200,
-            )
+            .submit_quality_result(100, "quality", vec![seg("hello earth", Some(0.8))], 200)
             .expect("should succeed");
         assert!(
             matches!(decision, CorrectionDecision::Correct { .. }),
@@ -3502,7 +3518,10 @@ mod tests {
 
         let merged = wm.merge_segments();
         assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].text, "first phrase", "should sort by start_sec ascending");
+        assert_eq!(
+            merged[0].text, "first phrase",
+            "should sort by start_sec ascending"
+        );
         assert_eq!(merged[1].text, "second phrase");
     }
 
@@ -3780,10 +3799,7 @@ mod tests {
             "multi-segment WER should be 2/3, got {}",
             drift.wer_approx
         );
-        assert_eq!(
-            drift.segment_count_delta, 1,
-            "quality(3) - fast(2) = 1"
-        );
+        assert_eq!(drift.segment_count_delta, 1, "quality(3) - fast(2) = 1");
         // char edit: "hello world" vs "hello earth again"
         let char_dist = levenshtein("hello world", "hello earth again");
         assert_eq!(drift.text_edit_distance, char_dist);
@@ -3831,7 +3847,10 @@ mod tests {
     #[test]
     fn levenshtein_words_direct_known_distances() {
         // Identical word sequences → 0.
-        assert_eq!(levenshtein_words(&["hello", "world"], &["hello", "world"]), 0);
+        assert_eq!(
+            levenshtein_words(&["hello", "world"], &["hello", "world"]),
+            0
+        );
         // Empty vs non-empty → length of non-empty.
         assert_eq!(levenshtein_words(&[], &["a", "b", "c"]), 3);
         assert_eq!(levenshtein_words(&["x", "y"], &[]), 2);
@@ -3846,7 +3865,11 @@ mod tests {
     #[test]
     fn concat_segment_text_joins_with_space() {
         // Multiple segments.
-        let segments = vec![seg("hello", None), seg("beautiful", None), seg("world", None)];
+        let segments = vec![
+            seg("hello", None),
+            seg("beautiful", None),
+            seg("world", None),
+        ];
         assert_eq!(concat_segment_text(&segments), "hello beautiful world");
         // Single segment.
         assert_eq!(concat_segment_text(&[seg("solo", None)]), "solo");
@@ -3957,16 +3980,10 @@ mod tests {
         let w2 = wm.next_window(10000, "h2");
 
         // Three overlapping segments within 0.1s tolerance, varying confidence.
-        wm.record_quality_result(
-            w0.window_id,
-            vec![timed_seg("low", 2.0, 4.0, Some(0.3))],
-        );
+        wm.record_quality_result(w0.window_id, vec![timed_seg("low", 2.0, 4.0, Some(0.3))]);
         wm.resolve_window(w0.window_id);
 
-        wm.record_quality_result(
-            w1.window_id,
-            vec![timed_seg("mid", 2.05, 4.05, Some(0.6))],
-        );
+        wm.record_quality_result(w1.window_id, vec![timed_seg("mid", 2.05, 4.05, Some(0.6))]);
         wm.resolve_window(w1.window_id);
 
         wm.record_quality_result(
@@ -3991,8 +4008,7 @@ mod tests {
         ];
         for action in &actions {
             let json = serde_json::to_string(action).expect("serialize");
-            let deserialized: ControllerAction =
-                serde_json::from_str(&json).expect("deserialize");
+            let deserialized: ControllerAction = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(
                 &deserialized, action,
                 "round-trip failed for {action:?}: {json}"
@@ -4072,8 +4088,15 @@ mod tests {
                 fallback_reason: None,
             });
         }
-        assert_eq!(ledger.total_recorded(), 5, "total_recorded should count all records");
-        assert!(ledger.entries().is_empty(), "zero-capacity ledger should store nothing");
+        assert_eq!(
+            ledger.total_recorded(),
+            5,
+            "total_recorded should count all records"
+        );
+        assert!(
+            ledger.entries().is_empty(),
+            "zero-capacity ledger should store nothing"
+        );
     }
 
     #[test]
@@ -4353,19 +4376,28 @@ mod tests {
         assert_eq!(back.corrected_segments[0].text, "corrected text");
         assert_eq!(back.quality_latency_ms, 300);
         assert!((back.quality_confidence_mean - 0.95).abs() < f64::EPSILON);
-        assert!(back.drift.wer_approx > 0.0, "different texts should have nonzero WER");
+        assert!(
+            back.drift.wer_approx > 0.0,
+            "different texts should have nonzero WER"
+        );
         assert_eq!(back.corrected_at_rfc3339, "2026-03-01T00:00:00Z");
     }
 
     #[test]
     fn correction_tolerance_default_values() {
         let t = CorrectionTolerance::default();
-        assert!((t.max_wer - 0.1).abs() < f64::EPSILON, "default max_wer should be 0.1");
+        assert!(
+            (t.max_wer - 0.1).abs() < f64::EPSILON,
+            "default max_wer should be 0.1"
+        );
         assert!(
             (t.max_confidence_delta - 0.15).abs() < f64::EPSILON,
             "default max_confidence_delta should be 0.15"
         );
-        assert_eq!(t.max_edit_distance, 50, "default max_edit_distance should be 50");
+        assert_eq!(
+            t.max_edit_distance, 50,
+            "default max_edit_distance should be 50"
+        );
         assert!(!t.always_correct, "default always_correct should be false");
     }
 
@@ -4398,7 +4430,10 @@ mod tests {
         assert_eq!(back.window.window_id, 7);
         assert_eq!(back.window.run_id, "run-x");
         assert!(back.fast_result.is_none());
-        let qr = back.quality_result.as_ref().expect("should have quality result");
+        let qr = back
+            .quality_result
+            .as_ref()
+            .expect("should have quality result");
         assert_eq!(qr.len(), 1);
         assert_eq!(qr[0].text, "hello");
         assert_eq!(back.status, WindowStatus::QualityComplete);
@@ -4520,9 +4555,12 @@ mod tests {
 
         // Window 1: high WER → Correct.
         let p1 = PartialTranscript::new(
-            0, 10, "fast".into(),
+            0,
+            10,
+            "fast".into(),
             vec![seg("alpha", Some(0.8))],
-            100, "t".into(),
+            100,
+            "t".into(),
         );
         tracker.register_partial(p1);
         tracker
@@ -4531,9 +4569,12 @@ mod tests {
 
         // Window 2: identical → Confirm.
         let p2 = PartialTranscript::new(
-            1, 20, "fast".into(),
+            1,
+            20,
+            "fast".into(),
             vec![seg("same", Some(0.9))],
-            80, "t".into(),
+            80,
+            "t".into(),
         );
         tracker.register_partial(p2);
         tracker
@@ -4546,8 +4587,14 @@ mod tests {
         assert_eq!(stats.confirmations_emitted, 1);
         assert_eq!(stats.total_fast_latency_ms, 180); // 100 + 80
         assert_eq!(stats.total_quality_latency_ms, 550); // 300 + 250
-        assert!(stats.cumulative_wer > 0.0, "at least one window had nonzero WER");
-        assert!(stats.max_observed_wer > 0.0, "max WER should reflect the correction");
+        assert!(
+            stats.cumulative_wer > 0.0,
+            "at least one window had nonzero WER"
+        );
+        assert!(
+            stats.max_observed_wer > 0.0,
+            "max WER should reflect the correction"
+        );
     }
 
     // ── Task #280 — speculation.rs pass 21 edge-case tests ────────────
@@ -4575,9 +4622,7 @@ mod tests {
         }
         // Inject a correction to reset the consecutive counter.
         let correction = CorrectionDecision::Correct {
-            correction: CorrectionEvent::new(
-                0, 0, 0, "q".into(), vec![], 100, "t".into(), &[],
-            ),
+            correction: CorrectionEvent::new(0, 0, 0, "q".into(), vec![], 100, "t".into(), &[]),
         };
         ctrl.observe(&correction, &drift);
 
@@ -4602,13 +4647,20 @@ mod tests {
         let w = wm.next_window(0, "h");
         // Record fast result but do NOT resolve the window.
         let p = PartialTranscript::new(
-            0, w.window_id, "fast".into(),
-            vec![seg("hello", Some(0.9))], 50, "t".into(),
+            0,
+            w.window_id,
+            "fast".into(),
+            vec![seg("hello", Some(0.9))],
+            50,
+            "t".into(),
         );
         wm.record_fast_result(w.window_id, p);
         // merge_segments only considers Resolved windows.
         let merged = wm.merge_segments();
-        assert!(merged.is_empty(), "no resolved windows → empty merged output");
+        assert!(
+            merged.is_empty(),
+            "no resolved windows → empty merged output"
+        );
     }
 
     #[test]
@@ -4793,9 +4845,8 @@ mod tests {
         };
         // Drive correction rate > 0.75.
         for _ in 0..10u64 {
-            let correction = CorrectionEvent::new(
-                0, 0, 0, "q".into(), vec![], 100, "t".into(), &[],
-            );
+            let correction =
+                CorrectionEvent::new(0, 0, 0, "q".into(), vec![], 100, "t".into(), &[]);
             ctrl.observe(&CorrectionDecision::Correct { correction }, &drift);
         }
         assert!(ctrl.state().correction_rate > 0.75);
@@ -4841,9 +4892,8 @@ mod tests {
         };
         // 6 corrections + 2 confirmations = 8 windows, rate ~0.67.
         for i in 0..6u64 {
-            let correction = CorrectionEvent::new(
-                i, i, i, "q".into(), vec![], 100, "t".into(), &[],
-            );
+            let correction =
+                CorrectionEvent::new(i, i, i, "q".into(), vec![], 100, "t".into(), &[]);
             ctrl.observe(&CorrectionDecision::Correct { correction }, &drift);
         }
         for _ in 0..2 {
@@ -4876,20 +4926,30 @@ mod tests {
         let mut tracker = CorrectionTracker::new(tolerance);
         // Window 1: high WER (correction).
         let p1 = PartialTranscript::new(
-            0, 10, "fast".into(),
+            0,
+            10,
+            "fast".into(),
             vec![seg("cat", Some(0.8))],
-            50, "t".into(),
+            50,
+            "t".into(),
         );
         tracker.register_partial(p1);
-        tracker.submit_quality_result(10, "q", vec![seg("dog", Some(0.9))], 200).unwrap();
+        tracker
+            .submit_quality_result(10, "q", vec![seg("dog", Some(0.9))], 200)
+            .unwrap();
         // Window 2: zero WER (confirmation).
         let p2 = PartialTranscript::new(
-            1, 20, "fast".into(),
+            1,
+            20,
+            "fast".into(),
             vec![seg("same", Some(0.9))],
-            50, "t".into(),
+            50,
+            "t".into(),
         );
         tracker.register_partial(p2);
-        tracker.submit_quality_result(20, "q", vec![seg("same", Some(0.9))], 200).unwrap();
+        tracker
+            .submit_quality_result(20, "q", vec![seg("same", Some(0.9))], 200)
+            .unwrap();
 
         let mean = tracker.mean_wer();
         // Window 1 had WER=1.0 (all words different), window 2 had WER=0.0.
@@ -4908,16 +4968,25 @@ mod tests {
         assert_eq!(wm.current_window_size(), 1000, "should clamp to min 1000");
         // Default max_window_ms = 30000.
         wm.set_window_size(50_000);
-        assert_eq!(wm.current_window_size(), 30_000, "should clamp to max 30000");
+        assert_eq!(
+            wm.current_window_size(),
+            30_000,
+            "should clamp to max 30000"
+        );
     }
 
     #[test]
     fn correction_event_confidence_mean_from_multiple_quality_segments() {
         // CorrectionEvent::new() computes quality_confidence_mean via mean_confidence.
         let event = CorrectionEvent::new(
-            0, 0, 0, "q".into(),
+            0,
+            0,
+            0,
+            "q".into(),
             vec![seg("a", Some(0.8)), seg("b", Some(0.6)), seg("c", None)],
-            100, "t".into(), &[],
+            100,
+            "t".into(),
+            &[],
         );
         // mean_confidence: only Some values → (0.8+0.6)/2 = 0.7
         assert!(
@@ -4982,16 +5051,25 @@ mod tests {
         // Feed 15 confirmations to trigger low-correction-rate shrink.
         for _ in 0..15 {
             ctrl.observe(
-                &CorrectionDecision::Confirm { seq: 0, drift: drift.clone() },
+                &CorrectionDecision::Confirm {
+                    seq: 0,
+                    drift: drift.clone(),
+                },
                 &drift,
             );
         }
         let new = ctrl.apply();
-        assert_eq!(new, 1000, "shrink from 1500 by 500 should clamp at min 1000");
+        assert_eq!(
+            new, 1000,
+            "shrink from 1500 by 500 should clamp at min 1000"
+        );
         // Another apply: already at min, consecutive_zero < 20, so Hold keeps at 1000.
         for _ in 0..5 {
             ctrl.observe(
-                &CorrectionDecision::Confirm { seq: 0, drift: drift.clone() },
+                &CorrectionDecision::Confirm {
+                    seq: 0,
+                    drift: drift.clone(),
+                },
                 &drift,
             );
         }
@@ -5012,19 +5090,24 @@ mod tests {
         // Need correction_rate > 0.25, mean_wer > 0.125, confidence >= 0.5.
         // Feed 5 corrections + 5 confirmations = rate 0.5 > 0.25, window_count = 10.
         for i in 0..5u64 {
-            let correction = CorrectionEvent::new(
-                i, i, i, "q".into(), vec![], 100, "t".into(), &[],
-            );
+            let correction =
+                CorrectionEvent::new(i, i, i, "q".into(), vec![], 100, "t".into(), &[]);
             ctrl.observe(&CorrectionDecision::Correct { correction }, &drift);
         }
         for _ in 0..5 {
             ctrl.observe(
-                &CorrectionDecision::Confirm { seq: 0, drift: drift.clone() },
+                &CorrectionDecision::Confirm {
+                    seq: 0,
+                    drift: drift.clone(),
+                },
                 &drift,
             );
         }
         let new = ctrl.apply();
-        assert_eq!(new, 30000, "grow from 29800 by 500 should clamp at max 30000");
+        assert_eq!(
+            new, 30000,
+            "grow from 29800 by 500 should clamp at max 30000"
+        );
     }
 
     #[test]
@@ -5065,14 +5148,16 @@ mod tests {
             text_edit_distance: 1,
         };
         for _ in 0..15 {
-            let correction = CorrectionEvent::new(
-                0, 0, 0, "q".into(), vec![], 100, "t".into(), &[],
-            );
+            let correction =
+                CorrectionEvent::new(0, 0, 0, "q".into(), vec![], 100, "t".into(), &[]);
             ctrl.observe(&CorrectionDecision::Correct { correction }, &drift);
         }
         for _ in 0..10 {
             ctrl.observe(
-                &CorrectionDecision::Confirm { seq: 0, drift: drift.clone() },
+                &CorrectionDecision::Confirm {
+                    seq: 0,
+                    drift: drift.clone(),
+                },
                 &drift,
             );
         }
@@ -5121,7 +5206,11 @@ mod tests {
                 fallback_reason: None,
             });
         }
-        assert_eq!(ledger.total_recorded(), 5, "total should count all 5 records");
+        assert_eq!(
+            ledger.total_recorded(),
+            5,
+            "total should count all 5 records"
+        );
         assert_eq!(ledger.entries().len(), 2, "only 2 retained (capacity=2)");
         // Newest entries are IDs 3 and 4.
         assert_eq!(ledger.entries()[0].entry_id, 3);
@@ -5138,7 +5227,10 @@ mod tests {
         let result = wm.next_window_bounded(1000, 5000, "h");
         // natural_end = 1000 + 0 = 1000, end_ms = min(1000, 5000) = 1000.
         // end_ms (1000) <= audio_position_ms (1000) → None.
-        assert!(result.is_none(), "zero-size window should return None from second guard");
+        assert!(
+            result.is_none(),
+            "zero-size window should return None from second guard"
+        );
     }
 
     #[test]
@@ -5188,7 +5280,11 @@ mod tests {
 
         // Apply with no observations → Hold → stays at 5000.
         ctrl.apply();
-        assert_eq!(ctrl.state().current_window_ms, 5000, "after apply with Hold");
+        assert_eq!(
+            ctrl.state().current_window_ms,
+            5000,
+            "after apply with Hold"
+        );
 
         // Feed 15 confirmations to trigger shrink (low correction rate, window_count > 10).
         let drift = CorrectionDrift {
@@ -5199,13 +5295,17 @@ mod tests {
         };
         for _ in 0..15 {
             ctrl.observe(
-                &CorrectionDecision::Confirm { seq: 0, drift: drift.clone() },
+                &CorrectionDecision::Confirm {
+                    seq: 0,
+                    drift: drift.clone(),
+                },
                 &drift,
             );
         }
         let new_size = ctrl.apply();
         assert_eq!(
-            ctrl.state().current_window_ms, new_size,
+            ctrl.state().current_window_ms,
+            new_size,
             "state.current_window_ms should match apply() return value"
         );
         assert!(new_size < 5000, "should have shrunk");
@@ -5223,9 +5323,12 @@ mod tests {
 
         // Window 1: untimed segment (start_sec = None → sort as 0.0).
         let fast = PartialTranscript::new(
-            0, w1.window_id, "fast".into(),
+            0,
+            w1.window_id,
+            "fast".into(),
             vec![seg("early", Some(0.8))],
-            50, "t".into(),
+            50,
+            "t".into(),
         );
         wm.record_fast_result(w1.window_id, fast);
         wm.resolve_window(w1.window_id);
@@ -5288,19 +5391,31 @@ mod tests {
 
         // Window 1: different text → correction.
         let p1 = PartialTranscript::new(
-            0, 10, "fast".into(),
-            vec![seg("alpha", Some(0.8))], 50, "t".into(),
+            0,
+            10,
+            "fast".into(),
+            vec![seg("alpha", Some(0.8))],
+            50,
+            "t".into(),
         );
         tracker.register_partial(p1);
-        tracker.submit_quality_result(10, "q", vec![seg("beta", Some(0.9))], 200).unwrap();
+        tracker
+            .submit_quality_result(10, "q", vec![seg("beta", Some(0.9))], 200)
+            .unwrap();
 
         // Window 2: identical text → confirmation.
         let p2 = PartialTranscript::new(
-            1, 20, "fast".into(),
-            vec![seg("same", Some(0.9))], 50, "t".into(),
+            1,
+            20,
+            "fast".into(),
+            vec![seg("same", Some(0.9))],
+            50,
+            "t".into(),
         );
         tracker.register_partial(p2);
-        tracker.submit_quality_result(20, "q", vec![seg("same", Some(0.9))], 200).unwrap();
+        tracker
+            .submit_quality_result(20, "q", vec![seg("same", Some(0.9))], 200)
+            .unwrap();
 
         // 1 correction + 1 confirmation = rate 0.5.
         assert!(
@@ -5433,8 +5548,12 @@ mod tests {
         wm.resolve_window(w0.window_id);
         // w1: has a fast result with segments, no quality.
         let fast = PartialTranscript::new(
-            0, w1.window_id, "fast".into(),
-            vec![seg("hello", Some(0.9))], 50, "t".into(),
+            0,
+            w1.window_id,
+            "fast".into(),
+            vec![seg("hello", Some(0.9))],
+            50,
+            "t".into(),
         );
         wm.record_fast_result(w1.window_id, fast);
         wm.resolve_window(w1.window_id);
@@ -5465,13 +5584,28 @@ mod tests {
     fn correction_tracker_register_partial_accumulates_fast_latency() {
         let mut tracker = CorrectionTracker::new(CorrectionTolerance::default());
         let p0 = PartialTranscript::new(
-            0, 10, "fast".into(), vec![seg("a", Some(0.9))], 100, "t".into(),
+            0,
+            10,
+            "fast".into(),
+            vec![seg("a", Some(0.9))],
+            100,
+            "t".into(),
         );
         let p1 = PartialTranscript::new(
-            1, 20, "fast".into(), vec![seg("b", Some(0.8))], 250, "t".into(),
+            1,
+            20,
+            "fast".into(),
+            vec![seg("b", Some(0.8))],
+            250,
+            "t".into(),
         );
         let p2 = PartialTranscript::new(
-            2, 30, "fast".into(), vec![seg("c", Some(0.7))], 50, "t".into(),
+            2,
+            30,
+            "fast".into(),
+            vec![seg("c", Some(0.7))],
+            50,
+            "t".into(),
         );
         tracker.register_partial(p0);
         tracker.register_partial(p1);
@@ -5496,7 +5630,10 @@ mod tests {
             "mean should be {expected}, got {}",
             post.mean()
         );
-        assert!(post.mean() > 0.98, "mean should be near 1.0 after 100 corrections");
+        assert!(
+            post.mean() > 0.98,
+            "mean should be near 1.0 after 100 corrections"
+        );
         // Variance should be very small.
         assert!(post.variance() < 0.001, "variance should be tiny");
     }
@@ -5520,7 +5657,8 @@ mod tests {
                 &drift,
             );
             assert_eq!(
-                ctrl.state().window_count, i,
+                ctrl.state().window_count,
+                i,
                 "window_count should be {i} after {i} observations"
             );
         }
@@ -5531,10 +5669,13 @@ mod tests {
         let mut wm = WindowManager::new("run-nodedup", 5000, 0);
         let w0 = wm.next_window(0, "h0");
         // Two segments with start_sec differing by >= 0.1 should NOT be deduped.
-        wm.record_quality_result(w0.window_id, vec![
-            timed_seg("alpha", 0.0, 1.0, Some(0.9)),
-            timed_seg("beta", 0.15, 1.15, Some(0.8)),
-        ]);
+        wm.record_quality_result(
+            w0.window_id,
+            vec![
+                timed_seg("alpha", 0.0, 1.0, Some(0.9)),
+                timed_seg("beta", 0.15, 1.15, Some(0.8)),
+            ],
+        );
         wm.resolve_window(w0.window_id);
         let merged = wm.merge_segments();
         assert_eq!(merged.len(), 2, "segments 0.1+ apart should NOT be deduped");
@@ -5548,8 +5689,12 @@ mod tests {
         // Register and submit 3 windows with different quality latencies.
         for (i, qlat) in [(0u64, 150u64), (1, 300), (2, 50)] {
             let p = PartialTranscript::new(
-                i, i * 10 + 10, "fast".into(),
-                vec![seg("text", Some(0.9))], 100, "t".into(),
+                i,
+                i * 10 + 10,
+                "fast".into(),
+                vec![seg("text", Some(0.9))],
+                100,
+                "t".into(),
             );
             tracker.register_partial(p);
             tracker
@@ -5630,12 +5775,12 @@ mod tests {
         let fast = vec![seg("fast text", Some(0.8))];
         let corrected = vec![seg("quality text", Some(0.95))];
         let event = CorrectionEvent::new(
-            7,             // correction_id
-            3,             // retracted_seq
-            42,            // window_id
+            7,  // correction_id
+            3,  // retracted_seq
+            42, // window_id
             "quality-v2".to_owned(),
             corrected,
-            350,           // quality_latency_ms
+            350, // quality_latency_ms
             "2026-01-15T12:00:00Z".to_owned(),
             &fast,
         );
@@ -5665,7 +5810,12 @@ mod tests {
         assert_eq!(ws.status, WindowStatus::Pending);
         // Record fast result.
         let fast = PartialTranscript::new(
-            0, wid, "f".into(), vec![seg("fast", Some(0.8))], 50, "t".into(),
+            0,
+            wid,
+            "f".into(),
+            vec![seg("fast", Some(0.8))],
+            50,
+            "t".into(),
         );
         wm.record_fast_result(wid, fast);
         let ws = wm.get_window(wid).unwrap();
@@ -5710,8 +5860,10 @@ mod tests {
                 quality_confidence_mean: 0.95,
                 quality_segment_count: 1,
                 drift: CorrectionDrift {
-                    wer_approx: 0.0, confidence_delta: 0.0,
-                    segment_count_delta: 0, text_edit_distance: 0,
+                    wer_approx: 0.0,
+                    confidence_delta: 0.0,
+                    segment_count_delta: 0,
+                    text_edit_distance: 0,
                 },
                 decision: "confirm".into(),
                 window_size_ms: size,
@@ -5732,29 +5884,50 @@ mod tests {
     #[test]
     fn correction_tracker_cumulative_wer_and_max_wer_after_three_windows() {
         let mut tracker = CorrectionTracker::new(CorrectionTolerance {
-            max_wer: 1.0,           // high threshold: won't trigger correction on WER alone
+            max_wer: 1.0, // high threshold: won't trigger correction on WER alone
             max_confidence_delta: 1.0,
             max_edit_distance: 1000,
             always_correct: false,
         });
         // Window 1: "a" vs "a" → wer 0.0
         let p1 = PartialTranscript::new(
-            0, 10, "f".into(), vec![seg("a", Some(0.9))], 100, "t".into(),
+            0,
+            10,
+            "f".into(),
+            vec![seg("a", Some(0.9))],
+            100,
+            "t".into(),
         );
         tracker.register_partial(p1);
-        tracker.submit_quality_result(10, "q", vec![seg("a", Some(0.9))], 200).unwrap();
+        tracker
+            .submit_quality_result(10, "q", vec![seg("a", Some(0.9))], 200)
+            .unwrap();
         // Window 2: "hello" vs "world" → wer 1.0
         let p2 = PartialTranscript::new(
-            1, 20, "f".into(), vec![seg("hello", Some(0.9))], 100, "t".into(),
+            1,
+            20,
+            "f".into(),
+            vec![seg("hello", Some(0.9))],
+            100,
+            "t".into(),
         );
         tracker.register_partial(p2);
-        tracker.submit_quality_result(20, "q", vec![seg("world", Some(0.9))], 200).unwrap();
+        tracker
+            .submit_quality_result(20, "q", vec![seg("world", Some(0.9))], 200)
+            .unwrap();
         // Window 3: "good morning" vs "good evening" → wer 0.5
         let p3 = PartialTranscript::new(
-            2, 30, "f".into(), vec![seg("good morning", Some(0.9))], 100, "t".into(),
+            2,
+            30,
+            "f".into(),
+            vec![seg("good morning", Some(0.9))],
+            100,
+            "t".into(),
         );
         tracker.register_partial(p3);
-        tracker.submit_quality_result(30, "q", vec![seg("good evening", Some(0.9))], 200).unwrap();
+        tracker
+            .submit_quality_result(30, "q", vec![seg("good evening", Some(0.9))], 200)
+            .unwrap();
 
         // cumulative_wer = 0.0 + 1.0 + 0.5 = 1.5, mean = 0.5
         assert!(
@@ -5783,9 +5956,7 @@ mod tests {
     fn correction_event_is_significant_zero_threshold_any_wer() {
         let fast = vec![seg("a", Some(0.9))];
         let quality = vec![seg("b", Some(0.9))];
-        let event = CorrectionEvent::new(
-            0, 0, 0, "q".into(), quality, 100, "t".into(), &fast,
-        );
+        let event = CorrectionEvent::new(0, 0, 0, "q".into(), quality, 100, "t".into(), &fast);
         // With threshold 0.0, any nonzero WER is significant.
         assert!(
             event.is_significant(0.0),
@@ -5802,12 +5973,10 @@ mod tests {
     fn correction_tracker_all_resolved_false_when_partially_resolved() {
         let mut tracker = CorrectionTracker::new(CorrectionTolerance::default());
         // Register two partials.
-        let p0 = PartialTranscript::new(
-            0, 10, "f".into(), vec![seg("a", Some(0.9))], 50, "t".into(),
-        );
-        let p1 = PartialTranscript::new(
-            1, 20, "f".into(), vec![seg("b", Some(0.8))], 50, "t".into(),
-        );
+        let p0 =
+            PartialTranscript::new(0, 10, "f".into(), vec![seg("a", Some(0.9))], 50, "t".into());
+        let p1 =
+            PartialTranscript::new(1, 20, "f".into(), vec![seg("b", Some(0.8))], 50, "t".into());
         tracker.register_partial(p0);
         tracker.register_partial(p1);
         // Both pending → not all resolved.
@@ -5834,12 +6003,17 @@ mod tests {
         // due to min_windows (that check is <, not <=). Should proceed to other checks.
         let mut ctrl = SpeculationWindowController::new(5000, 1000, 30000, 500);
         let drift = CorrectionDrift {
-            wer_approx: 0.0, confidence_delta: 0.0,
-            segment_count_delta: 0, text_edit_distance: 0,
+            wer_approx: 0.0,
+            confidence_delta: 0.0,
+            segment_count_delta: 0,
+            text_edit_distance: 0,
         };
         for _ in 0..5 {
             ctrl.observe(
-                &CorrectionDecision::Confirm { seq: 0, drift: drift.clone() },
+                &CorrectionDecision::Confirm {
+                    seq: 0,
+                    drift: drift.clone(),
+                },
                 &drift,
             );
         }
@@ -5855,14 +6029,16 @@ mod tests {
         let w0 = wm.next_window(0, "h0");
         let w1 = wm.next_window(4500, "h1"); // 500ms overlap
         // w0: quality segment at t=4.5-5.0 with confidence 0.7.
-        wm.record_quality_result(w0.window_id, vec![
-            timed_seg("overlap low", 4.5, 5.0, Some(0.7)),
-        ]);
+        wm.record_quality_result(
+            w0.window_id,
+            vec![timed_seg("overlap low", 4.5, 5.0, Some(0.7))],
+        );
         wm.resolve_window(w0.window_id);
         // w1: quality segment at t=4.5-5.0 with confidence 0.95 (same timing).
-        wm.record_quality_result(w1.window_id, vec![
-            timed_seg("overlap high", 4.5, 5.0, Some(0.95)),
-        ]);
+        wm.record_quality_result(
+            w1.window_id,
+            vec![timed_seg("overlap high", 4.5, 5.0, Some(0.95))],
+        );
         wm.resolve_window(w1.window_id);
         let merged = wm.merge_segments();
         // Both overlap within 0.1s tolerance → deduplicated to the higher-confidence one.
@@ -5972,7 +6148,9 @@ mod tests {
         );
         wm.record_fast_result(999, partial);
         // The real window should still be Pending.
-        let ws = wm.get_window(w.window_id).expect("real window should exist");
+        let ws = wm
+            .get_window(w.window_id)
+            .expect("real window should exist");
         assert_eq!(ws.status, WindowStatus::Pending);
         assert!(ws.fast_result.is_none());
     }
@@ -5983,8 +6161,14 @@ mod tests {
         let w = wm.next_window(0, "hash-b");
         // Resolve a non-existent window_id — should not panic or change anything.
         wm.resolve_window(999);
-        let ws = wm.get_window(w.window_id).expect("real window should exist");
-        assert_eq!(ws.status, WindowStatus::Pending, "original window should still be Pending");
+        let ws = wm
+            .get_window(w.window_id)
+            .expect("real window should exist");
+        assert_eq!(
+            ws.status,
+            WindowStatus::Pending,
+            "original window should still be Pending"
+        );
         assert_eq!(wm.windows_resolved(), 0);
         assert_eq!(wm.windows_pending(), 1);
     }
@@ -6000,7 +6184,11 @@ mod tests {
         }
         p.observe_confirmation();
         // Mean should be very high (close to 1.0).
-        assert!(p.mean() > 0.95, "mean should be close to 1.0, got {}", p.mean());
+        assert!(
+            p.mean() > 0.95,
+            "mean should be close to 1.0, got {}",
+            p.mean()
+        );
         // Variance should be much smaller than initial.
         let final_var = p.variance();
         assert!(
@@ -6016,9 +6204,9 @@ mod tests {
         // Create a large window but only fill a few entries.
         let mut tracker = CalibrationTracker::new(1000);
         // Only 3 entries in a window of 1000.
-        tracker.record(0.9, true);  // squared error: (0.9-1)^2 = 0.01
+        tracker.record(0.9, true); // squared error: (0.9-1)^2 = 0.01
         tracker.record(0.1, false); // squared error: (0.1-0)^2 = 0.01
-        tracker.record(0.5, true);  // squared error: (0.5-1)^2 = 0.25
+        tracker.record(0.5, true); // squared error: (0.5-1)^2 = 0.25
         // Brier = (0.01 + 0.01 + 0.25) / 3 = 0.09.
         let brier = tracker.brier_score();
         assert!(
@@ -6038,10 +6226,7 @@ mod tests {
 
     #[test]
     fn mean_confidence_all_none_confidence_returns_zero() {
-        let segs = vec![
-            seg("hello", None),
-            seg("world", None),
-        ];
+        let segs = vec![seg("hello", None), seg("world", None)];
         assert!(
             (mean_confidence(&segs) - 0.0).abs() < f64::EPSILON,
             "all-None confidence should yield 0.0"
@@ -6682,7 +6867,11 @@ mod tests {
         );
         wm.resolve_window(w0.window_id);
         let merged = wm.merge_segments();
-        assert_eq!(merged.len(), 1, "overlapping equal-confidence segments should dedup to one");
+        assert_eq!(
+            merged.len(),
+            1,
+            "overlapping equal-confidence segments should dedup to one"
+        );
         assert_eq!(
             merged[0].text, "first",
             "first segment should be kept when confidences are equal (strict >)"
@@ -6697,8 +6886,8 @@ mod tests {
         // result should be Confirm (not Correct).
         let tolerance = CorrectionTolerance {
             max_wer: 0.5,
-            max_confidence_delta: 1.0,    // large so it never triggers
-            max_edit_distance: 10_000,     // large so it never triggers
+            max_confidence_delta: 1.0, // large so it never triggers
+            max_edit_distance: 10_000, // large so it never triggers
             always_correct: false,
         };
         let mut tracker = CorrectionTracker::new(tolerance);
@@ -6709,9 +6898,7 @@ mod tests {
         let fast_segs = vec![seg("hello world", Some(0.9))];
         let quality_segs = vec![seg("hello earth", Some(0.9))];
 
-        let partial = PartialTranscript::new(
-            0, 10, "fast".into(), fast_segs, 100, "t".into(),
-        );
+        let partial = PartialTranscript::new(0, 10, "fast".into(), fast_segs, 100, "t".into());
         tracker.register_partial(partial);
         let decision = tracker
             .submit_quality_result(10, "quality", quality_segs, 200)
@@ -6751,8 +6938,14 @@ mod tests {
         for i in 0..6u64 {
             let d = CorrectionDecision::Correct {
                 correction: CorrectionEvent::new(
-                    i, i, i * 10, "q".into(), vec![], 100,
-                    "2026-01-01T00:00:00Z".into(), &[],
+                    i,
+                    i,
+                    i * 10,
+                    "q".into(),
+                    vec![],
+                    100,
+                    "2026-01-01T00:00:00Z".into(),
+                    &[],
                 ),
             };
             ctrl.observe(&d, &correction_drift);
@@ -6784,20 +6977,34 @@ mod tests {
 
         // First: record fast result.
         let partial = PartialTranscript::new(
-            0, wid, "fast".into(),
-            vec![seg("first fast", Some(0.8))], 50, "t".into(),
+            0,
+            wid,
+            "fast".into(),
+            vec![seg("first fast", Some(0.8))],
+            50,
+            "t".into(),
         );
         wm.record_fast_result(wid, partial);
-        assert_eq!(wm.get_window(wid).unwrap().status, WindowStatus::FastComplete);
+        assert_eq!(
+            wm.get_window(wid).unwrap().status,
+            WindowStatus::FastComplete
+        );
 
         // Record quality result — advances to QualityComplete.
         wm.record_quality_result(wid, vec![timed_seg("quality", 0.0, 1.0, Some(0.95))]);
-        assert_eq!(wm.get_window(wid).unwrap().status, WindowStatus::QualityComplete);
+        assert_eq!(
+            wm.get_window(wid).unwrap().status,
+            WindowStatus::QualityComplete
+        );
 
         // Overwrite with a second fast result — should regress to FastComplete.
         let partial2 = PartialTranscript::new(
-            1, wid, "fast".into(),
-            vec![seg("second fast", Some(0.7))], 60, "t".into(),
+            1,
+            wid,
+            "fast".into(),
+            vec![seg("second fast", Some(0.7))],
+            60,
+            "t".into(),
         );
         wm.record_fast_result(wid, partial2);
         assert_eq!(

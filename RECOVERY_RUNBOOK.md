@@ -64,8 +64,10 @@ Procedure:
 3. Choose explicit policy:
 - default reject
 - overwrite only with operator intent
+- overwrite-strict when in-place child-row replacement is explicitly intended
 4. Re-run import with selected conflict policy.
 5. If error indicates child-row `UPDATE`/`DELETE` is unsupported:
+- retry with `--conflict-policy overwrite-strict` if strict in-place replacement is desired and DB health is trusted,
 - stop in-place overwrite attempts,
 - create a fresh target DB,
 - import snapshot into that empty DB,

@@ -736,7 +736,14 @@ fn max_export_position(
 pub enum ConflictPolicy {
     Reject,
     Overwrite,
+    OverwriteStrict,
     Skip,
+}
+
+impl ConflictPolicy {
+    const fn allows_child_row_mutation(self) -> bool {
+        matches!(self, Self::OverwriteStrict)
+    }
 }
 
 #[derive(Debug)]
@@ -835,9 +842,7 @@ fn import_tables(
     conflict_policy: ConflictPolicy,
 ) -> FwResult<ImportResult> {
     let mut conflicts = Vec::new();
-    let mut overwritten_run_ids = HashSet::new();
-    let mut overwritten_segment_idxs_before: HashMap<String, HashSet<i64>> = HashMap::new();
-    let mut overwritten_event_seqs_before: HashMap<String, HashSet<i64>> = HashMap::new();
+    let mut run_tracking = RunImportTracking::default();
 
     // Import runs first (referential parent)
     let runs_path = input_dir.join("runs.jsonl");
@@ -846,9 +851,7 @@ fn import_tables(
         &runs_path,
         conflict_policy,
         &mut conflicts,
-        &mut overwritten_run_ids,
-        &mut overwritten_segment_idxs_before,
-        &mut overwritten_event_seqs_before,
+        &mut run_tracking,
     )
     .map_err(|error| FwError::Storage(format!("runs import failed: {error}")))?;
 
@@ -867,8 +870,9 @@ fn import_tables(
         &segments_path,
         conflict_policy,
         &mut conflicts,
-        &overwritten_run_ids,
-        &overwritten_segment_idxs_before,
+        &run_tracking.imported_run_ids,
+        &run_tracking.overwritten_run_ids,
+        &run_tracking.overwritten_segment_idxs_before,
     )
     .map_err(|error| FwError::Storage(format!("segments import failed: {error}")))?;
 
@@ -886,8 +890,9 @@ fn import_tables(
         &events_path,
         conflict_policy,
         &mut conflicts,
-        &overwritten_run_ids,
-        &overwritten_event_seqs_before,
+        &run_tracking.imported_run_ids,
+        &run_tracking.overwritten_run_ids,
+        &run_tracking.overwritten_event_seqs_before,
     )
     .map_err(|error| FwError::Storage(format!("events import failed: {error}")))?;
 
@@ -906,14 +911,20 @@ fn import_tables(
     })
 }
 
+#[derive(Default)]
+struct RunImportTracking {
+    imported_run_ids: HashSet<String>,
+    overwritten_run_ids: HashSet<String>,
+    overwritten_segment_idxs_before: HashMap<String, HashSet<i64>>,
+    overwritten_event_seqs_before: HashMap<String, HashSet<i64>>,
+}
+
 fn import_runs(
     connection: &Connection,
     path: &Path,
     conflict_policy: ConflictPolicy,
     conflicts: &mut Vec<SyncConflict>,
-    overwritten_run_ids: &mut HashSet<String>,
-    overwritten_segment_idxs_before: &mut HashMap<String, HashSet<i64>>,
-    overwritten_event_seqs_before: &mut HashMap<String, HashSet<i64>>,
+    tracking: &mut RunImportTracking,
 ) -> FwResult<u64> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -928,6 +939,7 @@ fn import_runs(
 
         let row: serde_json::Value = serde_json::from_str(line)?;
         let id = json_str(&row, "id")?;
+        tracking.imported_run_ids.insert(id.clone());
 
         // Check for existing row
         let existing = connection
@@ -975,14 +987,15 @@ fn import_runs(
                     count += 1;
                     continue;
                 }
-                ConflictPolicy::Overwrite => {
+                ConflictPolicy::Overwrite | ConflictPolicy::OverwriteStrict => {
                     let existing_segment_idxs = query_segment_idxs_for_run(connection, &id)
                         .map_err(|error| {
                             FwError::Storage(format!(
                                 "overwrite capture segments `{id}` failed: {error}"
                             ))
                         })?;
-                    overwritten_segment_idxs_before
+                    tracking
+                        .overwritten_segment_idxs_before
                         .entry(id.clone())
                         .or_default()
                         .extend(existing_segment_idxs);
@@ -993,7 +1006,8 @@ fn import_runs(
                                 "overwrite capture events `{id}` failed: {error}"
                             ))
                         })?;
-                    overwritten_event_seqs_before
+                    tracking
+                        .overwritten_event_seqs_before
                         .entry(id.clone())
                         .or_default()
                         .extend(existing_event_seqs);
@@ -1028,7 +1042,7 @@ fn import_runs(
                                 "overwrite delete runs `{id}` failed: {error}"
                             ))
                         })?;
-                    overwritten_run_ids.insert(id.clone());
+                    tracking.overwritten_run_ids.insert(id.clone());
                     // Fall through to INSERT
                 }
             }
@@ -1067,12 +1081,14 @@ fn import_segments(
     path: &Path,
     conflict_policy: ConflictPolicy,
     conflicts: &mut Vec<SyncConflict>,
+    imported_run_ids: &HashSet<String>,
     overwritten_run_ids: &HashSet<String>,
     overwritten_segment_idxs_before: &HashMap<String, HashSet<i64>>,
 ) -> FwResult<u64> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
     let mut count = 0u64;
+    let mut imported_idx_by_run: HashMap<String, HashSet<i64>> = HashMap::new();
     let mut imported_idx_by_overwritten_run: HashMap<String, HashSet<i64>> = HashMap::new();
     let mut known_run_ids = HashSet::new();
 
@@ -1094,6 +1110,12 @@ fn import_segments(
         ensure_run_reference_exists(connection, &run_id, "segments", &key, &mut known_run_ids)?;
         if conflict_policy == ConflictPolicy::Overwrite && overwritten_run_ids.contains(&run_id) {
             imported_idx_by_overwritten_run
+                .entry(run_id.clone())
+                .or_default()
+                .insert(idx);
+        }
+        if conflict_policy.allows_child_row_mutation() && imported_run_ids.contains(&run_id) {
+            imported_idx_by_run
                 .entry(run_id.clone())
                 .or_default()
                 .insert(idx);
@@ -1153,6 +1175,18 @@ fn import_segments(
                          re-import into an empty target DB for strict replacement"
                     )));
                 }
+                ConflictPolicy::OverwriteStrict => {
+                    connection
+                        .execute_with_params(
+                            "DELETE FROM segments WHERE run_id = ?1 AND idx = ?2",
+                            &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(idx)],
+                        )
+                        .map_err(|error| {
+                            FwError::Storage(format!(
+                                "strict overwrite delete conflicting segment `{run_id}/{idx}` failed: {error}"
+                            ))
+                        })?;
+                }
             }
         }
 
@@ -1184,6 +1218,13 @@ fn import_segments(
             &imported_idx_by_overwritten_run,
         )?;
     }
+    if conflict_policy == ConflictPolicy::OverwriteStrict && !imported_run_ids.is_empty() {
+        delete_stale_segments_for_strict_overwrite(
+            connection,
+            imported_run_ids,
+            &imported_idx_by_run,
+        )?;
+    }
 
     Ok(count)
 }
@@ -1193,12 +1234,14 @@ fn import_events(
     path: &Path,
     conflict_policy: ConflictPolicy,
     conflicts: &mut Vec<SyncConflict>,
+    imported_run_ids: &HashSet<String>,
     overwritten_run_ids: &HashSet<String>,
     overwritten_event_seqs_before: &HashMap<String, HashSet<i64>>,
 ) -> FwResult<u64> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
     let mut count = 0u64;
+    let mut imported_seq_by_run: HashMap<String, HashSet<i64>> = HashMap::new();
     let mut imported_seq_by_overwritten_run: HashMap<String, HashSet<i64>> = HashMap::new();
     let mut known_run_ids = HashSet::new();
 
@@ -1220,6 +1263,12 @@ fn import_events(
         ensure_run_reference_exists(connection, &run_id, "events", &key, &mut known_run_ids)?;
         if conflict_policy == ConflictPolicy::Overwrite && overwritten_run_ids.contains(&run_id) {
             imported_seq_by_overwritten_run
+                .entry(run_id.clone())
+                .or_default()
+                .insert(seq);
+        }
+        if conflict_policy.allows_child_row_mutation() && imported_run_ids.contains(&run_id) {
+            imported_seq_by_run
                 .entry(run_id.clone())
                 .or_default()
                 .insert(seq);
@@ -1268,6 +1317,18 @@ fn import_events(
                          re-import into an empty target DB for strict replacement"
                     )));
                 }
+                ConflictPolicy::OverwriteStrict => {
+                    connection
+                        .execute_with_params(
+                            "DELETE FROM events WHERE run_id = ?1 AND seq = ?2",
+                            &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(seq)],
+                        )
+                        .map_err(|error| {
+                            FwError::Storage(format!(
+                                "strict overwrite delete conflicting event `{run_id}/{seq}` failed: {error}"
+                            ))
+                        })?;
+                }
             }
         }
 
@@ -1297,6 +1358,13 @@ fn import_events(
             overwritten_run_ids,
             overwritten_event_seqs_before,
             &imported_seq_by_overwritten_run,
+        )?;
+    }
+    if conflict_policy == ConflictPolicy::OverwriteStrict && !imported_run_ids.is_empty() {
+        delete_stale_events_for_strict_overwrite(
+            connection,
+            imported_run_ids,
+            &imported_seq_by_run,
         )?;
     }
 
@@ -1350,6 +1418,64 @@ fn assert_no_stale_events_for_overwritten_runs(
                  but child-row DELETE is unsupported in this runtime; \
                  re-import into an empty target DB for strict replacement"
             )));
+        }
+    }
+    Ok(())
+}
+
+fn delete_stale_segments_for_strict_overwrite(
+    connection: &Connection,
+    imported_run_ids: &HashSet<String>,
+    imported_idx_by_run: &HashMap<String, HashSet<i64>>,
+) -> FwResult<()> {
+    for run_id in imported_run_ids {
+        let existing_idxs = query_segment_idxs_for_run(connection, run_id)?;
+        for idx in existing_idxs {
+            let keep = imported_idx_by_run
+                .get(run_id)
+                .is_some_and(|idx_set| idx_set.contains(&idx));
+            if keep {
+                continue;
+            }
+            connection
+                .execute_with_params(
+                    "DELETE FROM segments WHERE run_id = ?1 AND idx = ?2",
+                    &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(idx)],
+                )
+                .map_err(|error| {
+                    FwError::Storage(format!(
+                        "strict overwrite delete stale segment `{run_id}/{idx}` failed: {error}"
+                    ))
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn delete_stale_events_for_strict_overwrite(
+    connection: &Connection,
+    imported_run_ids: &HashSet<String>,
+    imported_seq_by_run: &HashMap<String, HashSet<i64>>,
+) -> FwResult<()> {
+    for run_id in imported_run_ids {
+        let existing_seqs = query_event_seqs_for_run(connection, run_id)?;
+        for seq in existing_seqs {
+            let keep = imported_seq_by_run
+                .get(run_id)
+                .is_some_and(|seq_set| seq_set.contains(&seq));
+            if keep {
+                continue;
+            }
+            connection
+                .execute_with_params(
+                    "DELETE FROM events WHERE run_id = ?1 AND seq = ?2",
+                    &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(seq)],
+                )
+                .map_err(|error| {
+                    FwError::Storage(format!(
+                        "strict overwrite delete stale event `{run_id}/{seq}` failed: {error}"
+                    ))
+                })?;
         }
     }
     Ok(())
@@ -3851,6 +3977,212 @@ mod tests {
     }
 
     #[test]
+    fn import_overwrite_strict_segment_conflict_replaces_row() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("source.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store");
+        let report = fixture_report("seg-strict-1", &db_path);
+        store.persist_report(&report).expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        let seg_path = export_dir.join("segments.jsonl");
+        let original = fs::read_to_string(&seg_path).expect("read segments");
+        let mut rows: Vec<serde_json::Value> = original
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("parse segment row"))
+            .collect();
+        assert!(
+            !rows.is_empty(),
+            "fixture should emit at least one segment row"
+        );
+        rows[0]["text"] = json!("strict replaced text");
+        let mutated = rows
+            .iter()
+            .map(|row| serde_json::to_string(row).expect("serialize segment row"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&seg_path, format!("{mutated}\n")).expect("write segments");
+
+        let manifest_path = export_dir.join("manifest.json");
+        let mut manifest_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("manifest"))
+                .expect("manifest json");
+        manifest_value["checksums"]["segments_jsonl_sha256"] =
+            json!(sha256_file(&seg_path).expect("checksum"));
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest_value).expect("serialize"),
+        )
+        .expect("manifest write");
+
+        import(
+            &db_path,
+            &export_dir,
+            &state_root,
+            ConflictPolicy::OverwriteStrict,
+        )
+        .expect("strict overwrite import should update conflicting segment");
+
+        let conn = Connection::open(db_path.display().to_string()).expect("open db");
+        let rows = conn
+            .query_with_params(
+                "SELECT text FROM segments WHERE run_id = ?1 AND idx = ?2",
+                &[
+                    SqliteValue::Text("seg-strict-1".to_owned()),
+                    SqliteValue::Integer(0),
+                ],
+            )
+            .expect("query segment");
+        assert!(!rows.is_empty(), "segment row should exist");
+        assert_eq!(
+            value_to_string_sqlite(rows[0].get(0)),
+            "strict replaced text",
+            "strict overwrite should replace segment payload in segments table"
+        );
+    }
+
+    #[test]
+    fn import_overwrite_strict_event_conflict_replaces_row() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("source.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store");
+        let report = fixture_report("evt-strict-1", &db_path);
+        store.persist_report(&report).expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        let evt_path = export_dir.join("events.jsonl");
+        let original = fs::read_to_string(&evt_path).expect("read events");
+        let mutated = original.replace("input materialized", "strict replaced event");
+        fs::write(&evt_path, &mutated).expect("write events");
+
+        let manifest_path = export_dir.join("manifest.json");
+        let mut manifest_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("manifest"))
+                .expect("manifest json");
+        manifest_value["checksums"]["events_jsonl_sha256"] =
+            json!(sha256_file(&evt_path).expect("checksum"));
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest_value).expect("serialize"),
+        )
+        .expect("manifest write");
+
+        import(
+            &db_path,
+            &export_dir,
+            &state_root,
+            ConflictPolicy::OverwriteStrict,
+        )
+        .expect("strict overwrite import should update conflicting event");
+
+        let details = store
+            .load_run_details("evt-strict-1")
+            .expect("load")
+            .expect("exists");
+        assert!(
+            details
+                .events
+                .iter()
+                .any(|event| event.message == "strict replaced event"),
+            "strict overwrite should replace event payload"
+        );
+    }
+
+    #[test]
+    fn import_overwrite_strict_prunes_stale_children() {
+        let dir = tempdir().expect("tempdir");
+        let source_db = dir.path().join("source.sqlite3");
+        let target_db = dir.path().join("target.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let source_store = RunStore::open(&source_db).expect("source store");
+        let source_report = fixture_report("strict-prune-1", &source_db);
+        source_store
+            .persist_report(&source_report)
+            .expect("persist source");
+
+        let target_store = RunStore::open(&target_db).expect("target store");
+        target_store
+            .persist_report(&fixture_report("strict-prune-1", &target_db))
+            .expect("persist target");
+
+        let target_conn = Connection::open(target_db.display().to_string()).expect("target conn");
+        target_conn
+            .execute_with_params(
+                "INSERT INTO segments (run_id, idx, start_sec, end_sec, speaker, text, confidence) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                &[
+                    SqliteValue::Text("strict-prune-1".to_owned()),
+                    SqliteValue::Integer(99),
+                    SqliteValue::Float(9.0),
+                    SqliteValue::Float(10.0),
+                    SqliteValue::Null,
+                    SqliteValue::Text("stale strict segment".to_owned()),
+                    SqliteValue::Float(0.1),
+                ],
+            )
+            .expect("insert stale segment");
+        target_conn
+            .execute_with_params(
+                "INSERT INTO events (run_id, seq, ts_rfc3339, stage, code, message, payload_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                &[
+                    SqliteValue::Text("strict-prune-1".to_owned()),
+                    SqliteValue::Integer(99),
+                    SqliteValue::Text("2026-01-01T00:00:09Z".to_owned()),
+                    SqliteValue::Text("persist".to_owned()),
+                    SqliteValue::Text("persist.ok".to_owned()),
+                    SqliteValue::Text("stale strict event".to_owned()),
+                    SqliteValue::Text("{\"stale\":true}".to_owned()),
+                ],
+            )
+            .expect("insert stale event");
+
+        export(&source_db, &export_dir, &state_root).expect("export source");
+        import(
+            &target_db,
+            &export_dir,
+            &state_root,
+            ConflictPolicy::OverwriteStrict,
+        )
+        .expect("strict overwrite import should prune stale child rows");
+
+        let details = target_store
+            .load_run_details("strict-prune-1")
+            .expect("load")
+            .expect("exists");
+        assert_eq!(
+            details.segments.len(),
+            source_report.result.segments.len(),
+            "strict overwrite should prune stale segments"
+        );
+        assert_eq!(
+            details.events.len(),
+            source_report.events.len(),
+            "strict overwrite should prune stale events"
+        );
+        assert!(
+            details
+                .segments
+                .iter()
+                .all(|segment| segment.text != "stale strict segment"),
+            "stale strict segment should be removed"
+        );
+        assert!(
+            details
+                .events
+                .iter()
+                .all(|event| event.message != "stale strict event"),
+            "stale strict event should be removed"
+        );
+    }
+
+    #[test]
     fn import_idempotent_on_identical_data() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("source.sqlite3");
@@ -3895,9 +4227,12 @@ mod tests {
     #[test]
     fn conflict_policy_all_variants_are_distinct() {
         assert_ne!(ConflictPolicy::Reject, ConflictPolicy::Overwrite);
+        assert_ne!(ConflictPolicy::Reject, ConflictPolicy::OverwriteStrict);
+        assert_ne!(ConflictPolicy::Overwrite, ConflictPolicy::OverwriteStrict);
         // Verify both can be used without panic.
         let _ = format!("{:?}", ConflictPolicy::Reject);
         let _ = format!("{:?}", ConflictPolicy::Overwrite);
+        let _ = format!("{:?}", ConflictPolicy::OverwriteStrict);
     }
 
     #[test]
@@ -8896,8 +9231,7 @@ mod tests {
             .next()
             .expect("at least one line")
             .to_owned();
-        let mut mutated: serde_json::Value =
-            serde_json::from_str(&original_line).expect("parse");
+        let mut mutated: serde_json::Value = serde_json::from_str(&original_line).expect("parse");
         mutated["transcript"] = json!("MUTATED TRANSCRIPT FOR SKIP TEST");
         fs::write(
             &runs_path,
@@ -9123,10 +9457,7 @@ mod tests {
         .expect("write");
 
         let validation = validate_sync(&db_path, &export_dir).expect("validate");
-        assert!(
-            !validation.is_valid,
-            "should detect finished_at mismatch"
-        );
+        assert!(!validation.is_valid, "should detect finished_at mismatch");
         assert!(
             validation
                 .mismatched_records
@@ -9149,16 +9480,14 @@ mod tests {
 
         // First export captures the run.
         let export_dir_1 = dir.path().join("export1");
-        let m1 =
-            export_incremental(&db_path, &export_dir_1, &state_root).expect("first export");
+        let m1 = export_incremental(&db_path, &export_dir_1, &state_root).expect("first export");
         assert_eq!(m1.row_counts.runs, 1);
         let first_cursor_ts = m1.cursor_after.last_export_rfc3339.clone();
         let first_cursor_run_id = m1.cursor_after.last_export_run_id.clone();
 
         // Second export: no new records.
         let export_dir_2 = dir.path().join("export2");
-        let m2 =
-            export_incremental(&db_path, &export_dir_2, &state_root).expect("second export");
+        let m2 = export_incremental(&db_path, &export_dir_2, &state_root).expect("second export");
         assert_eq!(m2.row_counts.runs, 0);
 
         // Cursor values should be EXACTLY retained from the first export.
@@ -9191,8 +9520,8 @@ mod tests {
         // Export should work — the cursor has None run_id, which is
         // deserialized via #[serde(default)].
         let export_dir = dir.path().join("export");
-        let manifest =
-            export_incremental(&db_path, &export_dir, &state_root).expect("export with legacy cursor");
+        let manifest = export_incremental(&db_path, &export_dir, &state_root)
+            .expect("export with legacy cursor");
 
         // The run finished_at 2026-06-15 > cursor 2026-01-01, so it should be exported.
         assert_eq!(
@@ -9205,7 +9534,12 @@ mod tests {
             "cursor_used should be populated"
         );
         assert!(
-            manifest.cursor_used.as_ref().unwrap().last_export_run_id.is_none(),
+            manifest
+                .cursor_used
+                .as_ref()
+                .unwrap()
+                .last_export_run_id
+                .is_none(),
             "legacy cursor should have None run_id"
         );
         // cursor_after should now have a run_id (upgraded from legacy).
@@ -9446,7 +9780,9 @@ mod tests {
             last_run_count: 42,
         };
         save_cursor(&cursor_path, &cursor).expect("save");
-        let loaded = load_cursor(&cursor_path).expect("load").expect("should be Some");
+        let loaded = load_cursor(&cursor_path)
+            .expect("load")
+            .expect("should be Some");
         assert_eq!(loaded.last_export_rfc3339, "2026-06-15T12:00:00Z");
         assert_eq!(
             loaded.last_export_run_id,
@@ -9548,10 +9884,7 @@ mod tests {
         // Tamper with transcript field in runs.jsonl
         let runs_path = export_dir.join("runs.jsonl");
         let content = fs::read_to_string(&runs_path).expect("read runs");
-        let tampered = content.replace(
-            "hello world from sync test",
-            "TAMPERED TRANSCRIPT",
-        );
+        let tampered = content.replace("hello world from sync test", "TAMPERED TRANSCRIPT");
         assert_ne!(content, tampered, "sanity: content should have changed");
         fs::write(&runs_path, tampered).expect("write tampered");
 
@@ -9574,7 +9907,10 @@ mod tests {
         let json = r#"{"last_export_rfc3339":"2026-01-01T00:00:00Z","last_run_count":5}"#;
         let cursor: SyncCursor = serde_json::from_str(json).expect("deserialize");
         assert_eq!(cursor.last_export_rfc3339, "2026-01-01T00:00:00Z");
-        assert_eq!(cursor.last_export_run_id, None, "missing field should default to None");
+        assert_eq!(
+            cursor.last_export_run_id, None,
+            "missing field should default to None"
+        );
         assert_eq!(cursor.last_run_count, 5);
 
         // With the field present: should deserialize normally.
@@ -9621,13 +9957,9 @@ mod tests {
         // Strip "replay_json" and "acceleration_json" from the JSONL to simulate legacy.
         let runs_path = export_dir.join("runs.jsonl");
         let original = fs::read_to_string(&runs_path).expect("read");
-        let mut parsed: serde_json::Value =
-            serde_json::from_str(original.trim()).expect("parse");
+        let mut parsed: serde_json::Value = serde_json::from_str(original.trim()).expect("parse");
         parsed.as_object_mut().unwrap().remove("replay_json");
-        parsed
-            .as_object_mut()
-            .unwrap()
-            .remove("acceleration_json");
+        parsed.as_object_mut().unwrap().remove("acceleration_json");
         fs::write(&runs_path, serde_json::to_string(&parsed).unwrap()).expect("write");
 
         // Update the DB to have default "{}" for both columns.
@@ -9736,7 +10068,8 @@ mod tests {
 
         // Cursor with a future timestamp — no runs should match.
         let cursor = test_cursor("2099-01-01T00:00:00Z", Some("zzz"));
-        let count = export_table_runs_incremental(&conn, &output_path, Some(&cursor)).expect("export");
+        let count =
+            export_table_runs_incremental(&conn, &output_path, Some(&cursor)).expect("export");
         assert_eq!(count, 0, "no runs should match a far-future cursor");
 
         let content = fs::read_to_string(&output_path).expect("read");
@@ -9773,7 +10106,7 @@ mod tests {
             None
         );
         assert_eq!(
-            sqlite_to_optional_text(Some(&SqliteValue::Float(3.14))),
+            sqlite_to_optional_text(Some(&SqliteValue::Float(std::f64::consts::PI))),
             None
         );
         assert_eq!(
@@ -9829,7 +10162,11 @@ mod tests {
             export_format_version: EXPORT_FORMAT_VERSION.to_owned(),
             created_at_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
             source_db_path: "test.db".to_owned(),
-            row_counts: RowCounts { runs: 1, segments: 0, events: 0 },
+            row_counts: RowCounts {
+                runs: 1,
+                segments: 0,
+                events: 0,
+            },
             checksums: FileChecksums {
                 runs_jsonl_sha256: sha256_file(&runs).expect("sha"),
                 segments_jsonl_sha256: sha256_file(&segments).expect("sha"),
@@ -9855,7 +10192,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("missing_cursor.json");
         let result = load_cursor(&path).expect("should not error");
-        assert!(result.is_none(), "nonexistent cursor file should return None");
+        assert!(
+            result.is_none(),
+            "nonexistent cursor file should return None"
+        );
     }
 
     #[test]
@@ -9914,10 +10254,15 @@ mod tests {
             export_format_version: EXPORT_FORMAT_VERSION.to_owned(),
             created_at_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
             source_db_path: "test.db".to_owned(),
-            row_counts: RowCounts { runs: 0, segments: 0, events: 0 },
+            row_counts: RowCounts {
+                runs: 0,
+                segments: 0,
+                events: 0,
+            },
             checksums: FileChecksums {
                 runs_jsonl_sha256: "deadbeef".to_owned(),
-                segments_jsonl_sha256: sha256_file(&dir.path().join("segments.jsonl")).expect("sha"),
+                segments_jsonl_sha256: sha256_file(&dir.path().join("segments.jsonl"))
+                    .expect("sha"),
                 events_jsonl_sha256: sha256_file(&dir.path().join("events.jsonl")).expect("sha"),
             },
         };
@@ -10041,8 +10386,7 @@ mod tests {
         let db_path = dir.path().join("seg_empty.sqlite3");
         let _store = RunStore::open(&db_path).expect("store open");
         let conn = Connection::open(db_path.display().to_string()).expect("conn");
-        let idxs =
-            query_segment_idxs_for_run(&conn, "nonexistent-run").expect("query");
+        let idxs = query_segment_idxs_for_run(&conn, "nonexistent-run").expect("query");
         assert!(idxs.is_empty(), "unknown run_id should yield empty set");
     }
 
@@ -10087,8 +10431,7 @@ mod tests {
         let db_path = dir.path().join("evt_empty.sqlite3");
         let _store = RunStore::open(&db_path).expect("store open");
         let conn = Connection::open(db_path.display().to_string()).expect("conn");
-        let seqs =
-            query_event_seqs_for_run(&conn, "nonexistent-run").expect("query");
+        let seqs = query_event_seqs_for_run(&conn, "nonexistent-run").expect("query");
         assert!(seqs.is_empty(), "unknown run_id should yield empty set");
     }
 
@@ -10145,10 +10488,9 @@ mod tests {
         let _store = RunStore::open(&db_path).expect("store open");
         let conn = Connection::open(db_path.display().to_string()).expect("conn");
         let mut known = std::collections::HashSet::new();
-        let err = ensure_run_reference_exists(
-            &conn, "missing-run", "segments", "seg-key-42", &mut known,
-        )
-        .expect_err("should fail for missing run");
+        let err =
+            ensure_run_reference_exists(&conn, "missing-run", "segments", "seg-key-42", &mut known)
+                .expect_err("should fail for missing run");
         let msg = format!("{err}");
         assert!(
             msg.contains("segments"),
@@ -10179,7 +10521,10 @@ mod tests {
         let content = fs::read_to_string(&out).expect("read");
         let parsed: serde_json::Value = serde_json::from_str(content.trim()).expect("parse");
         assert_eq!(parsed["id"], "run-exp-1");
-        assert!(parsed.get("transcript").is_some(), "should have transcript field");
+        assert!(
+            parsed.get("transcript").is_some(),
+            "should have transcript field"
+        );
     }
 
     #[test]
@@ -10227,6 +10572,7 @@ mod tests {
         assert_eq!(ConflictPolicy::Skip, ConflictPolicy::Skip);
         assert_ne!(ConflictPolicy::Skip, ConflictPolicy::Reject);
         assert_ne!(ConflictPolicy::Skip, ConflictPolicy::Overwrite);
+        assert_ne!(ConflictPolicy::Skip, ConflictPolicy::OverwriteStrict);
         let _ = format!("{:?}", ConflictPolicy::Skip);
     }
 
@@ -10287,21 +10633,14 @@ mod tests {
         // Only import indices 0 and 1, leaving index 2 stale.
         imported.insert("run-1".to_owned(), HashSet::from([0, 1]));
 
-        let err = assert_no_stale_segments_for_overwritten_runs(
-            &overwritten,
-            &existing,
-            &imported,
-        )
-        .expect_err("should fail when a stale segment exists");
+        let err = assert_no_stale_segments_for_overwritten_runs(&overwritten, &existing, &imported)
+            .expect_err("should fail when a stale segment exists");
         let msg = err.to_string();
         assert!(
             msg.contains("stale segment"),
             "error should mention stale segment: {msg}"
         );
-        assert!(
-            msg.contains("run-1"),
-            "error should mention run id: {msg}"
-        );
+        assert!(msg.contains("run-1"), "error should mention run id: {msg}");
     }
 
     #[test]
@@ -10316,21 +10655,14 @@ mod tests {
         // Only import seqs 1 and 2, leaving seq 3 stale.
         imported.insert("run-a".to_owned(), HashSet::from([1, 2]));
 
-        let err = assert_no_stale_events_for_overwritten_runs(
-            &overwritten,
-            &existing,
-            &imported,
-        )
-        .expect_err("should fail when a stale event exists");
+        let err = assert_no_stale_events_for_overwritten_runs(&overwritten, &existing, &imported)
+            .expect_err("should fail when a stale event exists");
         let msg = err.to_string();
         assert!(
             msg.contains("stale event"),
             "error should mention stale event: {msg}"
         );
-        assert!(
-            msg.contains("run-a"),
-            "error should mention run id: {msg}"
-        );
+        assert!(msg.contains("run-a"), "error should mention run id: {msg}");
     }
 
     #[test]
@@ -10340,16 +10672,11 @@ mod tests {
         // Open via RunStore to initialize schema, then use raw connection.
         let _store = RunStore::open(&db_path).expect("store");
 
-        let conn =
-            Connection::open(db_path.display().to_string()).expect("open");
+        let conn = Connection::open(db_path.display().to_string()).expect("open");
         let columns = table_columns_sync(&conn, "segments").expect("table_columns_sync");
         // segments table has 7 columns: run_id, idx, start_sec, end_sec,
         // speaker, text, confidence.
-        assert_eq!(
-            columns.len(),
-            7,
-            "segments table should have 7 columns"
-        );
+        assert_eq!(columns.len(), 7, "segments table should have 7 columns");
     }
 
     #[test]
@@ -10358,16 +10685,14 @@ mod tests {
         let db_path = dir.path().join("reconstr_sync.sqlite3");
         let _store = RunStore::open(&db_path).expect("store");
 
-        let conn =
-            Connection::open(db_path.display().to_string()).expect("open");
+        let conn = Connection::open(db_path.display().to_string()).expect("open");
         let columns = table_columns_sync(&conn, "events").expect("columns");
         // events table: run_id, seq, ts_rfc3339, stage, code, message, payload_json.
         assert_eq!(columns.len(), 7, "events table should have 7 columns");
 
         let mut names = Vec::new();
         for row in &columns {
-            let def =
-                reconstruct_column_definition_sync(row).expect("reconstruct");
+            let def = reconstruct_column_definition_sync(row).expect("reconstruct");
             let name = value_to_string_sqlite(row.get(1));
             assert!(
                 def.contains(&name),
@@ -10397,8 +10722,7 @@ mod tests {
         imported.insert("run-x".to_owned(), HashSet::from([1, 2, 3]));
 
         assert!(
-            assert_no_stale_events_for_overwritten_runs(&overwritten, &existing, &imported)
-                .is_ok(),
+            assert_no_stale_events_for_overwritten_runs(&overwritten, &existing, &imported).is_ok(),
             "should pass when all existing event seqs are in imported set"
         );
     }
@@ -10440,8 +10764,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&manifest).expect("serialize");
-        let parsed: IncrementalExportManifest =
-            serde_json::from_str(&json).expect("deserialize");
+        let parsed: IncrementalExportManifest = serde_json::from_str(&json).expect("deserialize");
         assert!(parsed.cursor_used.is_none(), "cursor_used should be None");
         assert_eq!(parsed.row_counts.runs, 0);
         assert_eq!(parsed.export_mode, "incremental");
@@ -10484,12 +10807,17 @@ mod tests {
         r2.finished_at_rfc3339 = "2026-01-01T00:00:02Z".to_owned();
         store.persist_report(&r2).expect("persist r2");
 
-        let conn =
-            Connection::open(db_path.display().to_string()).expect("open");
+        let conn = Connection::open(db_path.display().to_string()).expect("open");
         let ids = collect_exported_run_ids(&conn, None).expect("collect");
         assert_eq!(ids.len(), 2, "should find both runs");
-        assert_eq!(ids[0], "run-a", "first should be run-a (earlier finished_at)");
-        assert_eq!(ids[1], "run-b", "second should be run-b (later finished_at)");
+        assert_eq!(
+            ids[0], "run-a",
+            "first should be run-a (earlier finished_at)"
+        );
+        assert_eq!(
+            ids[1], "run-b",
+            "second should be run-b (later finished_at)"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -10588,8 +10916,7 @@ mod tests {
         let mut mval: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read"))
                 .expect("parse");
-        mval["checksums"]["events_jsonl_sha256"] =
-            json!(sha256_file(&evt_path).expect("checksum"));
+        mval["checksums"]["events_jsonl_sha256"] = json!(sha256_file(&evt_path).expect("checksum"));
         mval["row_counts"]["events"] = json!(1);
         fs::write(
             &manifest_path,
@@ -10650,8 +10977,7 @@ mod tests {
         let mut mval: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read"))
                 .expect("parse");
-        mval["checksums"]["runs_jsonl_sha256"] =
-            json!(sha256_file(&runs_path).expect("checksum"));
+        mval["checksums"]["runs_jsonl_sha256"] = json!(sha256_file(&runs_path).expect("checksum"));
         mval["row_counts"]["runs"] = json!(1);
         fs::write(
             &manifest_path,

@@ -1559,10 +1559,8 @@ mod tests {
 
     #[test]
     fn push_event_message_field_stored_correctly() {
-        let mut pipeline = SpeculativeStreamingPipeline::new(
-            SpeculativeConfig::default(),
-            "test-msg".to_owned(),
-        );
+        let mut pipeline =
+            SpeculativeStreamingPipeline::new(SpeculativeConfig::default(), "test-msg".to_owned());
 
         let fast = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
         let quality = vec![seg("hello", Some(0.0), Some(1.0), Some(0.95))];
@@ -1608,10 +1606,8 @@ mod tests {
 
     #[test]
     fn stats_event_payload_contains_run_id() {
-        let mut pipeline = SpeculativeStreamingPipeline::new(
-            SpeculativeConfig::default(),
-            "my-run-42".to_owned(),
-        );
+        let mut pipeline =
+            SpeculativeStreamingPipeline::new(SpeculativeConfig::default(), "my-run-42".to_owned());
 
         let fast = vec![seg("hi", Some(0.0), Some(1.0), Some(0.9))];
         let quality = vec![seg("hi", Some(0.0), Some(1.0), Some(0.95))];
@@ -1689,8 +1685,7 @@ mod tests {
             quality_model_name: "quality-v1".to_owned(),
             ..SpeculativeConfig::default()
         };
-        let mut pipeline =
-            SpeculativeStreamingPipeline::new(config, "run-retract-test".to_owned());
+        let mut pipeline = SpeculativeStreamingPipeline::new(config, "run-retract-test".to_owned());
         let fast = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
         let quality = vec![seg("hello", Some(0.0), Some(1.0), Some(0.95))];
         let _result = pipeline
@@ -1756,10 +1751,8 @@ mod tests {
 
     #[test]
     fn duration_loop_zero_duration_emits_stats_event() {
-        let mut pipeline = SpeculativeStreamingPipeline::new(
-            SpeculativeConfig::default(),
-            "zero-dur".to_owned(),
-        );
+        let mut pipeline =
+            SpeculativeStreamingPipeline::new(SpeculativeConfig::default(), "zero-dur".to_owned());
         let result = pipeline
             .process_duration_with_models_no_checkpoint(0, "hash", |_s, _e| {
                 panic!("model_runner should not be called for 0 duration");
@@ -1770,16 +1763,17 @@ mod tests {
             .events()
             .iter()
             .find(|e| e.code == "transcript.speculation_stats");
-        assert!(stats_event.is_some(), "zero duration should still emit stats");
+        assert!(
+            stats_event.is_some(),
+            "zero duration should still emit stats"
+        );
         assert_eq!(stats_event.unwrap().payload["run_id"], "zero-dur");
     }
 
     #[test]
     fn next_seq_increments_independently_of_event_count() {
-        let mut pipeline = SpeculativeStreamingPipeline::new(
-            SpeculativeConfig::default(),
-            "seq-test".to_owned(),
-        );
+        let mut pipeline =
+            SpeculativeStreamingPipeline::new(SpeculativeConfig::default(), "seq-test".to_owned());
         // 3 fast segments per window → 3 partial events + 1 confirm event = 4 events/window.
         let fast = vec![
             seg("a", Some(0.0), Some(0.5), Some(0.9)),
@@ -1818,7 +1812,10 @@ mod tests {
         let bs = to_backend_segment(&s);
         assert_eq!(bs.start_ms, 0, "None start should default to 0");
         assert_eq!(bs.end_ms, 0, "None end should default to 0");
-        assert!((bs.confidence - 0.0).abs() < f64::EPSILON, "None confidence should default to 0.0");
+        assert!(
+            (bs.confidence - 0.0).abs() < f64::EPSILON,
+            "None confidence should default to 0.0"
+        );
         assert_eq!(bs.text, "none-vals");
     }
 
@@ -1829,7 +1826,11 @@ mod tests {
             "test-lang-backend".to_owned(),
         );
         let result = pipeline.build_result();
-        assert_eq!(result.language, Some("en".to_owned()), "language should be Some(\"en\")");
+        assert_eq!(
+            result.language,
+            Some("en".to_owned()),
+            "language should be Some(\"en\")"
+        );
         assert_eq!(result.backend, BackendKind::Auto, "backend should be Auto");
     }
 
@@ -1843,10 +1844,16 @@ mod tests {
         assert_eq!(stats.windows_processed, 0);
         assert_eq!(stats.corrections_emitted, 0);
         assert_eq!(stats.confirmations_emitted, 0);
-        assert!((stats.mean_fast_latency_ms - 0.0).abs() < f64::EPSILON,
-            "mean fast latency should be 0.0 for empty pipeline, got {}", stats.mean_fast_latency_ms);
-        assert!((stats.mean_quality_latency_ms - 0.0).abs() < f64::EPSILON,
-            "mean quality latency should be 0.0 for empty pipeline, got {}", stats.mean_quality_latency_ms);
+        assert!(
+            (stats.mean_fast_latency_ms - 0.0).abs() < f64::EPSILON,
+            "mean fast latency should be 0.0 for empty pipeline, got {}",
+            stats.mean_fast_latency_ms
+        );
+        assert!(
+            (stats.mean_quality_latency_ms - 0.0).abs() < f64::EPSILON,
+            "mean quality latency should be 0.0 for empty pipeline, got {}",
+            stats.mean_quality_latency_ms
+        );
         assert!(stats.mean_fast_latency_ms.is_finite());
         assert!(stats.mean_quality_latency_ms.is_finite());
     }
@@ -1877,7 +1884,10 @@ mod tests {
         let merged = pipeline.merged_transcript();
         assert_eq!(merged.len(), 1, "should have exactly 1 merged segment");
         // After correction, the quality model's segment should be used.
-        assert_eq!(merged[0].text, "quality text", "corrected text should come from quality model");
+        assert_eq!(
+            merged[0].text, "quality text",
+            "corrected text should come from quality model"
+        );
         // Verify timing fields are present (from quality segments).
         assert!(merged[0].start_sec.is_some(), "start_sec should be present");
         assert!(merged[0].end_sec.is_some(), "end_sec should be present");
@@ -2008,10 +2018,7 @@ mod tests {
             })
             .unwrap();
         let stats = pipeline.stats();
-        assert_eq!(
-            stats.windows_processed, 10,
-            "10000ms / 1000ms = 10 windows"
-        );
+        assert_eq!(stats.windows_processed, 10, "10000ms / 1000ms = 10 windows");
         assert_eq!(stats.confirmations_emitted, 10);
         assert_eq!(stats.corrections_emitted, 0);
         // All segments should appear in the result.
@@ -2048,23 +2055,26 @@ mod tests {
 
     #[test]
     fn correction_tracker_accessor_returns_zero_state_before_processing() {
-        let pipeline = SpeculativeStreamingPipeline::new(
-            SpeculativeConfig::default(),
-            "ct-fresh".to_owned(),
-        );
+        let pipeline =
+            SpeculativeStreamingPipeline::new(SpeculativeConfig::default(), "ct-fresh".to_owned());
         let tracker = pipeline.correction_tracker();
         let stats = tracker.stats();
         assert_eq!(stats.windows_processed, 0);
         assert_eq!(stats.corrections_emitted, 0);
         assert_eq!(stats.confirmations_emitted, 0);
-        assert!(tracker.all_resolved(), "empty tracker should be all_resolved");
+        assert!(
+            tracker.all_resolved(),
+            "empty tracker should be all_resolved"
+        );
     }
 
     #[test]
     fn window_manager_accessor_reflects_config_window_size() {
-        let mut config = SpeculativeConfig::default();
-        config.window_size_ms = 7000;
-        config.overlap_ms = 1000;
+        let config = SpeculativeConfig {
+            window_size_ms: 7000,
+            overlap_ms: 1000,
+            ..SpeculativeConfig::default()
+        };
         let pipeline = SpeculativeStreamingPipeline::new(config, "wm-cfg".to_owned());
         let wm = pipeline.window_manager();
         assert_eq!(
@@ -2134,7 +2144,9 @@ mod tests {
         let quality = vec![seg("corrected hello", Some(0.0), Some(1.0), Some(0.95))];
         let f = fast;
         let q = quality;
-        let decision = pipeline.process_window("h", 0, move || f, move || q).unwrap();
+        let decision = pipeline
+            .process_window("h", 0, move || f, move || q)
+            .unwrap();
 
         assert!(
             matches!(decision, CorrectionDecision::Correct { .. }),
@@ -2160,7 +2172,11 @@ mod tests {
         };
         let bs = to_backend_segment(&s);
         assert_eq!(bs.start_ms, 0, "NaN start_sec should saturate to 0");
-        assert_eq!(bs.end_ms, u64::MAX, "INFINITY end_sec should saturate to u64::MAX");
+        assert_eq!(
+            bs.end_ms,
+            u64::MAX,
+            "INFINITY end_sec should saturate to u64::MAX"
+        );
         assert_eq!(bs.text, "nan test");
     }
 
@@ -2175,8 +2191,7 @@ mod tests {
             overlap_ms: 500,
             ..SpeculativeConfig::default()
         };
-        let mut pipeline =
-            SpeculativeStreamingPipeline::new(config, "test-1ms".to_owned());
+        let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-1ms".to_owned());
 
         let result = pipeline
             .process_duration_with_models_no_checkpoint(1, "hash", |_start, _end| {
@@ -2188,7 +2203,8 @@ mod tests {
             .expect("should succeed with 1ms duration");
 
         assert_eq!(
-            pipeline.stats().windows_processed, 1,
+            pipeline.stats().windows_processed,
+            1,
             "1ms duration should produce exactly 1 window"
         );
         assert!(
@@ -2203,14 +2219,15 @@ mod tests {
         // is populated with a non-empty, validly-formatted RFC 3339 string.
         // No other streaming test ever inspects the timestamp field.
         let config = SpeculativeConfig::default();
-        let mut pipeline =
-            SpeculativeStreamingPipeline::new(config, "test-ts".to_owned());
+        let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-ts".to_owned());
 
         let fast = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
         let quality = vec![seg("hello", Some(0.0), Some(1.0), Some(0.9))];
         let f = fast;
         let q = quality;
-        pipeline.process_window("h", 0, move || f, move || q).unwrap();
+        pipeline
+            .process_window("h", 0, move || f, move || q)
+            .unwrap();
 
         let events = pipeline.events();
         assert!(
@@ -2241,21 +2258,31 @@ mod tests {
             overlap_ms: 0,
             ..SpeculativeConfig::default()
         };
-        let mut pipeline =
-            SpeculativeStreamingPipeline::new(config, "test-1ms-window".to_owned());
+        let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-1ms-window".to_owned());
 
         let result = pipeline
             .process_duration_with_models_no_checkpoint(5, "hash", |start, end| {
                 let text = format!("w{start}");
                 Ok((
-                    vec![seg(&text, Some(start as f64 / 1000.0), Some(end as f64 / 1000.0), Some(0.9))],
-                    vec![seg(&text, Some(start as f64 / 1000.0), Some(end as f64 / 1000.0), Some(0.9))],
+                    vec![seg(
+                        &text,
+                        Some(start as f64 / 1000.0),
+                        Some(end as f64 / 1000.0),
+                        Some(0.9),
+                    )],
+                    vec![seg(
+                        &text,
+                        Some(start as f64 / 1000.0),
+                        Some(end as f64 / 1000.0),
+                        Some(0.9),
+                    )],
                 ))
             })
             .expect("should succeed");
 
         assert_eq!(
-            pipeline.stats().windows_processed, 5,
+            pipeline.stats().windows_processed,
+            5,
             "5ms duration with 1ms windows and 0 overlap should produce 5 windows"
         );
         assert!(

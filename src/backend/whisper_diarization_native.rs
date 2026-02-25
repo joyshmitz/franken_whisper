@@ -1395,8 +1395,14 @@ mod tests {
             max_speakers: None,
         });
 
-        let result = run(&req, Path::new("missing.wav"), tmp.path(), Duration::from_secs(1), None)
-            .expect("should succeed with custom alignment model");
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("should succeed with custom alignment model");
         assert_eq!(
             result.raw_output["stages"][1]["model"].as_str(),
             Some("WAV2VEC2_CUSTOM_MODEL"),
@@ -1420,8 +1426,14 @@ mod tests {
             max_speakers: None,
         });
 
-        let result = run(&req, Path::new("missing.wav"), tmp.path(), Duration::from_secs(1), None)
-            .expect("should succeed with all defaults");
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("should succeed with all defaults");
         assert_eq!(
             result.raw_output["stages"][0]["backend"].as_str(),
             Some("whisper-large-v3"),
@@ -1558,8 +1570,14 @@ mod tests {
             max_speakers: None,
         });
 
-        let result = run(&req, Path::new("missing.wav"), tmp.path(), Duration::from_secs(1), None)
-            .expect("native diarization should succeed");
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("native diarization should succeed");
 
         let fallback = &result.raw_output["fallback"];
         assert_eq!(
@@ -1631,8 +1649,14 @@ mod tests {
             max_speakers: None,
         });
 
-        let result = run(&req, Path::new("missing.wav"), tmp.path(), Duration::from_secs(1), None)
-            .expect("should succeed with language=None");
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("should succeed with language=None");
         assert_eq!(
             result.language, None,
             "result.language should be None when request.language is None"

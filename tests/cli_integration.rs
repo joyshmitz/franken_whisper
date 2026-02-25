@@ -2408,6 +2408,58 @@ fn sync_overwrite_policy_replaces_conflicting_run() {
 }
 
 #[test]
+fn sync_overwrite_strict_policy_replaces_conflicting_segment_row() {
+    use fsqlite::Connection;
+    use fsqlite_types::SqliteValue;
+
+    let dir = tempdir().expect("tempdir");
+    let source_db = dir.path().join("source.sqlite3");
+    let target_db = dir.path().join("target.sqlite3");
+    let export_dir = dir.path().join("export");
+    let state_root = dir.path().join("state");
+
+    let source_store = RunStore::open(&source_db).expect("source store");
+    source_store
+        .persist_report(&fixture_report("strict-seg-1", &source_db))
+        .expect("persist source");
+
+    let target_store = RunStore::open(&target_db).expect("target store");
+    target_store
+        .persist_report(&fixture_report("strict-seg-1", &target_db))
+        .expect("persist target");
+
+    // Introduce a child-row payload conflict without changing the parent run row.
+    let conn = Connection::open(target_db.display().to_string()).expect("conn");
+    conn.execute_with_params(
+        "UPDATE segments SET text = ?1 WHERE run_id = ?2 AND idx = ?3",
+        &[
+            SqliteValue::Text("mutated segment text".to_owned()),
+            SqliteValue::Text("strict-seg-1".to_owned()),
+            SqliteValue::Integer(0),
+        ],
+    )
+    .expect("mutate target segment");
+
+    sync::export(&source_db, &export_dir, &state_root).expect("export");
+    sync::import(
+        &target_db,
+        &export_dir,
+        &state_root,
+        ConflictPolicy::OverwriteStrict,
+    )
+    .expect("strict overwrite import should reconcile child conflict");
+
+    let details = target_store
+        .load_run_details("strict-seg-1")
+        .expect("load")
+        .expect("exists");
+    assert_eq!(
+        details.segments[0].text, "integration test",
+        "strict overwrite should restore source segment payload"
+    );
+}
+
+#[test]
 fn sync_reject_policy_fails_on_conflict() {
     let dir = tempdir().expect("tempdir");
     let source_db = dir.path().join("source.sqlite3");

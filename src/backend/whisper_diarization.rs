@@ -921,7 +921,8 @@ corrupted\n\n\
             .position(|a| a == "--punctuation-restore")
             .expect("should contain --punctuation-restore");
         assert_eq!(
-            args[punct_idx + 1], "True",
+            args[punct_idx + 1],
+            "True",
             "should push literal 'True' when no model is specified"
         );
     }
@@ -940,7 +941,8 @@ corrupted\n\n\
             .position(|a| a == "--punctuation-restore")
             .expect("should contain --punctuation-restore");
         assert_eq!(
-            args[punct_idx + 1], "kredor/punctuate-all",
+            args[punct_idx + 1],
+            "kredor/punctuate-all",
             "should push model name when specified"
         );
     }

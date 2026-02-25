@@ -8717,10 +8717,7 @@ mod tests {
         let payload = acceleration_cancellation_fence_payload(&pcx);
         assert_eq!(payload["status"], "tripped");
         assert!(payload["error"].is_string(), "should have error string");
-        assert!(
-            !payload["error_code"].is_null(),
-            "should have error_code"
-        );
+        assert!(!payload["error_code"].is_null(), "should have error_code");
     }
 
     #[test]
@@ -8832,7 +8829,11 @@ mod tests {
         registry.register("bogus_proc", Finalizer::Process(u32::MAX));
         assert_eq!(registry.len(), 1);
         registry.run_all(); // should not panic
-        assert_eq!(registry.len(), 0, "Process finalizer should drain the entry");
+        assert_eq!(
+            registry.len(),
+            0,
+            "Process finalizer should drain the entry"
+        );
     }
 
     #[test]
@@ -8842,7 +8843,11 @@ mod tests {
         registry.register("bogus_proc_bounded", Finalizer::Process(u32::MAX));
         assert_eq!(registry.len(), 1);
         registry.run_all_bounded(5_000);
-        assert_eq!(registry.len(), 0, "Process finalizer should drain the entry");
+        assert_eq!(
+            registry.len(),
+            0,
+            "Process finalizer should drain the entry"
+        );
     }
 
     #[test]

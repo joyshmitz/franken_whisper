@@ -8813,8 +8813,15 @@ mod tests {
             ]
         });
         let segments = extract_segments_from_json(&input);
-        assert_eq!(segments.len(), 2, "should extract 2 segments from 'word' keys");
-        assert_eq!(segments[0].text, "Hello", "text should be trimmed from 'word' value");
+        assert_eq!(
+            segments.len(),
+            2,
+            "should extract 2 segments from 'word' keys"
+        );
+        assert_eq!(
+            segments[0].text, "Hello",
+            "text should be trimmed from 'word' value"
+        );
         assert_eq!(segments[1].text, "World");
     }
 
@@ -8872,7 +8879,13 @@ mod tests {
         assert_eq!(result.secondary_result[0].text, "secondary text");
         // HigherConfidence should pick secondary (0.9 > 0.6).
         assert_eq!(result.selected, "secondary");
-        assert!(result.primary_latency_ms < 5000, "primary should complete quickly");
-        assert!(result.secondary_latency_ms < 5000, "secondary should complete quickly");
+        assert!(
+            result.primary_latency_ms < 5000,
+            "primary should complete quickly"
+        );
+        assert!(
+            result.secondary_latency_ms < 5000,
+            "secondary should complete quickly"
+        );
     }
 }

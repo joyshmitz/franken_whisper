@@ -1028,7 +1028,10 @@ mod tests {
         assert_eq!(analysis.sample_rate_hz, 100);
         assert_eq!(analysis.duration_ms, 1_000);
         // frame_samples = 2, 100 samples → 50 frames
-        assert_eq!(analysis.frame_count, 50, "100 samples / 2 per frame = 50 frames");
+        assert_eq!(
+            analysis.frame_count, 50,
+            "100 samples / 2 per frame = 50 frames"
+        );
     }
 
     #[test]
@@ -1093,13 +1096,27 @@ mod tests {
         let rms = compute_frame_rms(&samples, 1);
         assert_eq!(rms.len(), 4, "4 samples with frame_size=1 → 4 frames");
         // Frame 0: 0/32768 = 0.0 → RMS = 0.0
-        assert!((rms[0] - 0.0).abs() < 1e-6, "silence sample RMS should be 0");
+        assert!(
+            (rms[0] - 0.0).abs() < 1e-6,
+            "silence sample RMS should be 0"
+        );
         // Frame 1: 16384/32768 = 0.5 → RMS = 0.5
-        assert!((rms[1] - 0.5).abs() < 0.01, "half-amplitude RMS should be ~0.5, got {}", rms[1]);
+        assert!(
+            (rms[1] - 0.5).abs() < 0.01,
+            "half-amplitude RMS should be ~0.5, got {}",
+            rms[1]
+        );
         // Frame 2: -16384/32768 = -0.5 → RMS = 0.5 (squared then sqrt)
-        assert!((rms[2] - 0.5).abs() < 0.01, "negative half-amplitude RMS should be ~0.5");
+        assert!(
+            (rms[2] - 0.5).abs() < 0.01,
+            "negative half-amplitude RMS should be ~0.5"
+        );
         // Frame 3: 32767/32768 ≈ 1.0 → RMS ≈ 1.0
-        assert!(rms[3] > 0.99, "max amplitude RMS should be ~1.0, got {}", rms[3]);
+        assert!(
+            rms[3] > 0.99,
+            "max amplitude RMS should be ~1.0, got {}",
+            rms[3]
+        );
     }
 
     #[test]

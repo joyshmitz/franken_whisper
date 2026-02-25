@@ -363,7 +363,7 @@ One-way JSONL snapshot export/import.
 cargo run -- sync export-jsonl --output ./snapshot [--db <PATH>]
 
 # import
-cargo run -- sync import-jsonl --input ./snapshot --conflict-policy reject|skip|overwrite
+cargo run -- sync import-jsonl --input ./snapshot --conflict-policy reject|skip|overwrite|overwrite-strict
 ```
 
 Export produces: `runs.jsonl`, `segments.jsonl`, `events.jsonl`, `manifest.json` (with SHA-256 checksums).
@@ -809,9 +809,10 @@ The manifest contains row counts and SHA-256 checksums of each JSONL file, enabl
 |--------|------------------------------|
 | `reject` | Fail the entire import |
 | `skip` | Silently skip existing runs |
-| `overwrite` | Replaces conflicting `runs` rows, but fails closed if strict replacement would require child-row `UPDATE`/`DELETE` on `segments`/`events` |
+| `overwrite` | Replaces conflicting `runs` rows, but fails closed if child-row `UPDATE`/`DELETE` would be required |
+| `overwrite-strict` | Verified strict replacement for imported runs, including child-row updates (delete+insert) and stale child-row pruning |
 
-Current runtime guidance: for guaranteed strict replacement imports, target an empty database (or a freshly rebuilt DB from snapshot) rather than mutating existing child rows in-place.
+Runtime guidance: use `overwrite` for conservative fail-closed behavior and `overwrite-strict` when operator intent is to mutate child rows in-place for exact replacement of imported runs.
 
 ### TTY Audio: Adaptive Bitrate & FEC
 
@@ -973,7 +974,7 @@ If that migration still fails (for example due severe on-disk corruption), recov
 cargo run -- sync import-jsonl --input ./snapshot --conflict-policy reject
 ```
 
-For strict overwrite flows, prefer importing into an empty DB rather than mutating legacy child rows in-place.
+For in-place strict replacement flows, use `--conflict-policy overwrite-strict`. For conservative recovery (or suspected corruption), prefer importing into a fresh target DB.
 
 ---
 
@@ -985,7 +986,7 @@ For strict overwrite flows, prefer importing into an empty DB rather than mutati
 - **Native engines are pilots.** Native Rust engine implementations are deterministic conformance pilots. They can execute in-process when `FRANKEN_WHISPER_NATIVE_EXECUTION=1` and rollout stage is `primary|sole`; otherwise bridge adapters remain active.
 - **No bidirectional sync.** JSONL export/import is one-way. There is no merge or conflict resolution beyond the explicit `--conflict-policy` flag.
 - **Legacy schema migration is rollback-safe but not magic.** Legacy `runs` schemas are migrated through snapshot/rebuild/swap with integrity checks; severely corrupted DBs may still require JSONL restore into a fresh DB.
-- **Overwrite import is fail-closed for child-row mutation.** When strict replacement would require child-row `UPDATE`/`DELETE` on `segments`/`events`, import errors by design; use an empty target DB for strict replacement workflows.
+- **Overwrite mode is conservative by default.** `overwrite` remains fail-closed for child-row mutation, while `overwrite-strict` enables verified child-row replacement for imported runs.
 - **Single-machine.** Designed for single-machine use with local SQLite. No distributed or multi-node support.
 
 ---
@@ -1019,6 +1020,32 @@ cargo bench --bench sync_bench
 
 # lint (lib targets; some test targets have pre-existing warnings from in-progress work)
 cargo clippy --lib -- -D warnings
+```
+
+### Remote Quality Gates (`rch`)
+
+When offload policy requires all cargo gates to run through `rch`, use:
+
+```bash
+scripts/run_quality_gates_rch.sh
+```
+
+Behavior:
+- enforces remote-only execution (fails if `rch` falls back to local)
+- retries transient worker failures on fresh remote target dirs
+- runs `fmt`, `check`, `clippy`, and `test` by default
+
+Useful toggles:
+
+```bash
+# skip the full test gate (keeps fmt/check/clippy)
+RUN_TEST_GATE=0 scripts/run_quality_gates_rch.sh
+
+# increase retries for noisy worker pools
+MAX_ATTEMPTS=6 scripts/run_quality_gates_rch.sh
+
+# temporarily block problematic workers for this run; they are auto-restored on exit
+BLOCK_WORKERS=vmi1149989 scripts/run_quality_gates_rch.sh
 ```
 
 ### Test Categories

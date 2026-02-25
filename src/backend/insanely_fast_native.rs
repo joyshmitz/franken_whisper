@@ -1207,10 +1207,7 @@ mod tests {
             result.raw_output["language"].is_null(),
             "language=None should produce null in raw_output"
         );
-        assert!(
-            result.language.is_none(),
-            "result.language should be None"
-        );
+        assert!(result.language.is_none(), "result.language should be None");
     }
 
     #[test]
