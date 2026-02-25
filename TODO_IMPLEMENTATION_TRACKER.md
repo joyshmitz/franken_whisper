@@ -1259,9 +1259,9 @@
 - [x] T7.2 Confirm conformance harness exists and emits bundle artifact (`tests/conformance_harness.rs`).
 - [x] T7.3 Confirm replay determinism artifacts exist (`src/replay_pack.rs`, conformance docs/tests).
 - [x] T7.4 Identify remaining real gap: orchestrator placeholder stages (VAD, separation, punctuation, diarization) still marked as placeholder implementations.
-- [ ] T7.5 Define explicit compatibility envelope doc addendum for parity targets (text/timestamp/speaker/confidence tolerances) as enforceable release gates.
-- [ ] T7.6 Add dedicated invariants/property tests for stage-order determinism and event-order replay under cancellation/failure paths.
-- [ ] T7.7 Add a focused operator-facing protocol note clarifying tty-audio replayability semantics and framing guarantees.
+- [x] T7.5 Define explicit compatibility envelope doc addendum for parity targets (text/timestamp/speaker/confidence tolerances) as enforceable release gates. *(implemented in `docs/engine_compatibility_spec.md` section 9 with release-gate matrix + mandatory execution checks)*
+- [~] T7.6 Add dedicated invariants/property tests for stage-order determinism and event-order replay under cancellation/failure paths. *(in progress: `bd-xp7`, owned by `CrimsonAspen`)*
+- [x] T7.7 Add a focused operator-facing protocol note clarifying tty-audio replayability semantics and framing guarantees. *(implemented in `docs/tty-replay-guarantees.md`, linked from protocol/readme docs)*
 
 ### T8. Closeout packet requirements
 - [ ] T8.1 Publish cross-repo change summary with file-level references.

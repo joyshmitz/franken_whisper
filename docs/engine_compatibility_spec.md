@@ -203,3 +203,13 @@ release gate.
 | Speaker stability | Within fixture pair drift caps (or zero in exact mode) | `tests/conformance_harness.rs` |
 | Confidence comparability | All confidences finite and within `[0,1]` | `src/conformance.rs` invariant/unit tests |
 | Replay determinism linkage | Replay metadata present and comparable for drift triage | `tests/replay_envelope.rs` + conformance harness replay checks |
+
+### 9.6 Mandatory release-check execution
+
+Run these checks before claiming parity completion:
+
+1. `scripts/run_quality_gates_rch.sh`
+2. `rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_fw_conformance cargo test --test conformance_harness`
+3. `rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_fw_replay cargo test --test replay_envelope`
+
+Release claims are blocked if any gate above fails.

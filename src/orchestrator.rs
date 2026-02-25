@@ -2976,8 +2976,8 @@ mod tests {
 
     use crate::error::FwError;
     use crate::model::{
-        BackendKind, BackendParams, InputSource, RunEvent, RunReport, TranscribeRequest,
-        TranscriptionResult, TranscriptionSegment,
+        BackendKind, BackendParams, InputSource, RunEvent, RunReport, StreamedRunEvent,
+        TranscribeRequest, TranscriptionResult, TranscriptionSegment,
     };
     use crate::storage::RunStore;
 
@@ -3342,9 +3342,15 @@ mod tests {
         );
 
         let streamed = rx.try_iter().collect::<Vec<_>>();
-        let streamed_codes = streamed
+        let streamed_fingerprint = streamed
             .iter()
-            .map(|item| item.event.code.clone())
+            .map(|item| {
+                (
+                    item.event.seq,
+                    item.event.stage.clone(),
+                    item.event.code.clone(),
+                )
+            })
             .collect::<Vec<_>>();
 
         let report = RunReport {
@@ -3391,12 +3397,12 @@ mod tests {
             .expect("load should succeed")
             .expect("row should exist");
 
-        let persisted_codes = loaded
+        let persisted_fingerprint = loaded
             .events
             .iter()
-            .map(|event| event.code.clone())
+            .map(|event| (event.seq, event.stage.clone(), event.code.clone()))
             .collect::<Vec<_>>();
-        assert_eq!(streamed_codes, persisted_codes);
+        assert_eq!(streamed_fingerprint, persisted_fingerprint);
     }
 
     #[test]
@@ -3485,6 +3491,66 @@ mod tests {
     }
 
     #[test]
+    fn ingest_failure_event_order_is_deterministic_across_runs() {
+        fn run_once(root: &std::path::Path, idx: usize) -> Vec<(u64, String, String)> {
+            let (tx, rx) = mpsc::channel();
+            let request = TranscribeRequest {
+                input: InputSource::File {
+                    path: root.join(format!("missing-{idx}.wav")),
+                },
+                backend: BackendKind::Auto,
+                model: None,
+                language: None,
+                translate: false,
+                diarize: false,
+                persist: false,
+                db_path: root.join(format!("failure-{idx}.sqlite3")),
+                timeout_ms: None,
+                backend_params: BackendParams::default(),
+            };
+
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("runtime build");
+            let result = runtime.block_on(run_pipeline(
+                request,
+                root,
+                Some(tx),
+                &PipelineConfig::default(),
+            ));
+            let error = result.expect_err("pipeline should fail ingest on missing input");
+            assert!(
+                !matches!(error, FwError::Cancelled(_)),
+                "missing-input failure should not map to cancellation"
+            );
+
+            let streamed = rx.try_iter().collect::<Vec<_>>();
+            assert_eq!(streamed.len(), 3, "failure path should emit three events");
+            assert_streamed_seq_starts_at_one_and_is_contiguous(&streamed);
+
+            streamed_event_fingerprint(&streamed)
+        }
+
+        let dir = tempdir().expect("tempdir should be available");
+        let first = run_once(dir.path(), 1);
+        let second = run_once(dir.path(), 2);
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first,
+            vec![
+                (
+                    1,
+                    "orchestration".to_owned(),
+                    "orchestration.budgets".to_owned()
+                ),
+                (2, "ingest".to_owned(), "ingest.start".to_owned()),
+                (3, "ingest".to_owned(), "ingest.error".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn run_pipeline_emits_checkpoint_cancelled_stage_with_evidence() {
         let dir = tempdir().expect("tempdir should be available");
         let (tx, rx) = mpsc::channel();
@@ -3562,14 +3628,7 @@ mod tests {
         );
 
         let streamed = rx.try_iter().collect::<Vec<_>>();
-        let streamed_codes = streamed
-            .iter()
-            .map(|item| item.event.code.clone())
-            .collect::<Vec<_>>();
-        let streamed_seqs = streamed
-            .iter()
-            .map(|item| item.event.seq)
-            .collect::<Vec<_>>();
+        let streamed_fingerprint = streamed_event_fingerprint(&streamed);
 
         let report = RunReport {
             run_id: "run-ordered-cancel".to_owned(),
@@ -3615,28 +3674,33 @@ mod tests {
             .expect("load should succeed")
             .expect("row should exist");
 
-        let persisted_codes = loaded
+        let persisted_fingerprint = loaded
             .events
             .iter()
-            .map(|event| event.code.clone())
-            .collect::<Vec<_>>();
-        let persisted_seqs = loaded
-            .events
-            .iter()
-            .map(|event| event.seq)
+            .map(|event| (event.seq, event.stage.clone(), event.code.clone()))
             .collect::<Vec<_>>();
 
         assert_eq!(
-            streamed_codes,
-            vec!["orchestration.budgets", "orchestration.cancelled"]
+            streamed_fingerprint,
+            vec![
+                (
+                    1,
+                    "orchestration".to_owned(),
+                    "orchestration.budgets".to_owned()
+                ),
+                (
+                    2,
+                    "orchestration".to_owned(),
+                    "orchestration.cancelled".to_owned()
+                )
+            ]
         );
-        assert_eq!(streamed_codes, persisted_codes);
-        assert_eq!(streamed_seqs, persisted_seqs);
+        assert_eq!(streamed_fingerprint, persisted_fingerprint);
     }
 
     #[test]
     fn checkpoint_cancellation_event_order_is_deterministic_across_runs() {
-        fn run_once(root: &std::path::Path, idx: usize) -> Vec<String> {
+        fn run_once(root: &std::path::Path, idx: usize) -> Vec<(u64, String, String)> {
             let (tx, rx) = mpsc::channel();
             let request = TranscribeRequest {
                 input: InputSource::File {
@@ -3665,9 +3729,16 @@ mod tests {
             let error = result.expect_err("pipeline should cancel at checkpoint");
             assert!(matches!(error, FwError::Cancelled(_)));
 
-            rx.try_iter()
-                .map(|item| item.event.code)
-                .collect::<Vec<String>>()
+            let streamed = rx.try_iter().collect::<Vec<_>>();
+            assert_streamed_seq_starts_at_one_and_is_contiguous(&streamed);
+            assert_eq!(streamed.len(), 2);
+            assert_eq!(streamed[1].event.payload["checkpoint"], true);
+            assert_eq!(
+                streamed[1].event.payload["cancellation_evidence"]["reason"],
+                "checkpoint deadline exceeded"
+            );
+
+            streamed_event_fingerprint(&streamed)
         }
 
         let dir = tempdir().expect("tempdir should be available");
@@ -3678,10 +3749,41 @@ mod tests {
         assert_eq!(
             first,
             vec![
-                "orchestration.budgets".to_owned(),
-                "orchestration.cancelled".to_owned()
+                (
+                    1,
+                    "orchestration".to_owned(),
+                    "orchestration.budgets".to_owned()
+                ),
+                (
+                    2,
+                    "orchestration".to_owned(),
+                    "orchestration.cancelled".to_owned()
+                )
             ]
         );
+    }
+
+    fn streamed_event_fingerprint(streamed: &[StreamedRunEvent]) -> Vec<(u64, String, String)> {
+        streamed
+            .iter()
+            .map(|item| {
+                (
+                    item.event.seq,
+                    item.event.stage.clone(),
+                    item.event.code.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn assert_streamed_seq_starts_at_one_and_is_contiguous(streamed: &[StreamedRunEvent]) {
+        for (idx, item) in streamed.iter().enumerate() {
+            assert_eq!(
+                item.event.seq,
+                idx as u64 + 1,
+                "event seq should be contiguous and 1-based"
+            );
+        }
     }
 
     #[test]
