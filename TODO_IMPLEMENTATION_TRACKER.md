@@ -1266,8 +1266,8 @@
 ### T8. Closeout packet requirements
 - [ ] T8.1 Publish cross-repo change summary with file-level references.
 - [ ] T8.2 Publish quality gate outcomes (pass/fail + notable long-running suites).
-- [ ] T8.3 Publish residual risks (placeholder stages in `franken_whisper`; long SSI tests runtime cost in `frankensqlite`).
-- [ ] T8.4 Publish next concrete execution packets with clear ownership and verification criteria.
+- [x] T8.3 Publish residual risks (placeholder stages in `franken_whisper`; long SSI tests runtime cost in `frankensqlite`). *(see `docs/closeout_residual_risks_2026-02-25.md`)*
+- [x] T8.4 Publish next concrete execution packets with clear ownership and verification criteria. *(see `docs/next_execution_packet_2026-02-25.md`)*
 
 ## U. Cross-Repo Completion Packet — Golden Drift + SSI Runtime + Architecture Backlog (2026-02-23)
 
