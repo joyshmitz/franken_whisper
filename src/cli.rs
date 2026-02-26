@@ -122,7 +122,15 @@ pub enum RobotCommand {
     Run(Box<TranscribeArgs>),
     Schema,
     Backends,
+    Health(HealthArgs),
     RoutingHistory(RoutingHistoryArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HealthArgs {
+    /// Path to frankensqlite database file.
+    #[arg(long, default_value = ".franken_whisper/storage.sqlite3")]
+    pub db: PathBuf,
 }
 
 #[derive(Debug, Args)]

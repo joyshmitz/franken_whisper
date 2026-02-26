@@ -7,7 +7,8 @@ use franken_whisper::cli::{
     SyncCommand, TtyAudioCommand, TtyAudioControlCommand, TtyAudioRecoveryPolicy,
 };
 use franken_whisper::robot::{
-    emit_robot_complete, emit_robot_error, emit_robot_stage, emit_robot_start, robot_schema_value,
+    build_health_report, emit_health_report, emit_robot_complete, emit_robot_error,
+    emit_robot_stage, emit_robot_start, robot_schema_value,
 };
 use franken_whisper::storage::RunStore;
 use franken_whisper::tty_audio;
@@ -136,6 +137,10 @@ fn run() -> FwResult<()> {
                     }
                 }
                 Ok(())
+            }
+            RobotCommand::Health(args) => {
+                let report = build_health_report(&args.db);
+                emit_health_report(&report)
             }
             RobotCommand::Backends => {
                 let payload = serde_json::json!({
