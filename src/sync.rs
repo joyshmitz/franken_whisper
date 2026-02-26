@@ -11005,4 +11005,342 @@ mod tests {
             "malformed JSON line should cause collect_jsonl_ids to return an error"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // bd-2l2: compress_jsonl / decompress_jsonl round-trip tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compress_decompress_round_trip_preserves_content() {
+        let dir = tempdir().expect("tempdir");
+        let input_path = dir.path().join("data.jsonl");
+        let compressed_path = dir.path().join("data.jsonl.gz");
+        let output_path = dir.path().join("data_recovered.jsonl");
+
+        let original =
+            "{\"id\":\"run-1\",\"text\":\"hello\"}\n{\"id\":\"run-2\",\"text\":\"world\"}\n";
+        fs::write(&input_path, original).expect("write input");
+
+        compress_jsonl(&input_path, &compressed_path).expect("compress should succeed");
+        assert!(compressed_path.exists(), "compressed file should exist");
+
+        decompress_jsonl(&compressed_path, &output_path).expect("decompress should succeed");
+        let recovered = fs::read_to_string(&output_path).expect("read output");
+        assert_eq!(
+            recovered, original,
+            "round-trip should preserve content exactly"
+        );
+    }
+
+    #[test]
+    fn compress_jsonl_empty_file() {
+        let dir = tempdir().expect("tempdir");
+        let input_path = dir.path().join("empty.jsonl");
+        let compressed_path = dir.path().join("empty.jsonl.gz");
+
+        fs::write(&input_path, "").expect("write empty");
+        compress_jsonl(&input_path, &compressed_path).expect("compress empty should succeed");
+        assert!(compressed_path.exists());
+
+        let output_path = dir.path().join("empty_recovered.jsonl");
+        decompress_jsonl(&compressed_path, &output_path).expect("decompress empty should succeed");
+        let recovered = fs::read_to_string(&output_path).expect("read");
+        assert!(
+            recovered.is_empty(),
+            "empty input should produce empty output"
+        );
+    }
+
+    #[test]
+    fn compress_jsonl_nonexistent_input_returns_error() {
+        let dir = tempdir().expect("tempdir");
+        let input_path = dir.path().join("no_such_file.jsonl");
+        let compressed_path = dir.path().join("output.jsonl.gz");
+
+        let result = compress_jsonl(&input_path, &compressed_path);
+        assert!(result.is_err(), "nonexistent input should return error");
+    }
+
+    #[test]
+    fn decompress_jsonl_nonexistent_input_returns_error() {
+        let dir = tempdir().expect("tempdir");
+        let input_path = dir.path().join("no_such_file.jsonl.gz");
+        let output_path = dir.path().join("output.jsonl");
+
+        let result = decompress_jsonl(&input_path, &output_path);
+        assert!(
+            result.is_err(),
+            "nonexistent compressed input should return error"
+        );
+    }
+
+    #[test]
+    fn decompress_jsonl_corrupted_data_returns_error() {
+        let dir = tempdir().expect("tempdir");
+        let input_path = dir.path().join("corrupted.jsonl.gz");
+        let output_path = dir.path().join("output.jsonl");
+
+        fs::write(&input_path, b"not valid gzip data").expect("write corrupted");
+        let result = decompress_jsonl(&input_path, &output_path);
+        assert!(result.is_err(), "corrupted gzip data should return error");
+    }
+
+    #[test]
+    fn compress_jsonl_large_content() {
+        let dir = tempdir().expect("tempdir");
+        let input_path = dir.path().join("large.jsonl");
+        let compressed_path = dir.path().join("large.jsonl.gz");
+        let output_path = dir.path().join("large_recovered.jsonl");
+
+        let mut content = String::new();
+        for i in 0..100 {
+            content.push_str(&format!(
+                "{{\"id\":\"run-{i}\",\"data\":\"{}\"}}\n",
+                "x".repeat(200)
+            ));
+        }
+        fs::write(&input_path, &content).expect("write large");
+
+        compress_jsonl(&input_path, &compressed_path).expect("compress large");
+        decompress_jsonl(&compressed_path, &output_path).expect("decompress large");
+        let recovered = fs::read_to_string(&output_path).expect("read large");
+        assert_eq!(
+            recovered, content,
+            "large round-trip should preserve content"
+        );
+
+        let compressed_size = fs::metadata(&compressed_path).expect("meta").len();
+        let original_size = content.len() as u64;
+        assert!(
+            compressed_size < original_size,
+            "compressed size ({compressed_size}) should be smaller than original ({original_size})"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-2l2: max_started_at function tests (distinct from max_export_position tests)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn max_started_at_fn_empty_db_returns_none() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.sqlite3");
+        let _store = RunStore::open(&db_path).expect("store open");
+
+        let conn = Connection::open(db_path.display().to_string()).expect("conn open");
+        let result = max_started_at(&conn, None).expect("query should succeed");
+        assert!(result.is_none(), "empty DB should return None");
+    }
+
+    #[test]
+    fn max_started_at_fn_with_data_returns_latest() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+
+        let report1 = {
+            let mut r = fixture_report("run-1", &db_path);
+            r.started_at_rfc3339 = "2026-01-01T00:00:00Z".to_owned();
+            r
+        };
+        let report2 = {
+            let mut r = fixture_report("run-2", &db_path);
+            r.started_at_rfc3339 = "2026-02-15T12:00:00Z".to_owned();
+            r
+        };
+        store.persist_report(&report1).expect("save report1");
+        store.persist_report(&report2).expect("save report2");
+
+        let conn = Connection::open(db_path.display().to_string()).expect("conn open");
+        let result = max_started_at(&conn, None).expect("query should succeed");
+        assert_eq!(
+            result,
+            Some("2026-02-15T12:00:00Z".to_owned()),
+            "should return the latest started_at"
+        );
+    }
+
+    #[test]
+    fn max_started_at_fn_with_after_ts_filter_returns_only_newer() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+
+        let report1 = {
+            let mut r = fixture_report("run-a", &db_path);
+            r.started_at_rfc3339 = "2026-01-01T00:00:00Z".to_owned();
+            r
+        };
+        let report2 = {
+            let mut r = fixture_report("run-b", &db_path);
+            r.started_at_rfc3339 = "2026-02-01T00:00:00Z".to_owned();
+            r
+        };
+        let report3 = {
+            let mut r = fixture_report("run-c", &db_path);
+            r.started_at_rfc3339 = "2026-03-01T00:00:00Z".to_owned();
+            r
+        };
+        store.persist_report(&report1).expect("save report1");
+        store.persist_report(&report2).expect("save report2");
+        store.persist_report(&report3).expect("save report3");
+
+        let conn = Connection::open(db_path.display().to_string()).expect("conn open");
+
+        let result =
+            max_started_at(&conn, Some("2026-01-15T00:00:00Z")).expect("query should succeed");
+        assert_eq!(
+            result,
+            Some("2026-03-01T00:00:00Z".to_owned()),
+            "should return the max among rows after the filter"
+        );
+    }
+
+    #[test]
+    fn max_started_at_fn_with_filter_excluding_all_returns_none() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.sqlite3");
+        let store = RunStore::open(&db_path).expect("store open");
+
+        let report = {
+            let mut r = fixture_report("run-old", &db_path);
+            r.started_at_rfc3339 = "2026-01-01T00:00:00Z".to_owned();
+            r
+        };
+        store.persist_report(&report).expect("save report");
+
+        let conn = Connection::open(db_path.display().to_string()).expect("conn open");
+        let result =
+            max_started_at(&conn, Some("2026-12-31T23:59:59Z")).expect("query should succeed");
+        assert!(result.is_none(), "filter after all rows should return None");
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-1ao: validate_sync tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_sync_after_export_reports_valid() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("run-valid", &db_path))
+            .expect("persist");
+        drop(store);
+
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        let report = validate_sync(&db_path, &export_dir).expect("validate should succeed");
+        assert!(
+            report.is_valid,
+            "freshly exported db should validate as synced"
+        );
+        assert_eq!(report.db_run_count, 1);
+        assert_eq!(report.jsonl_run_count, 1);
+        assert!(report.missing_from_jsonl.is_empty());
+        assert!(report.missing_from_db.is_empty());
+        assert!(report.mismatched_records.is_empty());
+        assert_eq!(report.db_segment_count, report.jsonl_segment_count);
+        assert_eq!(report.db_event_count, report.jsonl_event_count);
+    }
+
+    #[test]
+    fn validate_sync_empty_db_and_empty_export_is_valid() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("empty.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let _store = RunStore::open(&db_path).expect("store open");
+        export(&db_path, &export_dir, &state_root).expect("export empty");
+
+        let report = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(report.is_valid, "empty db + empty export should be valid");
+        assert_eq!(report.db_run_count, 0);
+        assert_eq!(report.jsonl_run_count, 0);
+    }
+
+    #[test]
+    fn validate_sync_detects_run_missing_from_jsonl() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        // Export empty db first
+        let store = RunStore::open(&db_path).expect("store open");
+        export(&db_path, &export_dir, &state_root).expect("export empty");
+
+        // Then add a run to the db (without re-exporting)
+        store
+            .persist_report(&fixture_report("run-extra", &db_path))
+            .expect("persist");
+        drop(store);
+
+        let report = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(!report.is_valid, "should not be valid with extra db run");
+        assert_eq!(report.db_run_count, 1);
+        assert_eq!(report.jsonl_run_count, 0);
+        assert_eq!(report.missing_from_jsonl, vec!["run-extra"]);
+        assert!(report.missing_from_db.is_empty());
+    }
+
+    #[test]
+    fn validate_sync_detects_run_missing_from_db() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("full.sqlite3");
+        let empty_db_path = dir.path().join("empty.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        // Export db with a run
+        let store = RunStore::open(&db_path).expect("store open");
+        store
+            .persist_report(&fixture_report("run-orphan", &db_path))
+            .expect("persist");
+        drop(store);
+
+        export(&db_path, &export_dir, &state_root).expect("export with run");
+
+        // Create a separate empty database, then validate it against
+        // the export that has the run.
+        let _empty_store = RunStore::open(&empty_db_path).expect("open empty");
+
+        let report = validate_sync(&empty_db_path, &export_dir).expect("validate");
+        assert!(
+            !report.is_valid,
+            "should not be valid with orphaned jsonl run"
+        );
+        assert_eq!(report.db_run_count, 0);
+        assert_eq!(report.jsonl_run_count, 1);
+        assert!(report.missing_from_jsonl.is_empty());
+        assert_eq!(report.missing_from_db, vec!["run-orphan"]);
+    }
+
+    #[test]
+    fn validate_sync_multiple_runs_all_matching() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("multi.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store open");
+        for i in 0..5 {
+            let mut report = fixture_report(&format!("run-{i}"), &db_path);
+            report.started_at_rfc3339 = format!("2026-01-0{i}T00:00:00Z");
+            store.persist_report(&report).expect("persist");
+        }
+        drop(store);
+
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        let report = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(report.is_valid, "5 matching runs should validate");
+        assert_eq!(report.db_run_count, 5);
+        assert_eq!(report.jsonl_run_count, 5);
+    }
 }

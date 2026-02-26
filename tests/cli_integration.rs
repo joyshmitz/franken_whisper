@@ -199,6 +199,60 @@ fn generate_voiced_wav_without_ffmpeg(path: &std::path::Path) {
 }
 
 #[cfg(unix)]
+fn write_provisioned_ffmpeg_stub(bin_dir: &std::path::Path) -> PathBuf {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(bin_dir).expect("create provisioned ffmpeg bin dir");
+    let stub_path = bin_dir.join("ffmpeg");
+    let script = r#"#!/bin/bash
+set -euo pipefail
+input=""
+output=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "-i" && $# -ge 2 ]]; then
+    input="$2"
+    shift 2
+    continue
+  fi
+  output="$1"
+  shift
+done
+if [[ -z "$input" || -z "$output" ]]; then
+  echo "stub ffmpeg missing required input/output args" >&2
+  exit 2
+fi
+if [[ -n "${FRANKEN_WHISPER_TEST_FFMPEG_MARKER:-}" ]]; then
+  printf '%s\n' "$input -> $output" > "${FRANKEN_WHISPER_TEST_FFMPEG_MARKER}"
+fi
+/bin/cp "$input" "$output"
+"#;
+    fs::write(&stub_path, script).expect("write ffmpeg stub");
+    let mut perms = fs::metadata(&stub_path).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&stub_path, perms).expect("chmod");
+    stub_path
+}
+
+#[cfg(unix)]
+fn write_provisioned_ffprobe_stub(bin_dir: &std::path::Path) -> PathBuf {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(bin_dir).expect("create provisioned ffprobe bin dir");
+    let stub_path = bin_dir.join("ffprobe");
+    let script = r#"#!/bin/bash
+set -euo pipefail
+printf '0.25\n'
+"#;
+    fs::write(&stub_path, script).expect("write ffprobe stub");
+    let mut perms = fs::metadata(&stub_path).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&stub_path, perms).expect("chmod");
+    stub_path
+}
+
+#[cfg(unix)]
 fn run_transcribe_json_with_stub(
     args: &[&str],
     stdin_payload: Option<&[u8]>,
@@ -1840,6 +1894,90 @@ fn transcribe_file_input_uses_builtin_normalizer_when_ffmpeg_missing() {
 
 #[cfg(unix)]
 #[test]
+fn transcribe_file_input_falls_back_to_builtin_when_auto_provision_is_disabled() {
+    let dir = tempdir().expect("tempdir");
+    let state_root = dir.path().join("state");
+    let stub_bin = write_whisper_cpp_stub_binary(dir.path());
+    let input_wav = dir.path().join("file_input_builtin_no_autoprov.wav");
+    generate_voiced_wav_without_ffmpeg(&input_wav);
+
+    let report = run_transcribe_json_with_stub_env(
+        &[
+            "--input",
+            input_wav.to_str().expect("utf8"),
+            "--backend",
+            "whisper-cpp",
+            "--no-persist",
+            "--json",
+        ],
+        None,
+        &stub_bin,
+        &state_root,
+        &[
+            ("PATH", ""),
+            ("FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG", "0"),
+        ],
+    );
+
+    assert_eq!(report["result"]["backend"], "whisper_cpp");
+    assert_eq!(report["result"]["transcript"], "stub transcript");
+    let events = report["events"].as_array().expect("events");
+    assert!(
+        events.iter().any(|event| event["code"] == "normalize.ok"),
+        "expected normalize.ok event in report events"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn transcribe_file_input_uses_state_dir_provisioned_ffmpeg_when_path_is_missing() {
+    let dir = tempdir().expect("tempdir");
+    let state_root = dir.path().join("state");
+    let stub_bin = write_whisper_cpp_stub_binary(dir.path());
+    let input_wav = dir.path().join("file_input_provisioned_ffmpeg.wav");
+    let provisioned_bin_dir = state_root.join("tools/ffmpeg/bin");
+    let ffmpeg_marker = dir.path().join("ffmpeg_invocation.txt");
+    generate_voiced_wav_without_ffmpeg(&input_wav);
+    write_provisioned_ffmpeg_stub(&provisioned_bin_dir);
+    write_provisioned_ffprobe_stub(&provisioned_bin_dir);
+    let marker_env = ffmpeg_marker
+        .to_str()
+        .expect("marker path should be valid utf-8");
+
+    let report = run_transcribe_json_with_stub_env(
+        &[
+            "--input",
+            input_wav.to_str().expect("utf8"),
+            "--backend",
+            "whisper-cpp",
+            "--no-persist",
+            "--json",
+        ],
+        None,
+        &stub_bin,
+        &state_root,
+        &[
+            ("PATH", ""),
+            ("FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG", "0"),
+            ("FRANKEN_WHISPER_TEST_FFMPEG_MARKER", marker_env),
+        ],
+    );
+
+    assert_eq!(report["result"]["backend"], "whisper_cpp");
+    assert_eq!(report["result"]["transcript"], "stub transcript");
+    let events = report["events"].as_array().expect("events");
+    assert!(
+        events.iter().any(|event| event["code"] == "normalize.ok"),
+        "expected normalize.ok event in report events"
+    );
+    assert!(
+        ffmpeg_marker.is_file(),
+        "state-dir provisioned ffmpeg should be invoked when PATH ffmpeg is unavailable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn transcribe_stdin_input_crosses_ingest_normalize_backend_with_stub_whisper_cpp() {
     if !ffmpeg_available() {
         return;
@@ -2022,6 +2160,78 @@ fn transcribe_backend_stage_payload_exposes_execution_metadata() {
         .find(|event| event["code"] == "replay.envelope")
         .expect("replay.envelope stage should be present");
     let replay_payload = &replay_event["payload"];
+    assert_eq!(
+        replay_payload["implementation"],
+        backend_payload["implementation"]
+    );
+    assert_eq!(
+        replay_payload["execution_mode"],
+        backend_payload["execution_mode"]
+    );
+    assert_eq!(
+        replay_payload["native_rollout_stage"],
+        backend_payload["native_rollout_stage"]
+    );
+    assert_eq!(
+        replay_payload["native_fallback_error"],
+        backend_payload["native_fallback_error"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn transcribe_bridge_only_mode_recovers_with_native_when_bridge_binary_missing() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let state_root = dir.path().join("state");
+    let stub_bin = write_whisper_cpp_stub_binary(dir.path());
+    let missing_bridge_bin = dir.path().join("missing-whisper-cli");
+    let input_wav = dir.path().join("bridge_recovery.wav");
+    generate_voiced_wav(&input_wav);
+
+    let report = run_transcribe_json_with_stub_env(
+        &[
+            "--input",
+            input_wav.to_str().expect("utf8"),
+            "--backend",
+            "whisper-cpp",
+            "--no-persist",
+            "--json",
+        ],
+        None,
+        &stub_bin,
+        &state_root,
+        &[(
+            "FRANKEN_WHISPER_WHISPER_CPP_BIN",
+            missing_bridge_bin.to_str().expect("utf8"),
+        )],
+    );
+
+    let events = report["events"].as_array().expect("events should be array");
+    let backend_ok = events
+        .iter()
+        .find(|event| event["code"] == "backend.ok")
+        .expect("backend.ok stage should be present");
+    let backend_payload = &backend_ok["payload"];
+
+    assert_eq!(backend_payload["resolved_backend"], "whisper_cpp");
+    assert_eq!(backend_payload["implementation"], "native");
+    assert_eq!(
+        backend_payload["execution_mode"],
+        "bridge_only_native_recovery"
+    );
+    assert_eq!(backend_payload["native_rollout_stage"], "primary");
+    assert!(backend_payload["native_fallback_error"].is_string());
+
+    let replay_event = events
+        .iter()
+        .find(|event| event["code"] == "replay.envelope")
+        .expect("replay.envelope stage should be present");
+    let replay_payload = &replay_event["payload"];
+
     assert_eq!(
         replay_payload["implementation"],
         backend_payload["implementation"]

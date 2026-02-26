@@ -1387,6 +1387,7 @@ enum NativeExecutionMode {
 }
 
 const NATIVE_EXECUTION_ENV_VAR: &str = "FRANKEN_WHISPER_NATIVE_EXECUTION";
+const BRIDGE_NATIVE_RECOVERY_ENV_VAR: &str = "FRANKEN_WHISPER_BRIDGE_NATIVE_RECOVERY";
 const NATIVE_ENGINE_VERSION_TAG: &str = "native-pilot-v1";
 
 pub fn runtime_metadata(kind: BackendKind) -> BackendRuntimeMetadata {
@@ -1464,6 +1465,21 @@ fn native_execution_enabled() -> bool {
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
+fn bridge_native_recovery_from_raw(raw: Option<&str>) -> bool {
+    match raw {
+        Some(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+        }
+        None => true,
+    }
+}
+
+fn bridge_native_recovery_enabled() -> bool {
+    let raw = std::env::var(BRIDGE_NATIVE_RECOVERY_ENV_VAR).ok();
+    bridge_native_recovery_from_raw(raw.as_deref())
+}
+
 fn native_execution_mode(rollout_stage: NativeEngineRolloutStage) -> NativeExecutionMode {
     if !native_execution_enabled() {
         return NativeExecutionMode::BridgeOnly;
@@ -1508,10 +1524,21 @@ fn native_available(kind: BackendKind) -> bool {
 
 fn available_for_mode(kind: BackendKind, mode: NativeExecutionMode) -> bool {
     match mode {
-        NativeExecutionMode::BridgeOnly => bridge_available(kind),
+        NativeExecutionMode::BridgeOnly => {
+            bridge_available(kind) || (bridge_native_recovery_enabled() && native_available(kind))
+        }
         NativeExecutionMode::NativePreferred => native_available(kind) || bridge_available(kind),
         NativeExecutionMode::NativeOnly => native_available(kind),
     }
+}
+
+fn bridge_error_recoverable(error: &FwError) -> bool {
+    matches!(
+        error,
+        FwError::CommandMissing { .. }
+            | FwError::BackendUnavailable(_)
+            | FwError::CommandFailed { .. }
+    )
 }
 
 fn run_backend(
@@ -1599,7 +1626,34 @@ fn run_backend(
     };
 
     match execution_mode {
-        NativeExecutionMode::BridgeOnly => run_bridge(),
+        NativeExecutionMode::BridgeOnly => match run_bridge() {
+            Ok(result) => Ok(result),
+            Err(bridge_error)
+                if bridge_native_recovery_enabled()
+                    && native_available(kind)
+                    && bridge_error_recoverable(&bridge_error) =>
+            {
+                let bridge_error_msg = bridge_error.to_string();
+                tracing::warn!(
+                    backend = kind.as_str(),
+                    rollout_stage = rollout_stage.as_str(),
+                    bridge_error = %bridge_error_msg,
+                    "bridge backend unavailable in bridge-only mode; recovering with native backend"
+                );
+                let mut native_execution = run_native().map_err(|native_error| {
+                    FwError::BackendUnavailable(format!(
+                        "bridge `{}` failed: {}; native recovery failed: {}",
+                        kind.as_str(),
+                        bridge_error_msg,
+                        native_error
+                    ))
+                })?;
+                native_execution.execution_mode = "bridge_only_native_recovery".to_owned();
+                native_execution.native_fallback_error = Some(bridge_error_msg);
+                Ok(native_execution)
+            }
+            Err(error) => Err(error),
+        },
         NativeExecutionMode::NativeOnly => {
             if !native_available(kind) {
                 return Err(FwError::BackendUnavailable(format!(
@@ -3680,11 +3734,12 @@ mod tests {
         RoutingOutcomeRecord, SegmentConformanceReport, SegmentConformanceViolation,
         SegmentViolationKind, ShadowDivergenceKind, ShadowRunConfig, ShadowRunDivergence,
         ShadowRunReport, SpeakerInfo, TranscriptSegment, TwoLaneExecutor, WhisperCppEngine,
-        WhisperCppPilot, WhisperDiarizationEngine, auto_priority, check_segment_conformance,
-        compare_shadow_results, duration_bucket, evaluate_backend_selection,
-        extract_segments_from_json, is_hf_token_set, latency_proxy, native_runtime_metadata,
-        number_millis_to_secs, number_to_secs, posterior_success_probability, prior_for,
-        probe_system_health, probe_system_health_uncached, quality_proxy, runtime_metadata,
+        WhisperCppPilot, WhisperDiarizationEngine, auto_priority, bridge_error_recoverable,
+        bridge_native_recovery_from_raw, check_segment_conformance, compare_shadow_results,
+        duration_bucket, evaluate_backend_selection, extract_segments_from_json, is_hf_token_set,
+        latency_proxy, native_runtime_metadata, number_millis_to_secs, number_to_secs,
+        posterior_success_probability, prior_for, probe_system_health,
+        probe_system_health_uncached, quality_proxy, runtime_metadata,
         runtime_metadata_with_implementation, segment_end, segment_start, transcript_from_segments,
     };
     use crate::conformance::NativeEngineRolloutStage;
@@ -9349,5 +9404,156 @@ mod tests {
             result.secondary_latency_ms < 5000,
             "secondary should complete quickly"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-6qt: bridge_error_recoverable tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bridge_error_recoverable_command_missing() {
+        let err = crate::error::FwError::CommandMissing {
+            command: "whisper-cpp".to_owned(),
+        };
+        assert!(
+            bridge_error_recoverable(&err),
+            "CommandMissing should be recoverable"
+        );
+    }
+
+    #[test]
+    fn bridge_error_recoverable_backend_unavailable() {
+        let err = crate::error::FwError::BackendUnavailable("python not found".to_owned());
+        assert!(
+            bridge_error_recoverable(&err),
+            "BackendUnavailable should be recoverable"
+        );
+    }
+
+    #[test]
+    fn bridge_error_recoverable_command_failed() {
+        let err = crate::error::FwError::CommandFailed {
+            command: "whisper-cpp".to_owned(),
+            status: 1,
+            stderr_suffix: " segfault".to_owned(),
+        };
+        assert!(
+            bridge_error_recoverable(&err),
+            "CommandFailed should be recoverable"
+        );
+    }
+
+    #[test]
+    fn bridge_error_recoverable_io_error_is_not_recoverable() {
+        let err = crate::error::FwError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file not found",
+        ));
+        assert!(
+            !bridge_error_recoverable(&err),
+            "Io errors should not be recoverable"
+        );
+    }
+
+    #[test]
+    fn bridge_error_recoverable_command_timed_out_is_not_recoverable() {
+        let err = crate::error::FwError::CommandTimedOut {
+            command: "whisper-cpp".to_owned(),
+            timeout_ms: 30000,
+            stderr_suffix: String::new(),
+        };
+        assert!(
+            !bridge_error_recoverable(&err),
+            "CommandTimedOut should not be recoverable (timeout may recur with native)"
+        );
+    }
+
+    #[test]
+    fn bridge_error_recoverable_cancelled_is_not_recoverable() {
+        let err = crate::error::FwError::Cancelled("user requested".to_owned());
+        assert!(
+            !bridge_error_recoverable(&err),
+            "Cancelled should not be recoverable"
+        );
+    }
+
+    #[test]
+    fn bridge_error_recoverable_stage_timeout_is_not_recoverable() {
+        let err = crate::error::FwError::StageTimeout {
+            stage: "backend".to_owned(),
+            budget_ms: 60000,
+        };
+        assert!(
+            !bridge_error_recoverable(&err),
+            "StageTimeout should not be recoverable"
+        );
+    }
+
+    #[test]
+    fn bridge_error_recoverable_invalid_request_is_not_recoverable() {
+        let err = crate::error::FwError::InvalidRequest("bad params".to_owned());
+        assert!(
+            !bridge_error_recoverable(&err),
+            "InvalidRequest should not be recoverable"
+        );
+    }
+
+    #[test]
+    fn bridge_error_recoverable_storage_is_not_recoverable() {
+        let err = crate::error::FwError::Storage("db locked".to_owned());
+        assert!(
+            !bridge_error_recoverable(&err),
+            "Storage should not be recoverable"
+        );
+    }
+
+    #[test]
+    fn bridge_error_recoverable_unsupported_is_not_recoverable() {
+        let err = crate::error::FwError::Unsupported("not implemented".to_owned());
+        assert!(
+            !bridge_error_recoverable(&err),
+            "Unsupported should not be recoverable"
+        );
+    }
+
+    #[test]
+    fn bridge_error_recoverable_missing_artifact_is_not_recoverable() {
+        let err = crate::error::FwError::MissingArtifact(PathBuf::from("/tmp/output.json"));
+        assert!(
+            !bridge_error_recoverable(&err),
+            "MissingArtifact should not be recoverable"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-2w3 support: bridge native recovery env parser tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bridge_native_recovery_from_raw_defaults_to_enabled_when_absent() {
+        assert!(
+            bridge_native_recovery_from_raw(None),
+            "unset env should default to enabled"
+        );
+    }
+
+    #[test]
+    fn bridge_native_recovery_from_raw_false_like_values_disable_recovery() {
+        for value in ["0", "false", "FALSE", "no", "OFF", " off "] {
+            assert!(
+                !bridge_native_recovery_from_raw(Some(value)),
+                "value `{value}` should disable recovery"
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_native_recovery_from_raw_non_false_values_enable_recovery() {
+        for value in ["1", "true", "yes", "auto", "unexpected"] {
+            assert!(
+                bridge_native_recovery_from_raw(Some(value)),
+                "value `{value}` should enable recovery"
+            );
+        }
     }
 }

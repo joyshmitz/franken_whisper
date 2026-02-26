@@ -16,6 +16,20 @@ use crate::error::{FwError, FwResult};
 use crate::model::InputSource;
 use crate::process::{run_command_cancellable, run_command_with_timeout};
 
+const FFMPEG_BIN_ENV: &str = "FRANKEN_WHISPER_FFMPEG_BIN";
+const FFPROBE_BIN_ENV: &str = "FRANKEN_WHISPER_FFPROBE_BIN";
+const FORCE_BUILTIN_NORMALIZE_ENV: &str = "FRANKEN_WHISPER_FORCE_BUILTIN_NORMALIZE";
+const AUTO_PROVISION_FFMPEG_ENV: &str = "FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG";
+const DEFAULT_STATE_DIR: &str = ".franken_whisper";
+const FFMPEG_TOOLS_DIR: &str = "tools/ffmpeg";
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const FFMPEG_BUNDLE_URL: &str =
+    "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const FFMPEG_BUNDLE_EXT: &str = ".tar.xz";
+
 pub fn materialize_input(source: &InputSource, work_dir: &Path) -> FwResult<PathBuf> {
     materialize_input_with_token(source, work_dir, None)
 }
@@ -91,11 +105,11 @@ pub(crate) fn normalize_to_wav_with_timeout(
     token: Option<&crate::orchestrator::CancellationToken>,
 ) -> FwResult<PathBuf> {
     let output = work_dir.join("normalized_16k_mono.wav");
-    if should_use_builtin_normalizer() {
+    if force_builtin_normalizer() {
         tracing::warn!(
             stage = "normalize",
             input = %input.display(),
-            "ffmpeg unavailable or bypassed; using built-in Rust normalizer fallback"
+            "built-in normalizer forced via env; skipping ffmpeg path"
         );
         if let Some(tok) = token {
             tok.checkpoint()?;
@@ -106,6 +120,26 @@ pub(crate) fn normalize_to_wav_with_timeout(
         }
         return Ok(output);
     }
+
+    let ffmpeg_program = match resolve_ffmpeg_program(Some(work_dir)) {
+        Ok(program) => program,
+        Err(error) => {
+            tracing::warn!(
+                stage = "normalize",
+                input = %input.display(),
+                reason = %error,
+                "ffmpeg unavailable; using built-in Rust normalizer fallback"
+            );
+            if let Some(tok) = token {
+                tok.checkpoint()?;
+            }
+            normalize_to_wav_with_builtin_decoder(input, &output)?;
+            if let Some(tok) = token {
+                tok.checkpoint()?;
+            }
+            return Ok(output);
+        }
+    };
 
     let args = vec![
         "-hide_banner".to_owned(),
@@ -123,23 +157,273 @@ pub(crate) fn normalize_to_wav_with_timeout(
         output.display().to_string(),
     ];
     if let Some(tok) = token {
-        run_command_cancellable("ffmpeg", &args, None, tok, Some(timeout))?;
+        run_command_cancellable(&ffmpeg_program, &args, None, tok, Some(timeout))?;
     } else {
-        run_command_with_timeout("ffmpeg", &args, None, Some(timeout))?;
+        run_command_with_timeout(&ffmpeg_program, &args, None, Some(timeout))?;
     }
     Ok(output)
 }
 
-fn should_use_builtin_normalizer() -> bool {
-    let forced = std::env::var("FRANKEN_WHISPER_FORCE_BUILTIN_NORMALIZE")
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        });
-    forced || !crate::process::command_exists("ffmpeg")
+fn force_builtin_normalizer() -> bool {
+    bool_env_enabled_from_raw(
+        std::env::var(FORCE_BUILTIN_NORMALIZE_ENV).ok().as_deref(),
+        false,
+    )
+}
+
+fn auto_provision_ffmpeg_enabled() -> bool {
+    bool_env_enabled_from_raw(
+        std::env::var(AUTO_PROVISION_FFMPEG_ENV).ok().as_deref(),
+        true,
+    )
+}
+
+fn bool_env_enabled_from_raw(raw: Option<&str>, default_value: bool) -> bool {
+    match raw {
+        Some(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            if matches!(normalized.as_str(), "1" | "true" | "yes" | "on") {
+                true
+            } else if matches!(normalized.as_str(), "0" | "false" | "no" | "off") {
+                false
+            } else {
+                default_value
+            }
+        }
+        None => default_value,
+    }
+}
+
+fn resolve_ffmpeg_program(work_dir: Option<&Path>) -> FwResult<String> {
+    resolve_tool_program("ffmpeg", FFMPEG_BIN_ENV, work_dir)
+}
+
+fn resolve_ffprobe_program(work_dir: Option<&Path>) -> FwResult<String> {
+    resolve_tool_program("ffprobe", FFPROBE_BIN_ENV, work_dir)
+}
+
+fn resolve_tool_program(tool: &str, env_var: &str, work_dir: Option<&Path>) -> FwResult<String> {
+    if let Some(explicit) = explicit_tool_path(env_var) {
+        return Ok(explicit.display().to_string());
+    }
+
+    if crate::process::command_exists(tool) {
+        return Ok(tool.to_owned());
+    }
+
+    let provisioned = provisioned_tool_path(tool, work_dir);
+    if provisioned.is_file() {
+        return Ok(provisioned.display().to_string());
+    }
+
+    if auto_provision_ffmpeg_enabled()
+        && let Err(error) = ensure_local_ffmpeg_bundle(work_dir)
+    {
+        tracing::warn!(
+            tool,
+            reason = %error,
+            "ffmpeg auto-provisioning failed; continuing with fallback behavior where possible"
+        );
+    }
+
+    let provisioned = provisioned_tool_path(tool, work_dir);
+    if provisioned.is_file() {
+        return Ok(provisioned.display().to_string());
+    }
+
+    Err(FwError::CommandMissing {
+        command: tool.to_owned(),
+    })
+}
+
+fn explicit_tool_path(env_var: &str) -> Option<PathBuf> {
+    let raw = std::env::var(env_var).ok()?;
+    let path = PathBuf::from(raw);
+    if path.is_file() { Some(path) } else { None }
+}
+
+fn state_root_for_tools(work_dir: Option<&Path>) -> PathBuf {
+    if let Ok(state_root) = std::env::var("FRANKEN_WHISPER_STATE_DIR") {
+        return PathBuf::from(state_root);
+    }
+
+    if let Some(dir) = work_dir
+        && let Some(tmp_dir) = dir.parent()
+        && tmp_dir
+            .file_name()
+            .is_some_and(|name| name == std::ffi::OsStr::new("tmp"))
+        && let Some(state_root) = tmp_dir.parent()
+    {
+        return state_root.to_path_buf();
+    }
+
+    PathBuf::from(DEFAULT_STATE_DIR)
+}
+
+fn ffmpeg_tools_root(work_dir: Option<&Path>) -> PathBuf {
+    state_root_for_tools(work_dir).join(FFMPEG_TOOLS_DIR)
+}
+
+fn provisioned_tool_path(tool: &str, work_dir: Option<&Path>) -> PathBuf {
+    ffmpeg_tools_root(work_dir)
+        .join("bin")
+        .join(platform_tool_name(tool))
+}
+
+fn platform_tool_name(tool: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        format!("{tool}.exe")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        tool.to_owned()
+    }
+}
+
+fn ensure_local_ffmpeg_bundle(work_dir: Option<&Path>) -> FwResult<()> {
+    let ffmpeg_path = provisioned_tool_path("ffmpeg", work_dir);
+    let ffprobe_path = provisioned_tool_path("ffprobe", work_dir);
+    if ffmpeg_path.is_file() && ffprobe_path.is_file() {
+        return Ok(());
+    }
+
+    let (bundle_url, extension) = ffmpeg_bundle_source()?;
+    let tools_root = ffmpeg_tools_root(work_dir);
+    let cache_dir = tools_root.join("cache");
+    let bin_dir = tools_root.join("bin");
+    fs::create_dir_all(&cache_dir)?;
+    fs::create_dir_all(&bin_dir)?;
+
+    let archive_path = cache_dir.join(format!("ffmpeg_bundle{extension}"));
+    if !archive_path.is_file() {
+        download_ffmpeg_bundle(bundle_url, &archive_path)?;
+    }
+
+    let extract_dir = cache_dir.join(format!(
+        "extract_{}_{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::create_dir_all(&extract_dir)?;
+    extract_ffmpeg_bundle(&archive_path, &extract_dir)?;
+
+    let extracted_ffmpeg = find_file_named(&extract_dir, &platform_tool_name("ffmpeg"))
+        .ok_or_else(|| FwError::Unsupported("ffmpeg bundle missing ffmpeg binary".to_owned()))?;
+    let extracted_ffprobe = find_file_named(&extract_dir, &platform_tool_name("ffprobe"))
+        .ok_or_else(|| FwError::Unsupported("ffmpeg bundle missing ffprobe binary".to_owned()))?;
+
+    fs::copy(&extracted_ffmpeg, &ffmpeg_path)?;
+    fs::copy(&extracted_ffprobe, &ffprobe_path)?;
+    mark_executable_if_unix(&ffmpeg_path)?;
+    mark_executable_if_unix(&ffprobe_path)?;
+
+    Ok(())
+}
+
+fn ffmpeg_bundle_source() -> FwResult<(&'static str, &'static str)> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        Ok((FFMPEG_BUNDLE_URL, FFMPEG_BUNDLE_EXT))
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        Err(FwError::Unsupported(
+            "auto-provisioned ffmpeg is currently supported on linux/x86_64 only; set FRANKEN_WHISPER_FFMPEG_BIN and FRANKEN_WHISPER_FFPROBE_BIN explicitly on this platform".to_owned(),
+        ))
+    }
+}
+
+fn download_ffmpeg_bundle(url: &str, destination: &Path) -> FwResult<()> {
+    let dest = destination.display().to_string();
+    if crate::process::command_exists("curl") {
+        let args = vec![
+            "-fsSL".to_owned(),
+            "--retry".to_owned(),
+            "3".to_owned(),
+            "-o".to_owned(),
+            dest,
+            url.to_owned(),
+        ];
+        run_command_with_timeout("curl", &args, None, Some(DOWNLOAD_TIMEOUT))?;
+        return Ok(());
+    }
+
+    if crate::process::command_exists("wget") {
+        let args = vec![
+            "-q".to_owned(),
+            "-O".to_owned(),
+            destination.display().to_string(),
+            url.to_owned(),
+        ];
+        run_command_with_timeout("wget", &args, None, Some(DOWNLOAD_TIMEOUT))?;
+        return Ok(());
+    }
+
+    Err(FwError::CommandMissing {
+        command: "curl or wget".to_owned(),
+    })
+}
+
+fn extract_ffmpeg_bundle(archive_path: &Path, destination: &Path) -> FwResult<()> {
+    let archive = archive_path.display().to_string();
+    let dest = destination.display().to_string();
+    let mut args = vec!["-xf".to_owned(), archive, "-C".to_owned(), dest];
+
+    let archive_name = archive_path.display().to_string();
+    if archive_name.ends_with(".tar.xz") {
+        args[0] = "-xJf".to_owned();
+    } else if archive_name.ends_with(".tar.gz") || archive_name.ends_with(".tgz") {
+        args[0] = "-xzf".to_owned();
+    }
+
+    run_command_with_timeout("tar", &args, None, Some(DOWNLOAD_TIMEOUT))?;
+    Ok(())
+}
+
+fn find_file_named(root: &Path, needle: &str) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == needle)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn mark_executable_if_unix(path: &Path) -> FwResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 fn normalize_to_wav_with_builtin_decoder(input: &Path, output: &Path) -> FwResult<()> {
@@ -336,6 +620,7 @@ pub fn probe_duration_seconds(input: &Path) -> Option<f64> {
 }
 
 pub fn probe_duration_seconds_with_timeout(input: &Path, timeout: Duration) -> Option<f64> {
+    let ffprobe_program = resolve_ffprobe_program(None).ok()?;
     let args = vec![
         "-v".to_owned(),
         "error".to_owned(),
@@ -346,7 +631,7 @@ pub fn probe_duration_seconds_with_timeout(input: &Path, timeout: Duration) -> O
         input.display().to_string(),
     ];
 
-    let output = run_command_with_timeout("ffprobe", &args, None, Some(timeout)).ok()?;
+    let output = run_command_with_timeout(&ffprobe_program, &args, None, Some(timeout)).ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let secs = stdout.trim().parse::<f64>().ok()?;
     if !secs.is_finite() || secs < 0.0 {
@@ -364,6 +649,11 @@ fn capture_microphone(
     work_dir: &Path,
 ) -> FwResult<PathBuf> {
     let output = work_dir.join("microphone_capture.wav");
+    let ffmpeg_program = resolve_ffmpeg_program(Some(work_dir)).map_err(|error| {
+        FwError::Unsupported(format!(
+            "microphone capture requires ffmpeg (auto-provision attempted): {error}"
+        ))
+    })?;
 
     let (format, source) = microphone_defaults(device, ffmpeg_format, ffmpeg_source)?;
     let args = vec![
@@ -386,7 +676,7 @@ fn capture_microphone(
         output.display().to_string(),
     ];
 
-    run_command_with_timeout("ffmpeg", &args, None, Some(timeout))?;
+    run_command_with_timeout(&ffmpeg_program, &args, None, Some(timeout))?;
     Ok(output)
 }
 
@@ -479,6 +769,20 @@ mod tests {
             .expect_err("partial explicit args should fail");
         let text = err.to_string();
         assert!(text.contains("must be provided together"));
+    }
+
+    #[test]
+    fn bool_env_enabled_from_raw_honors_true_false_and_default() {
+        use super::bool_env_enabled_from_raw;
+
+        assert!(bool_env_enabled_from_raw(Some("true"), false));
+        assert!(bool_env_enabled_from_raw(Some("1"), false));
+        assert!(!bool_env_enabled_from_raw(Some("false"), true));
+        assert!(!bool_env_enabled_from_raw(Some("off"), true));
+        assert!(bool_env_enabled_from_raw(Some("unexpected"), true));
+        assert!(!bool_env_enabled_from_raw(Some("unexpected"), false));
+        assert!(bool_env_enabled_from_raw(None, true));
+        assert!(!bool_env_enabled_from_raw(None, false));
     }
 
     #[test]

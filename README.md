@@ -141,7 +141,7 @@ The release profile is optimized for size (`opt-level = "z"`, LTO, single codege
 ### Prerequisites
 
 - **Rust nightly** (2024 edition)
-- **ffmpeg** (recommended), used for maximum-format normalization and microphone capture; when unavailable, file-based normalization falls back to a built-in Rust decoder/resampler for common audio formats
+- **ffmpeg** (optional but recommended), used for maximum-format normalization and microphone capture; when missing, franken_whisper first attempts automatic local provisioning (linux/x86_64) and otherwise falls back to a built-in Rust decoder/resampler for file-based normalization
 - **Backend binaries** (at least one):
   - `whisper-cli` (from whisper.cpp); override: `FRANKEN_WHISPER_WHISPER_CPP_BIN`
   - `insanely-fast-whisper` (Python); override: `FRANKEN_WHISPER_INSANELY_FAST_BIN`
@@ -439,7 +439,12 @@ Provides runs list, timeline view, and event detail panes powered by `frankentui
 | `FRANKEN_WHISPER_DIARIZATION_DEVICE` | -- | GPU device for diarization backend |
 | `FRANKEN_WHISPER_STATE_DIR` | `.franken_whisper` | State directory root |
 | `FRANKEN_WHISPER_DB` | `.franken_whisper/storage.sqlite3` | SQLite database path |
+| `FRANKEN_WHISPER_FFMPEG_BIN` | auto | Explicit ffmpeg binary path override |
+| `FRANKEN_WHISPER_FFPROBE_BIN` | auto | Explicit ffprobe binary path override |
+| `FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG` | `1` | Auto-provision local ffmpeg/ffprobe bundle when system binaries are missing (`0`/`false` disables) |
+| `FRANKEN_WHISPER_FORCE_BUILTIN_NORMALIZE` | `0` | Force file normalization through built-in Rust decoder/resampler even if ffmpeg exists |
 | `FRANKEN_WHISPER_NATIVE_EXECUTION` | `0` | Enable native in-process engine dispatch (`1`/`true`) |
+| `FRANKEN_WHISPER_BRIDGE_NATIVE_RECOVERY` | `1` | In bridge-only mode, allow recoverable bridge failures to fall back to native engines (`0`/`false` disables) |
 | `FRANKEN_WHISPER_NATIVE_ROLLOUT_STAGE` | `primary` | Native engine rollout stage |
 | `RUST_LOG` | -- | tracing filter (e.g. `franken_whisper=debug`) |
 
@@ -722,7 +727,7 @@ ffmpeg -hide_banner -loglevel error -y \
   <output_normalized_16k_mono.wav>
 ```
 
-This produces a standardized 16 kHz, mono, 16-bit PCM WAV regardless of input format. When ffmpeg is unavailable, franken_whisper falls back to a built-in Rust normalizer for common audio file formats (for example MP3/WAV/AAC-in-MP4); mic capture still requires ffmpeg.
+This produces a standardized 16 kHz, mono, 16-bit PCM WAV regardless of input format. When ffmpeg is unavailable, franken_whisper attempts automatic local provisioning (linux/x86_64) and then falls back to a built-in Rust normalizer for common audio file formats (for example MP3/WAV/AAC-in-MP4). Microphone capture still requires ffmpeg, but the same auto-provisioning path is used before failing.
 
 The normalize stage handles:
 
@@ -983,7 +988,7 @@ For in-place strict replacement flows, use `--conflict-policy overwrite-strict`.
 ## Limitations
 
 - **Backend binaries required.** franken_whisper orchestrates external ASR engines; it does not include inference runtimes. You need whisper.cpp, insanely-fast-whisper, or whisper-diarization installed.
-- **ffmpeg strongly recommended.** ffmpeg enables the broadest media/container support and is required for microphone capture. A built-in Rust fallback can normalize common file-based audio formats when ffmpeg is unavailable.
+- **ffmpeg support has staged fallback behavior.** franken_whisper first tries explicit/system binaries, then auto-provisions local ffmpeg/ffprobe (linux/x86_64), and finally uses a built-in Rust normalizer for common file-based formats when ffmpeg is still unavailable. Microphone capture still depends on ffmpeg availability.
 - **Path dependencies.** The project depends on sibling Cargo workspace members (`asupersync`, `frankensqlite`, etc.) via relative paths. It is not published to crates.io as a standalone crate.
 - **Native engines are pilots.** Native Rust engine implementations are deterministic conformance pilots. They can execute in-process when `FRANKEN_WHISPER_NATIVE_EXECUTION=1` and rollout stage is `primary|sole`; otherwise bridge adapters remain active.
 - **No bidirectional sync.** JSONL export/import is one-way. There is no merge or conflict resolution beyond the explicit `--conflict-policy` flag.
