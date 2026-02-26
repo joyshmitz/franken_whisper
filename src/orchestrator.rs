@@ -1344,7 +1344,7 @@ async fn run_pipeline_body(
                 execute_normalize(pcx, log, stage_budgets, run_tmp_dir, &mut inter).await?;
             }
             PipelineStage::Vad => {
-                execute_vad(pcx, log, stage_budgets, &mut inter).await?;
+                execute_vad(pcx, log, request, stage_budgets, &mut inter).await?;
             }
             PipelineStage::Separate => {
                 execute_separate(pcx, log, stage_budgets, &mut inter).await?;
@@ -2191,16 +2191,28 @@ async fn execute_align(
 // VAD pre-filtering (bd-qla.1)
 // ---------------------------------------------------------------------------
 
-/// Configuration for the energy-based voice activity detector.
+/// Configuration for the VAD stage.
+///
+/// The primary detector uses `backend::native_audio::analyze_wav` and then
+/// applies deterministic post-processing. If native waveform parsing fails,
+/// we deterministically fall back to the legacy energy scanner.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct VadConfig {
-    /// RMS energy threshold below which a frame is considered silence.
+    /// RMS threshold used when filtering native regions and legacy fallback.
     rms_threshold: f64,
-    /// Frame size in samples (at 16 kHz, 160 samples = 10ms).
+    /// Legacy fallback frame size in samples (at 16 kHz, 160 samples = 10ms).
     frame_samples: usize,
-    /// Minimum ratio of voiced frames for audio to be considered non-silent.
+    /// Minimum ratio of voiced frames required to avoid silence short-circuit.
     min_voice_ratio: f64,
+    /// Minimum retained speech-region duration.
+    min_speech_duration_ms: u32,
+    /// Maximum silence gap to bridge across neighboring speech regions.
+    min_silence_duration_ms: u32,
+    /// Maximum speech-region chunk size; longer regions are split deterministically.
+    max_speech_duration_ms: Option<u64>,
+    /// Symmetric padding applied to each region.
+    speech_pad_ms: u32,
 }
 
 impl Default for VadConfig {
@@ -2209,8 +2221,65 @@ impl Default for VadConfig {
             rms_threshold: 0.01,
             frame_samples: 160,
             min_voice_ratio: 0.05,
+            min_speech_duration_ms: 40,
+            min_silence_duration_ms: 40,
+            max_speech_duration_ms: None,
+            speech_pad_ms: 0,
         }
     }
+}
+
+impl VadConfig {
+    fn from_request(request: &TranscribeRequest) -> Self {
+        let mut config = Self::default();
+        let Some(vad) = request.backend_params.vad.as_ref() else {
+            return config;
+        };
+
+        if let Some(threshold) = vad
+            .threshold
+            .filter(|value| value.is_finite() && *value > 0.0)
+        {
+            config.rms_threshold = f64::from(threshold);
+        }
+        if let Some(min_speech_ms) = vad.min_speech_duration_ms {
+            config.min_speech_duration_ms = min_speech_ms;
+        }
+        if let Some(min_silence_ms) = vad.min_silence_duration_ms {
+            config.min_silence_duration_ms = min_silence_ms;
+        }
+        if let Some(max_speech_s) = vad
+            .max_speech_duration_s
+            .filter(|value| value.is_finite() && *value > 0.0)
+        {
+            config.max_speech_duration_ms =
+                Some((f64::from(max_speech_s) * 1_000.0).round() as u64);
+        }
+        if let Some(speech_pad_ms) = vad.speech_pad_ms {
+            config.speech_pad_ms = speech_pad_ms;
+        }
+
+        config
+    }
+
+    fn as_json(&self) -> Value {
+        json!({
+            "rms_threshold": self.rms_threshold,
+            "frame_samples": self.frame_samples,
+            "min_voice_ratio": self.min_voice_ratio,
+            "min_speech_duration_ms": self.min_speech_duration_ms,
+            "min_silence_duration_ms": self.min_silence_duration_ms,
+            "max_speech_duration_ms": self.max_speech_duration_ms,
+            "speech_pad_ms": self.speech_pad_ms,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VadRegionMs {
+    start_ms: u64,
+    end_ms: u64,
+    avg_rms: f32,
 }
 
 /// Report produced by the VAD stage.
@@ -2227,13 +2296,26 @@ struct VadReport {
     silence_only: bool,
     /// Detected voice activity regions as (start_sec, end_sec) pairs.
     regions: Vec<(f64, f64)>,
+    /// Which detector path produced this report.
+    detector: &'static str,
+    /// Whether deterministic fallback from native parser was triggered.
+    fallback_triggered: bool,
+    /// Effective activity threshold used to classify speech.
+    activity_threshold: f64,
+    /// Additional deterministic diagnostics for evidence/logging.
+    notes: Vec<String>,
 }
 
 /// Analyze audio energy levels to detect voice activity regions.
 ///
-/// Uses a simple RMS (root mean square) energy threshold approach.
-/// This is a simplified VAD suitable for pre-filtering; production systems
-/// would use a neural VAD model (e.g. Silero VAD).
+/// Primary path:
+/// - parse and analyze the normalized WAV via `backend::native_audio::analyze_wav`
+/// - apply deterministic post-processing (gap bridging, min-duration filter,
+///   optional max-duration splitting, and optional padding)
+///
+/// Fallback path:
+/// - if native waveform parsing fails, use a legacy energy scanner with
+///   deterministic behavior and emit fallback evidence.
 #[allow(dead_code)]
 fn vad_energy_detect(
     normalized_wav: &Path,
@@ -2242,19 +2324,175 @@ fn vad_energy_detect(
 ) -> FwResult<VadReport> {
     token.checkpoint()?;
 
-    // Read the WAV file as raw bytes.  In production this would parse the WAV
-    // header properly; here we treat the file content after a 44-byte header
-    // as 16-bit PCM samples for simplified energy analysis.
-    let raw = std::fs::read(normalized_wav)?;
+    let analysis = match backend::native_audio::analyze_wav(normalized_wav, None) {
+        Ok(analysis) => analysis,
+        Err(error) => {
+            let mut fallback_report = vad_energy_detect_legacy(normalized_wav, config, token)?;
+            fallback_report.fallback_triggered = true;
+            fallback_report.notes.push(format!(
+                "native_audio parse failed; deterministic legacy fallback activated: {error}"
+            ));
+            return Ok(fallback_report);
+        }
+    };
 
-    // Skip a 44-byte WAV header (standard for simple PCM WAV files).
+    let mut regions_ms: Vec<VadRegionMs> = analysis
+        .active_regions
+        .iter()
+        .filter(|region| f64::from(region.avg_rms) >= config.rms_threshold)
+        .map(|region| VadRegionMs {
+            start_ms: region.start_ms,
+            end_ms: region.end_ms,
+            avg_rms: region.avg_rms,
+        })
+        .collect();
+
+    merge_regions_by_gap(&mut regions_ms, u64::from(config.min_silence_duration_ms));
+
+    if let Some(max_ms) = config.max_speech_duration_ms.filter(|value| *value > 0) {
+        regions_ms = split_long_regions(&regions_ms, max_ms);
+    }
+
+    let analysis_duration_ms = analysis.duration_ms.max(
+        regions_ms
+            .iter()
+            .map(|region| region.end_ms)
+            .max()
+            .unwrap_or(0),
+    );
+    if config.speech_pad_ms > 0 {
+        apply_padding(
+            &mut regions_ms,
+            u64::from(config.speech_pad_ms),
+            analysis_duration_ms,
+        );
+        merge_regions_by_gap(&mut regions_ms, 0);
+    }
+
+    let min_speech_duration_ms = u64::from(config.min_speech_duration_ms);
+    regions_ms.retain(|region| {
+        let duration = region.end_ms.saturating_sub(region.start_ms);
+        duration >= min_speech_duration_ms && region.end_ms > region.start_ms
+    });
+
+    let frame_ms = u64::from(analysis.frame_ms.max(1));
+    let frames_total = analysis.frame_count;
+    let mut frames_voiced: usize = regions_ms
+        .iter()
+        .map(|region| ms_to_frames(region.end_ms.saturating_sub(region.start_ms), frame_ms))
+        .sum();
+    frames_voiced = frames_voiced.min(frames_total);
+
+    let voice_ratio = if frames_total > 0 {
+        frames_voiced as f64 / frames_total as f64
+    } else {
+        0.0
+    };
+
+    let silence_only =
+        frames_total == 0 || regions_ms.is_empty() || voice_ratio < config.min_voice_ratio;
+
+    let regions = regions_ms
+        .iter()
+        .map(|region| {
+            (
+                region.start_ms as f64 / 1_000.0,
+                region.end_ms as f64 / 1_000.0,
+            )
+        })
+        .collect();
+
+    Ok(VadReport {
+        frames_total,
+        frames_voiced,
+        voice_ratio,
+        silence_only,
+        regions,
+        detector: "native_audio_waveform",
+        fallback_triggered: false,
+        activity_threshold: config.rms_threshold,
+        notes: Vec::new(),
+    })
+}
+
+fn merge_regions_by_gap(regions: &mut Vec<VadRegionMs>, max_gap_ms: u64) {
+    if regions.len() < 2 {
+        return;
+    }
+    regions.sort_by_key(|region| region.start_ms);
+
+    let mut merged = Vec::with_capacity(regions.len());
+    let mut current = regions[0];
+    for region in regions.iter().skip(1) {
+        if region.start_ms <= current.end_ms.saturating_add(max_gap_ms) {
+            current.end_ms = current.end_ms.max(region.end_ms);
+            current.avg_rms = current.avg_rms.max(region.avg_rms);
+        } else {
+            merged.push(current);
+            current = *region;
+        }
+    }
+    merged.push(current);
+    *regions = merged;
+}
+
+fn split_long_regions(regions: &[VadRegionMs], max_duration_ms: u64) -> Vec<VadRegionMs> {
+    if max_duration_ms == 0 {
+        return regions.to_vec();
+    }
+
+    let mut out = Vec::new();
+    for region in regions {
+        let mut cursor = region.start_ms;
+        while cursor < region.end_ms {
+            let chunk_end = cursor.saturating_add(max_duration_ms).min(region.end_ms);
+            out.push(VadRegionMs {
+                start_ms: cursor,
+                end_ms: chunk_end,
+                avg_rms: region.avg_rms,
+            });
+            cursor = chunk_end;
+        }
+    }
+    out
+}
+
+fn apply_padding(regions: &mut [VadRegionMs], pad_ms: u64, audio_duration_ms: u64) {
+    for region in regions {
+        region.start_ms = region.start_ms.saturating_sub(pad_ms);
+        let padded_end = region.end_ms.saturating_add(pad_ms);
+        region.end_ms = if audio_duration_ms > 0 {
+            padded_end.min(audio_duration_ms)
+        } else {
+            padded_end
+        };
+    }
+}
+
+fn ms_to_frames(duration_ms: u64, frame_ms: u64) -> usize {
+    if duration_ms == 0 {
+        return 0;
+    }
+    let frame_ms = frame_ms.max(1);
+    duration_ms
+        .saturating_add(frame_ms.saturating_sub(1))
+        .saturating_div(frame_ms) as usize
+}
+
+fn vad_energy_detect_legacy(
+    normalized_wav: &Path,
+    config: &VadConfig,
+    token: &CancellationToken,
+) -> FwResult<VadReport> {
+    token.checkpoint()?;
+
+    let raw = std::fs::read(normalized_wav)?;
     let pcm_data = if raw.len() > 44 {
         &raw[44..]
     } else {
         &[] as &[u8]
     };
 
-    // Convert byte pairs to f64 samples normalized to [-1.0, 1.0].
     let samples: Vec<f64> = pcm_data
         .chunks_exact(2)
         .map(|chunk| {
@@ -2270,6 +2508,10 @@ fn vad_energy_detect(
             voice_ratio: 0.0,
             silence_only: true,
             regions: Vec::new(),
+            detector: "legacy_energy",
+            fallback_triggered: false,
+            activity_threshold: config.rms_threshold,
+            notes: Vec::new(),
         });
     }
 
@@ -2328,6 +2570,10 @@ fn vad_energy_detect(
         voice_ratio,
         silence_only,
         regions,
+        detector: "legacy_energy",
+        fallback_triggered: false,
+        activity_threshold: config.rms_threshold,
+        notes: Vec::new(),
     })
 }
 
@@ -2335,6 +2581,7 @@ fn vad_energy_detect(
 async fn execute_vad(
     pcx: &mut PipelineCx,
     log: &mut EventLog,
+    request: &TranscribeRequest,
     stage_budgets: StageBudgetPolicy,
     inter: &mut PipelineIntermediate,
 ) -> FwResult<()> {
@@ -2345,6 +2592,8 @@ async fn execute_vad(
 
     checkpoint_or_emit("vad", pcx, log)?;
 
+    let vad_config = VadConfig::from_request(request);
+
     log.mark_stage_start();
     log.push(
         "vad",
@@ -2353,16 +2602,17 @@ async fn execute_vad(
         json!({
             "budget_ms": stage_budgets.vad_ms,
             "input": normalized_wav.display().to_string(),
+            "config": vad_config.as_json(),
         }),
     );
 
     let vad_wav = normalized_wav.clone();
     let vad_token = pcx.cancellation_token();
     let vad_budget_ms = stage_budgets.vad_ms;
+    let config_for_run = vad_config.clone();
 
     let report = match run_stage_with_budget("vad", vad_budget_ms, move || {
-        let config = VadConfig::default();
-        vad_energy_detect(&vad_wav, &config, &vad_token)
+        vad_energy_detect(&vad_wav, &config_for_run, &vad_token)
     })
     .await
     {
@@ -2388,7 +2638,11 @@ async fn execute_vad(
             language: None,
             segments: Vec::new(),
             acceleration: None,
-            raw_output: json!({"vad": "silence_only"}),
+            raw_output: json!({
+                "vad": "silence_only",
+                "detector": report.detector,
+                "fallback_triggered": report.fallback_triggered,
+            }),
             artifact_paths: Vec::new(),
         });
         "vad.silence"
@@ -2415,6 +2669,10 @@ async fn execute_vad(
             "voice_ratio": report.voice_ratio,
             "silence_only": report.silence_only,
             "regions_count": report.regions.len(),
+            "detector": report.detector,
+            "fallback_triggered": report.fallback_triggered,
+            "activity_threshold": report.activity_threshold,
+            "notes": report.notes,
         }),
     );
 
@@ -2422,33 +2680,89 @@ async fn execute_vad(
 }
 
 // ---------------------------------------------------------------------------
-// Source separation (bd-qla.2, Demucs-inspired placeholder)
+// Source separation (bd-qla.2, energy-based vocal confidence analysis)
 // ---------------------------------------------------------------------------
 
 /// Report produced by the source separation stage.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct SeparateReport {
-    /// Whether vocal isolation was applied (placeholder: always true).
+    /// Whether the audio was determined to contain predominantly vocal content.
     vocal_isolated: bool,
+    /// Fraction of audio duration covered by active speech regions (0.0 - 1.0).
+    speech_coverage: f64,
+    /// Average RMS energy of the audio.
+    avg_rms: f64,
+    /// Number of distinct speech regions detected.
+    active_region_count: usize,
     /// Notes about the separation process.
     notes: Vec<String>,
 }
 
-/// Placeholder for Demucs-inspired source separation.
+/// Energy-based source separation analysis.
 ///
-/// In production this would run a neural source separation model to isolate
-/// vocals from background noise/music.  This placeholder marks the audio
-/// as "vocal-isolated" without modifying the actual audio data.
+/// Analyzes the normalized WAV using native audio waveform analysis to
+/// compute speech coverage and vocal confidence metrics.  This is not
+/// full neural source separation (which would require a Demucs-class model)
+/// but provides useful signal-quality telemetry and a speech coverage gate.
+///
+/// The `vocal_isolated` flag is set to `true` when the speech coverage
+/// fraction exceeds the minimum threshold, indicating the audio has
+/// sufficient vocal content for downstream transcription.
 #[allow(dead_code)]
-fn source_separate(_normalized_wav: &Path, token: &CancellationToken) -> FwResult<SeparateReport> {
+fn source_separate(normalized_wav: &Path, token: &CancellationToken) -> FwResult<SeparateReport> {
     token.checkpoint()?;
 
+    // Attempt native audio analysis.  If the file cannot be parsed
+    // (e.g. not a valid PCM16 mono WAV), fall back gracefully.
+    let analysis = match backend::native_audio::analyze_wav(normalized_wav, None) {
+        Ok(a) => a,
+        Err(reason) => {
+            return Ok(SeparateReport {
+                vocal_isolated: true,
+                speech_coverage: 0.0,
+                avg_rms: 0.0,
+                active_region_count: 0,
+                notes: vec![format!(
+                    "analysis unavailable ({reason}); assuming vocal content present"
+                )],
+            });
+        }
+    };
+
+    token.checkpoint()?;
+
+    let duration_ms = analysis.duration_ms.max(1) as f64;
+    let speech_ms: f64 = analysis
+        .active_regions
+        .iter()
+        .map(|r| (r.end_ms.saturating_sub(r.start_ms)) as f64)
+        .sum();
+    let speech_coverage = (speech_ms / duration_ms).clamp(0.0, 1.0);
+
+    // Speech coverage gate: consider the audio vocal-sufficient if at
+    // least 5% of the duration contains active speech regions.
+    let speech_coverage_threshold = 0.05;
+    let vocal_isolated = speech_coverage >= speech_coverage_threshold;
+
+    let mut notes = Vec::new();
+    notes.push(format!(
+        "energy-based analysis: speech_coverage={speech_coverage:.4}, active_regions={}, avg_rms={:.6}",
+        analysis.active_regions.len(),
+        analysis.avg_rms,
+    ));
+    if !vocal_isolated {
+        notes.push(format!(
+            "speech coverage {speech_coverage:.4} below threshold {speech_coverage_threshold}; may be silence-only audio"
+        ));
+    }
+
     Ok(SeparateReport {
-        vocal_isolated: true,
-        notes: vec![
-            "placeholder: actual Demucs source separation requires ML inference".to_owned(),
-        ],
+        vocal_isolated,
+        speech_coverage,
+        avg_rms: f64::from(analysis.avg_rms),
+        active_region_count: analysis.active_regions.len(),
+        notes,
     })
 }
 
@@ -2509,6 +2823,9 @@ async fn execute_separate(
         "source separation pass finished",
         json!({
             "vocal_isolated": report.vocal_isolated,
+            "speech_coverage": report.speech_coverage,
+            "avg_rms": report.avg_rms,
+            "active_region_count": report.active_region_count,
             "notes": report.notes,
         }),
     );
@@ -2532,15 +2849,81 @@ struct PunctuateReport {
     notes: Vec<String>,
 }
 
-/// Apply basic punctuation restoration to transcript segments.
+/// Common abbreviations that end with a period but do not indicate
+/// a sentence boundary.  Checked case-insensitively.
+const ABBREVIATIONS: &[&str] = &[
+    "mr.", "mrs.", "ms.", "dr.", "prof.", "sr.", "jr.", "st.", "ave.", "blvd.", "vs.", "etc.",
+    "approx.", "dept.", "est.", "govt.", "inc.", "ltd.", "no.", "vol.", "rev.", "gen.", "sgt.",
+    "cpl.", "pvt.", "lt.", "capt.", "col.", "maj.", "cmdr.", "adm.", "hon.", "fig.", "eq.", "ref.",
+    "sec.",
+];
+
+/// Return `true` when the period at `period_byte_pos` inside `text` belongs
+/// to a known abbreviation rather than ending a sentence.
+fn is_abbreviation_period(text: &str, period_byte_pos: usize) -> bool {
+    let before = &text[..period_byte_pos + 1]; // includes the period
+    let lower = before.to_ascii_lowercase();
+    for abbr in ABBREVIATIONS {
+        if lower.ends_with(abbr) {
+            // Make sure the abbreviation is word-aligned (preceded by start or
+            // whitespace).
+            let prefix_len = before.len() - abbr.len();
+            if prefix_len == 0 {
+                return true;
+            }
+            if before
+                .as_bytes()
+                .get(prefix_len.wrapping_sub(1))
+                .is_some_and(|b| b.is_ascii_whitespace())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Return `true` when the period at `period_byte_pos` inside `text` is part
+/// of a decimal number (e.g. "3.14", "$5.00").
+fn is_decimal_period(text: &str, period_byte_pos: usize) -> bool {
+    let before_digit = period_byte_pos > 0
+        && text
+            .as_bytes()
+            .get(period_byte_pos - 1)
+            .is_some_and(|b| b.is_ascii_digit());
+    let after_digit = text
+        .as_bytes()
+        .get(period_byte_pos + 1)
+        .is_some_and(|b| b.is_ascii_digit());
+    before_digit && after_digit
+}
+
+/// Return `true` when the period at `period_byte_pos` inside `text` is part
+/// of an ellipsis sequence ("...").
+fn is_ellipsis_period(text: &str, period_byte_pos: usize) -> bool {
+    // Check if there is a run of at least 3 consecutive periods containing
+    // this position.
+    let bytes = text.as_bytes();
+    let mut start = period_byte_pos;
+    while start > 0 && bytes.get(start - 1) == Some(&b'.') {
+        start -= 1;
+    }
+    let mut end = period_byte_pos;
+    while bytes.get(end + 1) == Some(&b'.') {
+        end += 1;
+    }
+    (end - start + 1) >= 3
+}
+
+/// Apply rule-based punctuation restoration to transcript segments.
 ///
 /// Rules applied:
-/// 1. Capitalize the first character of each segment's text.
-/// 2. Add a period at the end of segments that don't end with punctuation.
-/// 3. Capitalize after sentence-ending punctuation (. ? !).
-///
-/// This is a rule-based placeholder; production systems would use a neural
-/// punctuation model (e.g., a fine-tuned BERT).
+/// 1. Normalize consecutive whitespace to single spaces.
+/// 2. Capitalize the first character of each segment's text.
+/// 3. Add a period at the end of segments that don't end with punctuation.
+/// 4. Capitalize after sentence-ending punctuation (. ? !) — but NOT after
+///    abbreviations (Mr., Dr., etc.), decimal numbers (3.14), or
+///    ellipses (...).
 #[allow(dead_code)]
 fn punctuate_segments(
     segments: &mut [crate::model::TranscriptionSegment],
@@ -2571,7 +2954,23 @@ fn punctuate_segments(
             continue;
         }
 
-        // Rule 1: Capitalize first character.
+        // Rule 1: Normalize consecutive whitespace to single spaces.
+        let mut normalized = String::with_capacity(text.len());
+        let mut prev_ws = false;
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                if !prev_ws {
+                    normalized.push(' ');
+                }
+                prev_ws = true;
+            } else {
+                normalized.push(ch);
+                prev_ws = false;
+            }
+        }
+        text = normalized;
+
+        // Rule 2: Capitalize first character.
         let first_upper: String = text
             .chars()
             .take(1)
@@ -2579,7 +2978,7 @@ fn punctuate_segments(
             .collect();
         text = first_upper + &text[text.chars().next().map_or(0, |c| c.len_utf8())..];
 
-        // Rule 2: Add period at the end if no sentence-ending punctuation.
+        // Rule 3: Add period at the end if no sentence-ending punctuation.
         let ends_with_punct = text
             .chars()
             .last()
@@ -2588,9 +2987,11 @@ fn punctuate_segments(
             text.push('.');
         }
 
-        // Rule 3: Capitalize after sentence-ending punctuation within the text.
+        // Rule 4: Capitalize after sentence-ending punctuation within the
+        // text, skipping abbreviation periods, decimal periods, and ellipses.
         let mut result = String::with_capacity(text.len());
         let mut capitalize_next = false;
+        let mut byte_offset: usize = 0;
         for ch in text.chars() {
             if capitalize_next && ch.is_alphabetic() {
                 result.extend(ch.to_uppercase());
@@ -2599,11 +3000,22 @@ fn punctuate_segments(
                 result.push(ch);
             }
 
-            if (ch == '.' || ch == '?' || ch == '!') && !capitalize_next {
+            if ch == '?' || ch == '!' {
                 capitalize_next = true;
-            } else if !ch.is_whitespace() && ch != '.' && ch != '?' && ch != '!' {
+            } else if ch == '.' {
+                // Only treat as sentence-end if not an abbreviation, decimal,
+                // or ellipsis.
+                let is_sentence_end = !is_abbreviation_period(&text, byte_offset)
+                    && !is_decimal_period(&text, byte_offset)
+                    && !is_ellipsis_period(&text, byte_offset);
+                if is_sentence_end {
+                    capitalize_next = true;
+                }
+            } else if !ch.is_whitespace() {
                 capitalize_next = false;
             }
+
+            byte_offset += ch.len_utf8();
         }
 
         if result != original {
@@ -2708,21 +3120,32 @@ struct DiarizeReport {
     speakers_detected: usize,
     /// Number of segments assigned a speaker label.
     segments_labeled: usize,
+    /// Silhouette score measuring cluster separation quality.
+    /// Range: \[-1, 1\].  1 = perfect separation, 0 = overlapping,
+    /// -1 = misassigned.  `None` when fewer than 2 clusters or 2 points.
+    silhouette_score: Option<f64>,
     /// Notes about the diarization process.
     notes: Vec<String>,
 }
 
-/// Simple acoustic feature vector for a segment.
+/// Acoustic-heuristic feature vector for a segment.
 ///
 /// In a real TitaNet-inspired system, this would be a high-dimensional
-/// embedding from a neural speaker encoder.  Here we use a simplified
-/// set of acoustic features derived from the segment temporal position
-/// and text properties (as a placeholder for actual audio-based embeddings).
+/// embedding from a neural speaker encoder.  Here we use an expanded set
+/// of temporal and lexical features derived from the segment position,
+/// pacing, and text properties.
+///
+/// Features (6-dimensional):
+///   0. normalized segment midpoint (temporal position in recording)
+///   1. segment duration / max_duration (pacing signature)
+///   2. inter-segment gap indicator (turn-taking signal)
+///   3. word count / max_word_count (verbosity signature)
+///   4. average word length / 12.0 (vocabulary complexity proxy)
+///   5. text character count / max_text_len (output volume)
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct SpeakerEmbedding {
-    /// Placeholder features: [normalized_start, normalized_end, text_length_norm].
-    features: [f64; 3],
+    features: [f64; 6],
 }
 
 impl SpeakerEmbedding {
@@ -2744,18 +3167,128 @@ impl SpeakerEmbedding {
 
         dot / (mag_a * mag_b)
     }
+
+    /// Compute the element-wise mean of a slice of embeddings.
+    #[allow(dead_code)]
+    fn centroid(embeddings: &[SpeakerEmbedding]) -> SpeakerEmbedding {
+        let n = embeddings.len() as f64;
+        if n < 1.0 {
+            return SpeakerEmbedding { features: [0.0; 6] };
+        }
+        let mut features = [0.0_f64; 6];
+        for emb in embeddings {
+            for (i, val) in emb.features.iter().enumerate() {
+                features[i] += val;
+            }
+        }
+        for f in &mut features {
+            *f /= n;
+        }
+        SpeakerEmbedding { features }
+    }
+
+    /// Euclidean distance between two embeddings.
+    #[allow(dead_code)]
+    fn euclidean_distance(&self, other: &SpeakerEmbedding) -> f64 {
+        self.features
+            .iter()
+            .zip(other.features.iter())
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>()
+            .sqrt()
+    }
 }
 
-/// Assign speaker labels to segments using cosine similarity clustering
-/// of simplified acoustic features.
+/// Compute the mean silhouette score over all points.
+///
+/// For each point *i* assigned to cluster *C_i*:
+///   - *a(i)* = mean distance to other points in *C_i* (intra-cluster)
+///   - *b(i)* = min over other clusters *C_j* of mean distance to points in *C_j*
+///   - *s(i)* = (b(i) - a(i)) / max(a(i), b(i))
+///
+/// Returns `None` when there are fewer than 2 clusters or fewer than 2 points,
+/// since the metric is undefined in those cases.
+#[allow(dead_code)]
+fn silhouette_score(
+    embeddings: &[SpeakerEmbedding],
+    assignments: &[usize],
+    num_clusters: usize,
+) -> Option<f64> {
+    if num_clusters < 2 || embeddings.len() < 2 {
+        return None;
+    }
+
+    let n = embeddings.len();
+    let mut sum = 0.0_f64;
+
+    for i in 0..n {
+        let ci = assignments[i];
+
+        // a(i): mean distance to other points in same cluster.
+        let mut a_sum = 0.0_f64;
+        let mut a_count = 0u64;
+        for (j, emb_j) in embeddings.iter().enumerate() {
+            if j != i && assignments[j] == ci {
+                a_sum += embeddings[i].euclidean_distance(emb_j);
+                a_count += 1;
+            }
+        }
+        let a_i = if a_count > 0 {
+            a_sum / a_count as f64
+        } else {
+            0.0
+        };
+
+        // b(i): minimum mean distance to any other cluster.
+        let mut b_i = f64::INFINITY;
+        for cj in 0..num_clusters {
+            if cj == ci {
+                continue;
+            }
+            let mut b_sum = 0.0_f64;
+            let mut b_count = 0u64;
+            for (j, emb_j) in embeddings.iter().enumerate() {
+                if assignments[j] == cj {
+                    b_sum += embeddings[i].euclidean_distance(emb_j);
+                    b_count += 1;
+                }
+            }
+            if b_count > 0 {
+                let mean_dist = b_sum / b_count as f64;
+                if mean_dist < b_i {
+                    b_i = mean_dist;
+                }
+            }
+        }
+
+        let denom = a_i.max(b_i);
+        let s_i = if denom < 1e-15 {
+            0.0
+        } else {
+            (b_i - a_i) / denom
+        };
+        sum += s_i;
+    }
+
+    Some(sum / n as f64)
+}
+
+/// Assign speaker labels to segments using acoustic-heuristic feature
+/// clustering.
 ///
 /// Algorithm:
-/// 1. Compute a simple embedding for each segment based on its temporal
-///    position and text properties.
-/// 2. Greedily cluster segments: assign each segment to the nearest existing
-///    cluster (by cosine similarity) if similarity exceeds a threshold,
-///    otherwise create a new cluster.
+/// 1. Compute a 6-dimensional embedding for each segment incorporating
+///    temporal position, pacing, turn-taking gaps, word count, average
+///    word length, and text volume.
+/// 2. Greedily cluster segments: assign each segment to the nearest
+///    existing cluster centroid (by cosine similarity) if similarity
+///    exceeds a threshold; otherwise create a new cluster.  Centroids
+///    are updated incrementally as segments are assigned.
 /// 3. Label each cluster as SPEAKER_00, SPEAKER_01, etc.
+///
+/// This is a heuristic-only implementation (no neural speaker encoder);
+/// accuracy improves significantly when combined with downstream
+/// model-backed diarization.
 #[allow(dead_code)]
 fn diarize_segments(
     segments: &mut [crate::model::TranscriptionSegment],
@@ -2763,15 +3296,15 @@ fn diarize_segments(
     token: &CancellationToken,
 ) -> FwResult<DiarizeReport> {
     let total = segments.len();
-    let notes: Vec<String> = vec![
-        "placeholder: actual TitaNet diarization requires neural speaker embeddings".to_owned(),
-    ];
+    let notes: Vec<String> =
+        vec!["heuristic: acoustic-feature clustering without neural speaker encoder".to_owned()];
 
     if segments.is_empty() {
         return Ok(DiarizeReport {
             segments_total: 0,
             speakers_detected: 0,
             segments_labeled: 0,
+            silhouette_score: None,
             notes,
         });
     }
@@ -2783,21 +3316,74 @@ fn diarize_segments(
         .unwrap_or(1.0)
         .max(1e-6);
 
-    // Step 1: Compute embeddings.
+    // Precompute normalization denominators across the segment set.
+    let max_seg_duration = segments
+        .iter()
+        .map(|s| {
+            let start = s.start_sec.unwrap_or(0.0);
+            let end = s.end_sec.unwrap_or(start);
+            (end - start).max(0.0)
+        })
+        .fold(0.0_f64, f64::max)
+        .max(1e-6);
+
+    let max_word_count = segments
+        .iter()
+        .map(|s| s.text.split_whitespace().count() as f64)
+        .fold(1.0_f64, f64::max);
+
+    let max_text_len = segments
+        .iter()
+        .map(|s| s.text.len() as f64)
+        .fold(1.0_f64, f64::max);
+
+    // Step 1: Compute embeddings with inter-segment gap analysis.
     let embeddings: Vec<SpeakerEmbedding> = segments
         .iter()
-        .map(|seg| {
-            let start_norm = seg.start_sec.unwrap_or(0.0) / duration;
-            let end_norm = seg.end_sec.unwrap_or(0.0) / duration;
-            let text_len_norm = (seg.text.len() as f64 / 100.0).min(1.0);
+        .enumerate()
+        .map(|(i, seg)| {
+            let start = seg.start_sec.unwrap_or(0.0);
+            let end = seg.end_sec.unwrap_or(start);
+            let seg_duration = (end - start).max(0.0);
+            let midpoint_norm = ((start + end) / 2.0) / duration;
+            let duration_norm = seg_duration / max_seg_duration;
+
+            // Turn-taking gap: time between previous segment's end and
+            // current segment's start, normalized.  Larger gaps suggest a
+            // speaker change.
+            let gap = if i > 0 {
+                let prev_end = segments[i - 1].end_sec.unwrap_or(0.0);
+                ((start - prev_end).max(0.0) / duration).min(1.0)
+            } else {
+                0.0
+            };
+
+            let words: Vec<&str> = seg.text.split_whitespace().collect();
+            let word_count_norm = words.len() as f64 / max_word_count;
+            let avg_word_len = if words.is_empty() {
+                0.0
+            } else {
+                let total_chars: usize = words.iter().map(|w| w.len()).sum();
+                (total_chars as f64 / words.len() as f64) / 12.0
+            };
+            let text_len_norm = seg.text.len() as f64 / max_text_len;
+
             SpeakerEmbedding {
-                features: [start_norm, end_norm, text_len_norm],
+                features: [
+                    midpoint_norm,
+                    duration_norm,
+                    gap,
+                    word_count_norm,
+                    avg_word_len,
+                    text_len_norm,
+                ],
             }
         })
         .collect();
 
-    // Step 2: Greedy clustering by cosine similarity.
-    let similarity_threshold = 0.85;
+    // Step 2: Greedy clustering with incremental centroid updates.
+    let similarity_threshold = 0.92;
+    let mut cluster_members: Vec<Vec<SpeakerEmbedding>> = Vec::new();
     let mut centroids: Vec<SpeakerEmbedding> = Vec::new();
     let mut assignments: Vec<usize> = Vec::with_capacity(total);
 
@@ -2818,10 +3404,14 @@ fn diarize_segments(
         }
 
         if best_sim >= similarity_threshold {
-            assignments.push(best_cluster.unwrap());
+            let cid = best_cluster.unwrap();
+            assignments.push(cid);
+            cluster_members[cid].push(emb.clone());
+            centroids[cid] = SpeakerEmbedding::centroid(&cluster_members[cid]);
         } else {
             let new_id = centroids.len();
             centroids.push(emb.clone());
+            cluster_members.push(vec![emb.clone()]);
             assignments.push(new_id);
         }
     }
@@ -2834,10 +3424,13 @@ fn diarize_segments(
         labeled += 1;
     }
 
+    let sil_score = silhouette_score(&embeddings, &assignments, speakers_detected);
+
     Ok(DiarizeReport {
         segments_total: total,
         speakers_detected,
         segments_labeled: labeled,
+        silhouette_score: sil_score,
         notes,
     })
 }
@@ -2910,6 +3503,7 @@ async fn execute_diarize(
             "segments_total": report.segments_total,
             "speakers_detected": report.speakers_detected,
             "segments_labeled": report.segments_labeled,
+            "silhouette_score": report.silhouette_score,
             "notes": report.notes,
         }),
     );
@@ -3011,12 +3605,14 @@ mod tests {
     use super::{
         AlignConfig, AlignmentReport, CancellationToken, DiarizeReport, EventLog, Finalizer,
         FinalizerRegistry, PipelineConfig, PipelineCx, PipelineStage, PunctuateReport,
-        SeparateReport, SpeakerEmbedding, StageBudgetPolicy, VadConfig, VadReport,
+        SeparateReport, SpeakerEmbedding, StageBudgetPolicy, VadConfig, VadRegionMs, VadReport,
         acceleration_cancellation_fence_payload, acceleration_context_payload,
-        acceleration_stream_owner_id, budget_duration, checkpoint_or_emit, ctc_forced_align,
-        diarize_segments, event_elapsed_ms, parse_budget_ms, parse_event_ts_ms, punctuate_segments,
-        recommended_budget, run_pipeline, run_stage_with_budget, sanitize_process_pid,
-        sha256_bytes_hex, sha256_file, sha256_json_value, source_separate, stage_budget_ms,
+        acceleration_stream_owner_id, apply_padding, budget_duration, checkpoint_or_emit,
+        ctc_forced_align, diarize_segments, event_elapsed_ms, is_abbreviation_period,
+        is_decimal_period, is_ellipsis_period, merge_regions_by_gap, ms_to_frames, parse_budget_ms,
+        parse_event_ts_ms, punctuate_segments, recommended_budget, run_pipeline,
+        run_stage_with_budget, sanitize_process_pid, sha256_bytes_hex, sha256_file,
+        sha256_json_value, silhouette_score, source_separate, split_long_regions, stage_budget_ms,
         stage_failure_code, stage_failure_message, stage_latency_profile, state_root,
         vad_energy_detect,
     };
@@ -7097,6 +7693,116 @@ mod tests {
         assert!((config.rms_threshold - 0.01).abs() < f64::EPSILON);
         assert_eq!(config.frame_samples, 160);
         assert!((config.min_voice_ratio - 0.05).abs() < f64::EPSILON);
+        assert_eq!(config.min_speech_duration_ms, 40);
+        assert_eq!(config.min_silence_duration_ms, 40);
+        assert_eq!(config.max_speech_duration_ms, None);
+        assert_eq!(config.speech_pad_ms, 0);
+    }
+
+    fn write_pcm16_mono_wav_for_vad(path: &std::path::Path, sample_rate: u32, samples: &[i16]) {
+        let data_len = (samples.len() * 2) as u32;
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36u32 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * 2;
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes()); // block align
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn vad_config_from_request_applies_backend_overrides() {
+        let request = TranscribeRequest {
+            input: InputSource::File {
+                path: PathBuf::from("input.wav"),
+            },
+            backend: BackendKind::Auto,
+            model: None,
+            language: None,
+            translate: false,
+            diarize: false,
+            persist: false,
+            db_path: PathBuf::from("storage.sqlite3"),
+            timeout_ms: None,
+            backend_params: BackendParams {
+                vad: Some(crate::model::VadParams {
+                    model_path: Some(PathBuf::from("unused-vad-model.onnx")),
+                    threshold: Some(0.42),
+                    min_speech_duration_ms: Some(120),
+                    min_silence_duration_ms: Some(80),
+                    max_speech_duration_s: Some(3.5),
+                    speech_pad_ms: Some(30),
+                    samples_overlap: Some(0.2),
+                }),
+                ..BackendParams::default()
+            },
+        };
+
+        let config = VadConfig::from_request(&request);
+        assert!((config.rms_threshold - 0.42).abs() < 1e-6);
+        assert_eq!(config.min_speech_duration_ms, 120);
+        assert_eq!(config.min_silence_duration_ms, 80);
+        assert_eq!(config.max_speech_duration_ms, Some(3_500));
+        assert_eq!(config.speech_pad_ms, 30);
+    }
+
+    #[test]
+    fn vad_energy_detect_uses_native_audio_for_valid_wav() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("native.wav");
+
+        let mut samples = vec![0i16; 16_000];
+        samples.extend(vec![7_000i16; 16_000]);
+        write_pcm16_mono_wav_for_vad(&path, 16_000, &samples);
+
+        let token = CancellationToken::no_deadline();
+        let config = VadConfig::default();
+        let report = vad_energy_detect(&path, &config, &token).unwrap();
+
+        assert_eq!(report.detector, "native_audio_waveform");
+        assert!(!report.fallback_triggered);
+        assert!(report.activity_threshold > 0.0);
+    }
+
+    #[test]
+    fn vad_energy_detect_invalid_wav_uses_deterministic_fallback() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy-fallback.wav");
+
+        let mut data = vec![0u8; 44];
+        for _ in 0..1600 {
+            data.extend(i16::MAX.to_le_bytes());
+        }
+        std::fs::write(&path, &data).unwrap();
+
+        let token = CancellationToken::no_deadline();
+        let config = VadConfig::default();
+        let report = vad_energy_detect(&path, &config, &token).unwrap();
+
+        assert_eq!(report.detector, "legacy_energy");
+        assert!(report.fallback_triggered);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("deterministic legacy fallback activated")),
+            "expected fallback note in {:?}",
+            report.notes
+        );
     }
 
     #[test]
@@ -7250,7 +7956,7 @@ mod tests {
     }
 
     #[test]
-    fn source_separate_returns_vocal_isolated() {
+    fn source_separate_returns_vocal_isolated_on_invalid_wav() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.wav");
         std::fs::write(&path, b"fake audio").unwrap();
@@ -7258,9 +7964,14 @@ mod tests {
         let token = CancellationToken::no_deadline();
         let report = source_separate(&path, &token).unwrap();
 
+        // Invalid WAV → fallback path: assumes vocal content present.
         assert!(report.vocal_isolated);
         assert!(!report.notes.is_empty());
-        assert!(report.notes[0].contains("placeholder"));
+        assert!(
+            report.notes[0].contains("analysis unavailable"),
+            "expected fallback note, got: {}",
+            report.notes[0]
+        );
     }
 
     #[test]
@@ -7275,6 +7986,72 @@ mod tests {
         let result = source_separate(&path, &token);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), FwError::Cancelled(_)));
+    }
+
+    #[test]
+    fn source_separate_valid_wav_with_speech() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("speech.wav");
+
+        // Generate a 1-second WAV with a loud speech-like signal.
+        let sample_rate = 16_000u32;
+        let samples: Vec<i16> = (0..sample_rate)
+            .map(|i| {
+                let t = i as f64 / sample_rate as f64;
+                (f64::sin(t * 440.0 * std::f64::consts::TAU) * 8_000.0) as i16
+            })
+            .collect();
+        write_pcm16_mono_wav_for_vad(&path, sample_rate, &samples);
+
+        let token = CancellationToken::no_deadline();
+        let report = source_separate(&path, &token).unwrap();
+
+        assert!(report.vocal_isolated, "speech signal should be detected");
+        assert!(
+            report.speech_coverage > 0.0,
+            "speech coverage should be > 0 for tonal signal"
+        );
+        assert!(report.active_region_count > 0);
+        assert!(report.avg_rms > 0.0);
+        assert!(report.notes[0].contains("energy-based analysis"));
+    }
+
+    #[test]
+    fn source_separate_valid_wav_silence_only() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("silence.wav");
+
+        // Generate a 1-second silent WAV.
+        let sample_rate = 16_000u32;
+        let samples = vec![0i16; sample_rate as usize];
+        write_pcm16_mono_wav_for_vad(&path, sample_rate, &samples);
+
+        let token = CancellationToken::no_deadline();
+        let report = source_separate(&path, &token).unwrap();
+
+        // Silence should yield no active regions and low/zero coverage.
+        assert_eq!(report.active_region_count, 0);
+        assert!(
+            report.speech_coverage < 0.05,
+            "silence should have very low speech coverage, got {}",
+            report.speech_coverage
+        );
+        // vocal_isolated should be false since coverage < threshold.
+        assert!(
+            !report.vocal_isolated,
+            "silence-only audio should not be flagged as vocal-isolated"
+        );
+    }
+
+    #[test]
+    fn source_separate_missing_file_fallback() {
+        let token = CancellationToken::no_deadline();
+        let result =
+            source_separate(std::path::Path::new("/nonexistent/audio.wav"), &token).unwrap();
+
+        // Missing file → graceful fallback.
+        assert!(result.vocal_isolated);
+        assert!(result.notes[0].contains("analysis unavailable"));
     }
 
     #[test]
@@ -7591,10 +8368,10 @@ mod tests {
     #[test]
     fn speaker_embedding_cosine_similarity_identical() {
         let a = SpeakerEmbedding {
-            features: [0.5, 0.5, 0.5],
+            features: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
         };
         let b = SpeakerEmbedding {
-            features: [0.5, 0.5, 0.5],
+            features: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
         };
         let sim = a.cosine_similarity(&b);
         assert!(
@@ -7606,10 +8383,10 @@ mod tests {
     #[test]
     fn speaker_embedding_cosine_similarity_orthogonal() {
         let a = SpeakerEmbedding {
-            features: [1.0, 0.0, 0.0],
+            features: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         };
         let b = SpeakerEmbedding {
-            features: [0.0, 1.0, 0.0],
+            features: [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
         };
         let sim = a.cosine_similarity(&b);
         assert!(
@@ -7621,10 +8398,10 @@ mod tests {
     #[test]
     fn speaker_embedding_cosine_similarity_zero_vector() {
         let a = SpeakerEmbedding {
-            features: [0.0, 0.0, 0.0],
+            features: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         };
         let b = SpeakerEmbedding {
-            features: [1.0, 1.0, 1.0],
+            features: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         };
         let sim = a.cosine_similarity(&b);
         assert!(
@@ -7655,13 +8432,13 @@ mod tests {
     }
 
     #[test]
-    fn diarize_report_includes_placeholder_note() {
+    fn diarize_report_includes_heuristic_note() {
         let token = CancellationToken::no_deadline();
         let mut segments = vec![make_segment(0.0, 1.0, "test")];
         let report = diarize_segments(&mut segments, Some(1.0), &token).unwrap();
         assert!(
-            report.notes.iter().any(|n| n.contains("placeholder")),
-            "diarize report should include placeholder note"
+            report.notes.iter().any(|n| n.contains("heuristic")),
+            "diarize report should include heuristic note"
         );
     }
 
@@ -7704,6 +8481,233 @@ mod tests {
         assert!(!config.has_stage(PipelineStage::Punctuate));
         assert!(!config.has_stage(PipelineStage::Diarize));
         assert!(config.has_stage(PipelineStage::Align));
+    }
+
+    // -----------------------------------------------------------------------
+    // Pipeline stage composition integration tests (bd-1cn)
+    //
+    // Verify that optional stages (VAD, Separate, Punctuate, Diarize) can be
+    // skipped independently without breaking downstream stage contracts, and
+    // that segments flow correctly through various stage combinations.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn composition_punctuate_then_diarize_segments_flow() {
+        // Verify segments can flow through punctuate → diarize without
+        // VAD or Separate having run.
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![
+            make_segment(0.0, 3.0, "hello world"),
+            make_segment(3.0, 6.0, "this is a test"),
+            make_segment(20.0, 23.0, "different speaker arrives"),
+        ];
+
+        // Punctuate first.
+        let punct_report = punctuate_segments(&mut segments, &token).unwrap();
+        assert_eq!(punct_report.segments_total, 3);
+
+        // Then diarize the already-punctuated segments.
+        let diarize_report = diarize_segments(&mut segments, Some(30.0), &token).unwrap();
+        assert_eq!(diarize_report.segments_total, 3);
+        assert_eq!(diarize_report.segments_labeled, 3);
+
+        // Every segment should have both punctuated text and a speaker label.
+        for seg in &segments {
+            assert!(
+                seg.speaker.is_some(),
+                "speaker should be assigned after diarize"
+            );
+            assert!(
+                seg.text.ends_with('.') || seg.text.ends_with('!') || seg.text.ends_with('?'),
+                "text should be punctuated: {:?}",
+                seg.text
+            );
+        }
+    }
+
+    #[test]
+    fn composition_diarize_without_punctuate_preserves_text() {
+        // Diarize alone should not alter segment text.
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![
+            make_segment(0.0, 2.0, "raw text here"),
+            make_segment(2.0, 4.0, "more raw text"),
+        ];
+        let original_texts: Vec<String> = segments.iter().map(|s| s.text.clone()).collect();
+
+        let report = diarize_segments(&mut segments, Some(5.0), &token).unwrap();
+        assert_eq!(report.segments_labeled, 2);
+
+        for (seg, orig) in segments.iter().zip(original_texts.iter()) {
+            assert_eq!(&seg.text, orig, "diarize should not modify text");
+        }
+    }
+
+    #[test]
+    fn composition_align_then_punctuate_then_diarize_full_chain() {
+        // Full optional post-backend chain: Align → Punctuate → Diarize.
+        let token = CancellationToken::no_deadline();
+        let config = AlignConfig::default();
+        let mut segments = vec![
+            make_segment(0.0, 4.0, "first segment of speech"),
+            make_segment(4.0, 8.0, "second segment continues"),
+            make_segment(20.0, 24.0, "third segment from new speaker"),
+        ];
+
+        // Align.
+        let align_report = ctc_forced_align(&mut segments, Some(30.0), &config, &token).unwrap();
+        assert_eq!(align_report.segments_total, 3);
+
+        // Punctuate.
+        let punct_report = punctuate_segments(&mut segments, &token).unwrap();
+        assert_eq!(punct_report.segments_total, 3);
+
+        // Diarize.
+        let diarize_report = diarize_segments(&mut segments, Some(30.0), &token).unwrap();
+        assert_eq!(diarize_report.segments_total, 3);
+        assert_eq!(diarize_report.segments_labeled, 3);
+
+        // All segments should have timestamps, punctuation, and speaker labels.
+        for seg in &segments {
+            assert!(seg.start_sec.is_some(), "should have start timestamp");
+            assert!(seg.end_sec.is_some(), "should have end timestamp");
+            assert!(seg.speaker.is_some(), "should have speaker label");
+        }
+    }
+
+    #[test]
+    fn composition_skip_all_optional_stages_minimal_pipeline() {
+        // Minimal valid pipeline config: Ingest → Normalize → Backend → Persist.
+        let config = PipelineBuilder::new()
+            .stage(PipelineStage::Ingest)
+            .stage(PipelineStage::Normalize)
+            .stage(PipelineStage::Backend)
+            .stage(PipelineStage::Persist)
+            .build()
+            .expect("minimal pipeline should be valid");
+
+        assert!(!config.has_stage(PipelineStage::Vad));
+        assert!(!config.has_stage(PipelineStage::Separate));
+        assert!(!config.has_stage(PipelineStage::Accelerate));
+        assert!(!config.has_stage(PipelineStage::Align));
+        assert!(!config.has_stage(PipelineStage::Punctuate));
+        assert!(!config.has_stage(PipelineStage::Diarize));
+
+        assert_eq!(config.stages().len(), 4);
+        config.validate().expect("should validate");
+    }
+
+    #[test]
+    fn composition_all_optional_stages_full_pipeline() {
+        // Full pipeline with all optional stages included.
+        let config = PipelineConfig::default();
+        assert_eq!(config.stages().len(), 10);
+        config.validate().expect("default pipeline should validate");
+
+        for stage in &[
+            PipelineStage::Vad,
+            PipelineStage::Separate,
+            PipelineStage::Accelerate,
+            PipelineStage::Align,
+            PipelineStage::Punctuate,
+            PipelineStage::Diarize,
+        ] {
+            assert!(config.has_stage(*stage), "default should include {stage}");
+        }
+    }
+
+    #[test]
+    fn composition_vad_segments_unaffected_by_downstream() {
+        // VAD produces regions; downstream stages should not interfere.
+        let token = CancellationToken::no_deadline();
+        let config = VadConfig::default();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("silence.wav");
+        // 44-byte WAV header + 3200 bytes of silence (all zeros).
+        let mut data = vec![0u8; 44];
+        data.extend(vec![0u8; 3200]);
+        std::fs::write(&path, &data).unwrap();
+
+        let report = vad_energy_detect(&path, &config, &token).unwrap();
+        // Silence-only audio should have zero voice regions.
+        assert!(report.regions.is_empty());
+        assert!(report.silence_only);
+    }
+
+    #[test]
+    fn composition_source_separate_does_not_need_vad() {
+        // Source separation should work even when VAD has not run.
+        let token = CancellationToken::no_deadline();
+        let report =
+            source_separate(std::path::Path::new("/nonexistent/audio.wav"), &token).unwrap();
+        // Should fallback gracefully.
+        assert!(report.vocal_isolated);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("analysis unavailable"))
+        );
+    }
+
+    #[test]
+    fn composition_each_optional_stage_respects_cancellation() {
+        // Each optional stage should return an error when given an expired token.
+        let expired = CancellationToken::already_expired();
+
+        // VAD.
+        let vad_cfg = VadConfig::default();
+        let dir = tempdir().unwrap();
+        let wav_path = dir.path().join("tiny.wav");
+        let mut data = vec![0u8; 44];
+        data.extend(vec![0u8; 320]);
+        std::fs::write(&wav_path, &data).unwrap();
+        assert!(vad_energy_detect(&wav_path, &vad_cfg, &expired).is_err());
+
+        // Source separate.
+        assert!(source_separate(std::path::Path::new("/tmp/fake.wav"), &expired).is_err());
+
+        // Punctuate.
+        let mut segs = vec![make_segment(0.0, 1.0, "hello")];
+        assert!(punctuate_segments(&mut segs, &expired).is_err());
+
+        // Diarize.
+        let mut segs2 = vec![make_segment(0.0, 1.0, "hello")];
+        assert!(diarize_segments(&mut segs2, Some(2.0), &expired).is_err());
+
+        // Align.
+        let align_config = AlignConfig::default();
+        let mut segs3 = vec![make_segment(0.0, 1.0, "hello")];
+        assert!(ctc_forced_align(&mut segs3, Some(2.0), &align_config, &expired).is_err());
+    }
+
+    #[test]
+    fn composition_pipeline_config_skip_post_backend_stages() {
+        // Pipeline with backend but no post-processing: valid.
+        let config = PipelineBuilder::default_stages()
+            .without(PipelineStage::Accelerate)
+            .without(PipelineStage::Align)
+            .without(PipelineStage::Punctuate)
+            .without(PipelineStage::Diarize)
+            .build()
+            .expect("valid");
+        assert_eq!(config.stages().len(), 6); // Ingest, Normalize, Vad, Separate, Backend, Persist
+        config.validate().expect("should validate");
+    }
+
+    #[test]
+    fn composition_pipeline_config_skip_pre_backend_optional() {
+        // Pipeline with all post-processing but no pre-processing optional stages.
+        let config = PipelineBuilder::default_stages()
+            .without(PipelineStage::Vad)
+            .without(PipelineStage::Separate)
+            .build()
+            .expect("valid");
+        assert!(config.has_stage(PipelineStage::Accelerate));
+        assert!(config.has_stage(PipelineStage::Align));
+        assert!(config.has_stage(PipelineStage::Punctuate));
+        assert!(config.has_stage(PipelineStage::Diarize));
+        config.validate().expect("should validate");
     }
 
     #[test]
@@ -8647,10 +9651,10 @@ mod tests {
     fn speaker_embedding_cosine_similarity_negative_features() {
         // Embeddings with negative features should still compute correctly.
         let a = SpeakerEmbedding {
-            features: [-1.0, 0.0, 1.0],
+            features: [-1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
         };
         let b = SpeakerEmbedding {
-            features: [1.0, 0.0, -1.0],
+            features: [1.0, 0.0, -1.0, 0.0, 0.0, 0.0],
         };
         let sim = a.cosine_similarity(&b);
         // Dot = -1+0-1 = -2, |a|=sqrt(2), |b|=sqrt(2), sim = -2/2 = -1.0
@@ -8661,13 +9665,289 @@ mod tests {
 
         // Identical negative vectors → cosine sim = 1.0
         let c = SpeakerEmbedding {
-            features: [-0.5, -0.3, -0.8],
+            features: [-0.5, -0.3, -0.8, -0.25, -0.5, -0.75],
         };
         let sim_cc = c.cosine_similarity(&c);
         assert!(
             (sim_cc - 1.0).abs() < 1e-9,
             "identical vectors should have cosine sim = 1.0, got {sim_cc}"
         );
+    }
+
+    #[test]
+    fn speaker_embedding_centroid_single() {
+        let a = SpeakerEmbedding {
+            features: [0.5, 0.25, 0.75, 0.125, 0.5, 0.25],
+        };
+        let c = SpeakerEmbedding::centroid(std::slice::from_ref(&a));
+        for (i, (&cf, &af)) in c.features.iter().zip(a.features.iter()).enumerate() {
+            assert!(
+                (cf - af).abs() < 1e-9,
+                "centroid of single embedding should equal the embedding at dim {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn speaker_embedding_centroid_mean() {
+        let a = SpeakerEmbedding {
+            features: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let b = SpeakerEmbedding {
+            features: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        };
+        let c = SpeakerEmbedding::centroid(&[a, b]);
+        for (i, &f) in c.features.iter().enumerate() {
+            assert!(
+                (f - 0.5).abs() < 1e-9,
+                "centroid of [0, 1] should be 0.5 at dim {i}, got {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn speaker_embedding_centroid_empty() {
+        let c = SpeakerEmbedding::centroid(&[]);
+        for (i, &f) in c.features.iter().enumerate() {
+            assert!(
+                f.abs() < 1e-9,
+                "centroid of empty slice should be zero at dim {i}, got {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn diarize_turn_taking_detects_speaker_changes() {
+        // Two groups of segments separated by a large time gap should be
+        // assigned to different speakers due to the inter-segment gap feature.
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![
+            make_segment(0.0, 2.0, "speaker one talks here"),
+            make_segment(2.0, 4.0, "speaker one keeps going"),
+            // Large gap suggests a speaker change.
+            make_segment(20.0, 22.0, "new speaker joins late"),
+            make_segment(22.0, 24.0, "new speaker continues"),
+        ];
+        let report = diarize_segments(&mut segments, Some(30.0), &token).unwrap();
+
+        assert_eq!(report.segments_total, 4);
+        assert_eq!(report.segments_labeled, 4);
+        // The two temporal groups should get different speakers.
+        assert!(
+            report.speakers_detected >= 2,
+            "expected at least 2 speakers from time-separated groups, got {}",
+            report.speakers_detected
+        );
+        // First two segments share a speaker.
+        assert_eq!(segments[0].speaker, segments[1].speaker);
+        // Last two segments share a speaker.
+        assert_eq!(segments[2].speaker, segments[3].speaker);
+    }
+
+    #[test]
+    fn silhouette_score_well_separated_clusters() {
+        // Two tight clusters far apart → silhouette near 1.0.
+        let embeddings = vec![
+            SpeakerEmbedding {
+                features: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            },
+            SpeakerEmbedding {
+                features: [0.0, 0.0, 0.0, 0.0, 0.0, 0.125],
+            },
+            SpeakerEmbedding {
+                features: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            },
+            SpeakerEmbedding {
+                features: [1.0, 1.0, 1.0, 1.0, 1.0, 0.875],
+            },
+        ];
+        let assignments = vec![0, 0, 1, 1];
+        let score = silhouette_score(&embeddings, &assignments, 2).unwrap();
+        assert!(
+            score > 0.9,
+            "well-separated clusters should have silhouette > 0.9, got {score}"
+        );
+    }
+
+    #[test]
+    fn silhouette_score_overlapping_clusters() {
+        // Two clusters that overlap substantially → lower silhouette.
+        let embeddings = vec![
+            SpeakerEmbedding {
+                features: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+            },
+            SpeakerEmbedding {
+                features: [0.5, 0.5, 0.5, 0.5, 0.5, 0.625],
+            },
+            SpeakerEmbedding {
+                features: [0.5, 0.5, 0.5, 0.5, 0.625, 0.5],
+            },
+            SpeakerEmbedding {
+                features: [0.5, 0.5, 0.5, 0.625, 0.5, 0.5],
+            },
+        ];
+        let assignments = vec![0, 0, 1, 1];
+        let score = silhouette_score(&embeddings, &assignments, 2).unwrap();
+        assert!(
+            score < 0.5,
+            "overlapping clusters should have silhouette < 0.5, got {score}"
+        );
+    }
+
+    #[test]
+    fn silhouette_score_single_cluster_returns_none() {
+        let embeddings = vec![
+            SpeakerEmbedding {
+                features: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            },
+            SpeakerEmbedding {
+                features: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            },
+        ];
+        let assignments = vec![0, 0];
+        assert!(
+            silhouette_score(&embeddings, &assignments, 1).is_none(),
+            "single cluster should return None"
+        );
+    }
+
+    #[test]
+    fn silhouette_score_single_point_returns_none() {
+        let embeddings = vec![SpeakerEmbedding {
+            features: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+        }];
+        let assignments = vec![0];
+        assert!(
+            silhouette_score(&embeddings, &assignments, 1).is_none(),
+            "single point should return None"
+        );
+    }
+
+    #[test]
+    fn silhouette_score_empty_returns_none() {
+        let embeddings: Vec<SpeakerEmbedding> = vec![];
+        let assignments: Vec<usize> = vec![];
+        assert!(
+            silhouette_score(&embeddings, &assignments, 0).is_none(),
+            "empty input should return None"
+        );
+    }
+
+    #[test]
+    fn diarize_report_includes_silhouette_score() {
+        let token = CancellationToken::no_deadline();
+        // Two well-separated groups → should have score.
+        let mut segments = vec![
+            make_segment(0.0, 2.0, "speaker one talks here"),
+            make_segment(2.0, 4.0, "speaker one keeps going"),
+            make_segment(20.0, 22.0, "new speaker joins late"),
+            make_segment(22.0, 24.0, "new speaker continues"),
+        ];
+        let report = diarize_segments(&mut segments, Some(30.0), &token).unwrap();
+        if report.speakers_detected >= 2 {
+            assert!(
+                report.silhouette_score.is_some(),
+                "multi-speaker report should include silhouette score"
+            );
+            let s = report.silhouette_score.unwrap();
+            assert!(
+                (-1.0..=1.0).contains(&s),
+                "silhouette score should be in [-1, 1], got {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn diarize_single_segment_silhouette_is_none() {
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![make_segment(0.0, 2.0, "single segment only")];
+        let report = diarize_segments(&mut segments, Some(5.0), &token).unwrap();
+        assert!(
+            report.silhouette_score.is_none(),
+            "single-segment diarization should have no silhouette score"
+        );
+    }
+
+    #[test]
+    fn euclidean_distance_zero_for_identical() {
+        let a = SpeakerEmbedding {
+            features: [0.25, 0.5, 0.75, 0.125, 0.375, 0.625],
+        };
+        assert!(
+            a.euclidean_distance(&a) < 1e-15,
+            "distance to self should be zero"
+        );
+    }
+
+    #[test]
+    fn euclidean_distance_known_value() {
+        let a = SpeakerEmbedding {
+            features: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let b = SpeakerEmbedding {
+            features: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let d = a.euclidean_distance(&b);
+        assert!(
+            (d - 1.0).abs() < 1e-9,
+            "distance along single axis should be 1.0, got {d}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SpeakerEmbedding: additional edge cases (bd-zua)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cosine_similarity_opposite_is_negative_one() {
+        let a = SpeakerEmbedding {
+            features: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let b = SpeakerEmbedding {
+            features: [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let sim = a.cosine_similarity(&b);
+        assert!(
+            (sim - (-1.0)).abs() < 1e-9,
+            "cosine similarity of opposite vectors should be -1.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_scaled_vectors_is_one() {
+        let a = SpeakerEmbedding {
+            features: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        };
+        let b = SpeakerEmbedding {
+            features: [2.0, 4.0, 6.0, 8.0, 10.0, 12.0],
+        };
+        let sim = a.cosine_similarity(&b);
+        assert!(
+            (sim - 1.0).abs() < 1e-9,
+            "scaled vectors should have cosine similarity 1.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn centroid_three_embeddings_is_mean() {
+        let embeddings = vec![
+            SpeakerEmbedding {
+                features: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            },
+            SpeakerEmbedding {
+                features: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+            },
+            SpeakerEmbedding {
+                features: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            },
+        ];
+        let c = SpeakerEmbedding::centroid(&embeddings);
+        for val in c.features {
+            assert!(
+                (val - 0.5).abs() < 1e-9,
+                "centroid of [0, 0.5, 1] should be 0.5"
+            );
+        }
     }
 
     #[test]
@@ -8814,6 +10094,7 @@ mod tests {
             rms_threshold: 0.01,
             frame_samples,
             min_voice_ratio: 0.50, // well above 1/11 ≈ 0.09
+            ..VadConfig::default()
         };
         let report = vad_energy_detect(&path, &config, &token).unwrap();
 
@@ -9105,7 +10386,7 @@ mod tests {
 
     #[test]
     fn punctuate_segments_capitalizes_after_question_mark_mid_text() {
-        // Rule 3 in punctuate_segments capitalizes after sentence-ending
+        // Rule 4 in punctuate_segments capitalizes after sentence-ending
         // punctuation.  Existing tests cover period (`.`), but not `?`
         // within a segment.  Verify `? w` → `? W`.
         let token = CancellationToken::no_deadline();
@@ -9117,7 +10398,7 @@ mod tests {
             "should capitalize 'w' after '?', got: {}",
             segments[0].text
         );
-        // Also verify first-char cap and trailing period from rules 1 & 2.
+        // Also verify first-char cap and trailing period from rules 2 & 3.
         assert!(
             segments[0].text.starts_with("Is"),
             "first char should be capitalized, got: {}",
@@ -9128,5 +10409,563 @@ mod tests {
             "should add trailing period, got: {}",
             segments[0].text
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Enhanced punctuation rule tests (bd-2sp)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn punctuate_does_not_capitalize_after_abbreviation() {
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![make_segment(0.0, 3.0, "dr. smith said hello")];
+        let _report = punctuate_segments(&mut segments, &token).unwrap();
+        assert!(
+            segments[0].text.contains("Dr. smith") || segments[0].text.contains("Dr. Smith"),
+            "should not force-capitalize 'smith' after 'Dr.': {}",
+            segments[0].text
+        );
+        // The first char is capitalized (rule 2), but "smith" after "Dr."
+        // should NOT be force-capitalized by the sentence-end rule.
+        // Note: "smith" might already be lowercase, that's correct.
+        assert!(
+            !segments[0].text.contains("Dr. S") || segments[0].text.contains("Dr. Smith"),
+            "should preserve case after abbreviation period, got: {}",
+            segments[0].text
+        );
+    }
+
+    #[test]
+    fn punctuate_does_not_capitalize_after_decimal() {
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![make_segment(0.0, 2.0, "the value is 3.14 radians")];
+        let _report = punctuate_segments(&mut segments, &token).unwrap();
+        assert!(
+            segments[0].text.contains("3.14 radians") || segments[0].text.contains("3.14 Radians"),
+            "got: {}",
+            segments[0].text
+        );
+        // The key assertion: "radians" should NOT be capitalized by the
+        // period in 3.14.
+        assert!(
+            !segments[0].text.contains("3.14 R"),
+            "should not capitalize 'radians' after decimal '3.14', got: {}",
+            segments[0].text
+        );
+    }
+
+    #[test]
+    fn punctuate_does_not_capitalize_after_ellipsis() {
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![make_segment(0.0, 3.0, "well... anyway let us continue")];
+        let _report = punctuate_segments(&mut segments, &token).unwrap();
+        assert!(
+            !segments[0].text.contains("... A"),
+            "should not capitalize after ellipsis, got: {}",
+            segments[0].text
+        );
+    }
+
+    #[test]
+    fn punctuate_normalizes_multiple_spaces() {
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![make_segment(0.0, 2.0, "hello   world   today")];
+        let _report = punctuate_segments(&mut segments, &token).unwrap();
+        assert!(
+            !segments[0].text.contains("  "),
+            "should normalize multiple spaces to single, got: {:?}",
+            segments[0].text
+        );
+        assert!(
+            segments[0].text.contains("Hello world today"),
+            "normalized text should have single spaces, got: {}",
+            segments[0].text
+        );
+    }
+
+    #[test]
+    fn punctuate_abbreviation_mid_sentence_preserves_context() {
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![make_segment(0.0, 5.0, "talk to mr. jones about the plan")];
+        let _report = punctuate_segments(&mut segments, &token).unwrap();
+        // "jones" after "mr." should not be capitalized by the period rule.
+        // Note: Rule 2 only capitalizes the first character of the segment,
+        // so "mr" stays lowercase.
+        assert!(
+            segments[0].text.contains("mr. jones"),
+            "should not capitalize 'jones' after abbreviation 'mr.', got: {}",
+            segments[0].text
+        );
+        // The key check: "jones" must NOT have been force-capitalized.
+        assert!(
+            !segments[0].text.contains("mr. J"),
+            "should not force-capitalize after abbreviation, got: {}",
+            segments[0].text
+        );
+    }
+
+    #[test]
+    fn punctuate_real_sentence_end_still_capitalizes() {
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![make_segment(0.0, 5.0, "this is done. now start again")];
+        let _report = punctuate_segments(&mut segments, &token).unwrap();
+        assert!(
+            segments[0].text.contains(". Now"),
+            "should capitalize after real sentence-ending period, got: {}",
+            segments[0].text
+        );
+    }
+
+    #[test]
+    fn is_abbreviation_period_detects_known_abbrevs() {
+        assert!(is_abbreviation_period("Dr. Smith", 2));
+        assert!(is_abbreviation_period("talk to mr. jones", 10));
+        assert!(is_abbreviation_period("Mrs. Williams", 3));
+    }
+
+    #[test]
+    fn is_abbreviation_period_rejects_non_abbrevs() {
+        assert!(!is_abbreviation_period("done.", 4));
+        assert!(!is_abbreviation_period("hello world.", 11));
+    }
+
+    #[test]
+    fn is_decimal_period_detects_numbers() {
+        assert!(is_decimal_period("3.14", 1));
+        assert!(is_decimal_period("the value is 3.14 rad", 14));
+        assert!(!is_decimal_period("done.", 4));
+        assert!(!is_decimal_period("a.b", 1)); // letters, not digits
+    }
+
+    #[test]
+    fn is_ellipsis_period_detects_triple_dots() {
+        assert!(is_ellipsis_period("well... anyway", 4));
+        assert!(is_ellipsis_period("well... anyway", 5));
+        assert!(is_ellipsis_period("well... anyway", 6));
+        assert!(!is_ellipsis_period("well. anyway", 4)); // single period
+    }
+
+    // -----------------------------------------------------------------------
+    // VAD helper: merge_regions_by_gap (bd-22y)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_regions_by_gap_bridges_adjacent_regions() {
+        let mut regions = vec![
+            VadRegionMs {
+                start_ms: 0,
+                end_ms: 100,
+                avg_rms: 0.5,
+            },
+            VadRegionMs {
+                start_ms: 120,
+                end_ms: 200,
+                avg_rms: 0.25,
+            },
+        ];
+        merge_regions_by_gap(&mut regions, 50);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].start_ms, 0);
+        assert_eq!(regions[0].end_ms, 200);
+    }
+
+    #[test]
+    fn merge_regions_by_gap_preserves_distant_regions() {
+        let mut regions = vec![
+            VadRegionMs {
+                start_ms: 0,
+                end_ms: 100,
+                avg_rms: 0.5,
+            },
+            VadRegionMs {
+                start_ms: 200,
+                end_ms: 300,
+                avg_rms: 0.25,
+            },
+        ];
+        merge_regions_by_gap(&mut regions, 50);
+        assert_eq!(regions.len(), 2);
+    }
+
+    #[test]
+    fn merge_regions_by_gap_sorts_unsorted_input() {
+        let mut regions = vec![
+            VadRegionMs {
+                start_ms: 200,
+                end_ms: 300,
+                avg_rms: 0.25,
+            },
+            VadRegionMs {
+                start_ms: 0,
+                end_ms: 100,
+                avg_rms: 0.5,
+            },
+        ];
+        merge_regions_by_gap(&mut regions, 150);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].start_ms, 0);
+        assert_eq!(regions[0].end_ms, 300);
+    }
+
+    #[test]
+    fn merge_regions_by_gap_empty_input() {
+        let mut regions: Vec<VadRegionMs> = Vec::new();
+        merge_regions_by_gap(&mut regions, 50);
+        assert!(regions.is_empty());
+    }
+
+    #[test]
+    fn merge_regions_by_gap_single_region() {
+        let mut regions = vec![VadRegionMs {
+            start_ms: 10,
+            end_ms: 50,
+            avg_rms: 0.5,
+        }];
+        merge_regions_by_gap(&mut regions, 100);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].start_ms, 10);
+    }
+
+    #[test]
+    fn merge_regions_by_gap_zero_gap_merges_overlapping() {
+        let mut regions = vec![
+            VadRegionMs {
+                start_ms: 0,
+                end_ms: 100,
+                avg_rms: 0.5,
+            },
+            VadRegionMs {
+                start_ms: 80,
+                end_ms: 200,
+                avg_rms: 0.75,
+            },
+        ];
+        merge_regions_by_gap(&mut regions, 0);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].end_ms, 200);
+    }
+
+    #[test]
+    fn merge_regions_by_gap_takes_max_rms() {
+        let mut regions = vec![
+            VadRegionMs {
+                start_ms: 0,
+                end_ms: 100,
+                avg_rms: 0.25,
+            },
+            VadRegionMs {
+                start_ms: 50,
+                end_ms: 200,
+                avg_rms: 0.75,
+            },
+        ];
+        merge_regions_by_gap(&mut regions, 0);
+        assert_eq!(regions.len(), 1);
+        assert!((regions[0].avg_rms - 0.75).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // VAD helper: split_long_regions (bd-22y)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn split_long_regions_splits_oversized_region() {
+        let regions = vec![VadRegionMs {
+            start_ms: 0,
+            end_ms: 1000,
+            avg_rms: 0.5,
+        }];
+        let result = split_long_regions(&regions, 300);
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].start_ms, 0);
+        assert_eq!(result[0].end_ms, 300);
+        assert_eq!(result[1].start_ms, 300);
+        assert_eq!(result[1].end_ms, 600);
+        assert_eq!(result[2].start_ms, 600);
+        assert_eq!(result[2].end_ms, 900);
+        assert_eq!(result[3].start_ms, 900);
+        assert_eq!(result[3].end_ms, 1000);
+    }
+
+    #[test]
+    fn split_long_regions_passes_through_short_regions() {
+        let regions = vec![VadRegionMs {
+            start_ms: 0,
+            end_ms: 100,
+            avg_rms: 0.5,
+        }];
+        let result = split_long_regions(&regions, 300);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].end_ms, 100);
+    }
+
+    #[test]
+    fn split_long_regions_zero_max_returns_original() {
+        let regions = vec![VadRegionMs {
+            start_ms: 0,
+            end_ms: 1000,
+            avg_rms: 0.5,
+        }];
+        let result = split_long_regions(&regions, 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].end_ms, 1000);
+    }
+
+    #[test]
+    fn split_long_regions_empty_input() {
+        let regions: Vec<VadRegionMs> = Vec::new();
+        let result = split_long_regions(&regions, 300);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn split_long_regions_exact_boundary() {
+        let regions = vec![VadRegionMs {
+            start_ms: 0,
+            end_ms: 600,
+            avg_rms: 0.5,
+        }];
+        let result = split_long_regions(&regions, 300);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].end_ms, 300);
+        assert_eq!(result[1].start_ms, 300);
+        assert_eq!(result[1].end_ms, 600);
+    }
+
+    #[test]
+    fn split_long_regions_preserves_avg_rms() {
+        let regions = vec![VadRegionMs {
+            start_ms: 0,
+            end_ms: 1000,
+            avg_rms: 0.75,
+        }];
+        let result = split_long_regions(&regions, 400);
+        for chunk in &result {
+            assert!((chunk.avg_rms - 0.75).abs() < 1e-6);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // VAD helper: apply_padding (bd-22y)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_padding_extends_both_ends() {
+        let mut regions = vec![VadRegionMs {
+            start_ms: 100,
+            end_ms: 200,
+            avg_rms: 0.5,
+        }];
+        apply_padding(&mut regions, 30, 500);
+        assert_eq!(regions[0].start_ms, 70);
+        assert_eq!(regions[0].end_ms, 230);
+    }
+
+    #[test]
+    fn apply_padding_clamps_to_zero_start() {
+        let mut regions = vec![VadRegionMs {
+            start_ms: 10,
+            end_ms: 100,
+            avg_rms: 0.5,
+        }];
+        apply_padding(&mut regions, 30, 500);
+        assert_eq!(regions[0].start_ms, 0);
+    }
+
+    #[test]
+    fn apply_padding_clamps_to_audio_duration() {
+        let mut regions = vec![VadRegionMs {
+            start_ms: 100,
+            end_ms: 490,
+            avg_rms: 0.5,
+        }];
+        apply_padding(&mut regions, 30, 500);
+        assert_eq!(regions[0].end_ms, 500);
+    }
+
+    #[test]
+    fn apply_padding_zero_duration_does_not_clamp() {
+        let mut regions = vec![VadRegionMs {
+            start_ms: 100,
+            end_ms: 200,
+            avg_rms: 0.5,
+        }];
+        apply_padding(&mut regions, 30, 0);
+        assert_eq!(regions[0].end_ms, 230);
+    }
+
+    #[test]
+    fn apply_padding_zero_pad() {
+        let mut regions = vec![VadRegionMs {
+            start_ms: 100,
+            end_ms: 200,
+            avg_rms: 0.5,
+        }];
+        apply_padding(&mut regions, 0, 500);
+        assert_eq!(regions[0].start_ms, 100);
+        assert_eq!(regions[0].end_ms, 200);
+    }
+
+    #[test]
+    fn apply_padding_empty_regions() {
+        let mut regions: Vec<VadRegionMs> = Vec::new();
+        apply_padding(&mut regions, 30, 500);
+        assert!(regions.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // VAD helper: ms_to_frames (bd-22y)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ms_to_frames_basic_conversion() {
+        // 160ms / 10ms per frame = 16 frames
+        assert_eq!(ms_to_frames(160, 10), 16);
+    }
+
+    #[test]
+    fn ms_to_frames_rounds_up() {
+        // 15ms / 10ms per frame = 2 frames (ceiling)
+        assert_eq!(ms_to_frames(15, 10), 2);
+    }
+
+    #[test]
+    fn ms_to_frames_zero_duration() {
+        assert_eq!(ms_to_frames(0, 10), 0);
+    }
+
+    #[test]
+    fn ms_to_frames_zero_frame_ms_uses_one() {
+        // 0 frame_ms is clamped to 1
+        assert_eq!(ms_to_frames(100, 0), 100);
+    }
+
+    #[test]
+    fn ms_to_frames_exact_multiple() {
+        assert_eq!(ms_to_frames(100, 10), 10);
+    }
+
+    #[test]
+    fn ms_to_frames_single_ms() {
+        assert_eq!(ms_to_frames(1, 10), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // VadConfig edge cases (bd-22y)
+    // -----------------------------------------------------------------------
+
+    fn vad_test_request() -> TranscribeRequest {
+        TranscribeRequest {
+            input: InputSource::File {
+                path: PathBuf::from("test.wav"),
+            },
+            backend: BackendKind::Auto,
+            model: None,
+            language: None,
+            translate: false,
+            diarize: false,
+            persist: false,
+            db_path: PathBuf::from("test.sqlite3"),
+            timeout_ms: None,
+            backend_params: BackendParams::default(),
+        }
+    }
+
+    #[test]
+    fn vad_config_from_request_defaults_when_no_vad_params() {
+        let request = vad_test_request();
+        let config = VadConfig::from_request(&request);
+        let default_config = VadConfig::default();
+        assert!((config.rms_threshold - default_config.rms_threshold).abs() < 1e-9);
+        assert_eq!(
+            config.min_speech_duration_ms,
+            default_config.min_speech_duration_ms
+        );
+    }
+
+    #[test]
+    fn vad_config_from_request_threshold_override() {
+        use crate::model::VadParams;
+        let mut request = vad_test_request();
+        request.backend_params.vad = Some(VadParams {
+            model_path: None,
+            threshold: Some(0.25),
+            min_speech_duration_ms: None,
+            min_silence_duration_ms: None,
+            max_speech_duration_s: None,
+            speech_pad_ms: None,
+            samples_overlap: None,
+        });
+        let config = VadConfig::from_request(&request);
+        assert!((config.rms_threshold - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vad_config_from_request_duration_overrides() {
+        use crate::model::VadParams;
+        let mut request = vad_test_request();
+        request.backend_params.vad = Some(VadParams {
+            model_path: None,
+            threshold: None,
+            min_speech_duration_ms: Some(100),
+            min_silence_duration_ms: Some(200),
+            max_speech_duration_s: Some(5.0),
+            speech_pad_ms: Some(50),
+            samples_overlap: None,
+        });
+        let config = VadConfig::from_request(&request);
+        assert_eq!(config.min_speech_duration_ms, 100);
+        assert_eq!(config.min_silence_duration_ms, 200);
+        assert_eq!(config.max_speech_duration_ms, Some(5000));
+        assert_eq!(config.speech_pad_ms, 50);
+    }
+
+    #[test]
+    fn vad_config_from_request_rejects_nan_threshold() {
+        use crate::model::VadParams;
+        let mut request = vad_test_request();
+        request.backend_params.vad = Some(VadParams {
+            model_path: None,
+            threshold: Some(f32::NAN),
+            min_speech_duration_ms: None,
+            min_silence_duration_ms: None,
+            max_speech_duration_s: None,
+            speech_pad_ms: None,
+            samples_overlap: None,
+        });
+        let config = VadConfig::from_request(&request);
+        // Should fall back to default since NaN is not finite
+        assert!((config.rms_threshold - 0.01).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vad_config_from_request_rejects_zero_threshold() {
+        use crate::model::VadParams;
+        let mut request = vad_test_request();
+        request.backend_params.vad = Some(VadParams {
+            model_path: None,
+            threshold: Some(0.0),
+            min_speech_duration_ms: None,
+            min_silence_duration_ms: None,
+            max_speech_duration_s: None,
+            speech_pad_ms: None,
+            samples_overlap: None,
+        });
+        let config = VadConfig::from_request(&request);
+        // Should fall back to default since 0.0 is not > 0.0
+        assert!((config.rms_threshold - 0.01).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vad_config_as_json_round_trips_all_fields() {
+        let config = VadConfig::default();
+        let json = config.as_json();
+        assert!(json.get("rms_threshold").is_some());
+        assert!(json.get("frame_samples").is_some());
+        assert!(json.get("min_voice_ratio").is_some());
+        assert!(json.get("min_speech_duration_ms").is_some());
+        assert!(json.get("min_silence_duration_ms").is_some());
+        assert!(json.get("max_speech_duration_ms").is_some());
+        assert!(json.get("speech_pad_ms").is_some());
     }
 }

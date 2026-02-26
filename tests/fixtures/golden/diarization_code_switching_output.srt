@@ -1,0 +1,19 @@
+1
+00:00:00,000 --> 00:00:03,600
+[SPEAKER_00] We start in English before switching languages mid sentence.
+
+2
+00:00:03,600 --> 00:00:07,400
+[SPEAKER_01] Ahora cambiamos a espanol para validar code switching estable.
+
+3
+00:00:07,400 --> 00:00:11,000
+[SPEAKER_00] On bascule en francais puis on revient sans perdre le contexte.
+
+4
+00:00:11,000 --> 00:00:14,800
+[SPEAKER_01] Wir wechseln kurz ins Deutsche und keep the same intent.
+
+5
+00:00:14,800 --> 00:00:18,200
+[SPEAKER_00] Finally we return to English to close the mixed language sample.

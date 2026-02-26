@@ -1,16 +1,15 @@
-# Closeout Residual Risks Snapshot (2026-02-25, refreshed 20:44 UTC)
+# Closeout Residual Risks Snapshot (2026-02-25, refreshed 23:50 UTC)
 
-This packet documents current residual risk after bead reconciliation
-(`bd-1a1`, `bd-244`, `bd-217`).
+This packet documents current residual risk after U1 closure and packet reconciliation.
 
 ## Scope
 
 - Repository: `franken_whisper` (primary), with active cross-repo dependency on
   `frankensqlite`.
 - Active status inputs:
-  - `bd-1a1`: blocked
+  - `bd-1a1`: closed
   - `bd-244`: in progress
-  - `bd-217`: in progress (closeout synchronization)
+  - `bd-217`: closed
 
 ## Risk Register
 
@@ -29,44 +28,39 @@ This packet documents current residual risk after bead reconciliation
 - Exit criteria:
   - placeholder stage notes removed and replacement tests pass (happy/error/cancel paths).
 
-### RR-02: Golden-checksum drift lane is blocked by missing corpus artifact
-
-- Severity: high
-- Evidence:
-  - offloaded command:
-    `rch exec -- cargo test -p fsqlite-harness --test bd_1lsfu_2_core_sql_golden_checksums -- --nocapture`
-  - failure:
-    `bead_id=bd-1lsfu.2 case=fuzz_dir_canonicalize ... No such file or directory`.
-  - missing path:
-    `fuzz/corpus/fuzz_sql_parser`.
-- Impact:
-  - parser/planner/execution mismatch counts cannot be generated;
-  - checksum refresh cannot be safely attributed or validated.
-- Mitigation:
-  - restore/generate corpus directory before rerunning checksum lane.
-- Exit criteria:
-  - test advances to mismatch diff or pass state (no corpus-path failure).
-
-### RR-03: SSI runtime containment remains open
+### RR-02: SSI runtime containment remains open
 
 - Severity: medium-high
 - Evidence:
   - `bd-244` remains `in_progress` for CI-scale runtime containment and gate closure.
 - Impact:
-  - practical CI runtime envelope is not yet proven for the SSI-scale lane.
+  - practical CI runtime envelope and correctness closure are not yet finalized.
 - Mitigation:
   - finish runtime validation + guardrails and rerun mandatory gates via `rch`.
 - Exit criteria:
   - both `ci_scale` and `single_writer_smoke` outcomes documented with practical runtime evidence.
 
+### RR-03: Cross-repo local-only artifact dependence can regress reproducibility
+
+- Severity: medium
+- Evidence:
+  - U1 unblock required restoring ignored local-only path `fuzz/corpus/fuzz_sql_parser`.
+- Impact:
+  - workers/new hosts may regress to non-reproducible `fuzz_dir_canonicalize` failures
+    if local corpus prerequisites are absent.
+- Mitigation:
+  - keep corpus-setup prerequisite explicit in execution packets and operator notes.
+- Exit criteria:
+  - deterministic corpus bootstrap documented and automated for worker/offload workflows.
+
 ## Remaining Work Boundary
 
-- Completed: tracker/doc synchronization and ownership clarity (`bd-217` workstream).
-- Blocked: `bd-1a1` pending corpus source restoration.
+- Completed: `bd-1a1` checksum lane closure and `bd-217` tracker/doc synchronization.
+- Blocked: none in the current repo-level bead snapshot.
 - Active: `bd-244` runtime containment + mandatory-gate completion.
 
 ## Next Steps (Concrete)
 
-1. Unblock `bd-1a1` by restoring `fuzz/corpus/fuzz_sql_parser`.
-2. Complete `bd-244` and publish runtime + gate evidence.
-3. Close `bd-217` once packet docs remain synchronized with the above outcomes.
+1. Complete `bd-244` and publish runtime + gate evidence.
+2. Document/automate corpus bootstrap for worker/offload reproducibility.
+3. Re-run `bv --robot-triage` for next strictly remaining work.

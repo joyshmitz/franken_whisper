@@ -1,0 +1,19 @@
+1
+00:00:00,000 --> 00:00:03,200
+[SPEAKER_00] Background fan noise is present but speech remains intelligible.
+
+2
+00:00:03,200 --> 00:00:06,700
+[SPEAKER_01] Street traffic rises while the speaker confirms checkpoint alpha.
+
+3
+00:00:06,700 --> 00:00:09,900
+[SPEAKER_00] A keyboard clatter appears and the transcript should stay stable.
+
+4
+00:00:09,900 --> 00:00:13,400
+[SPEAKER_01] The channel briefly clips, then recovers without dropping words.
+
+5
+00:00:13,400 --> 00:00:16,800
+[SPEAKER_00] Final noisy segment confirms robustness under layered interference.

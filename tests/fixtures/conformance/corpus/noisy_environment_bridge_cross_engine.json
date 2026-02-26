@@ -1,0 +1,27 @@
+{
+  "name": "golden_noisy_environment_bridge_cross_engine",
+  "tags": ["noisy_environment", "bridge"],
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "pair_drift_caps": {
+    "max_timestamp_violations": 0,
+    "max_text_mismatches": 0,
+    "max_speaker_mismatches": 0,
+    "allow_length_mismatch": false
+  },
+  "canonical": [
+    {"start_sec": 0.0, "end_sec": 3.2, "text": "Background fan noise is present but speech remains intelligible.", "speaker": null, "confidence": null},
+    {"start_sec": 3.2, "end_sec": 6.7, "text": "Street traffic rises while the speaker confirms checkpoint alpha.", "speaker": null, "confidence": null},
+    {"start_sec": 6.7, "end_sec": 9.9, "text": "A keyboard clatter appears and the transcript should stay stable.", "speaker": null, "confidence": null},
+    {"start_sec": 9.9, "end_sec": 13.4, "text": "The channel briefly clips, then recovers without dropping words.", "speaker": null, "confidence": null},
+    {"start_sec": 13.4, "end_sec": 16.8, "text": "Final noisy segment confirms robustness under layered interference.", "speaker": null, "confidence": null}
+  ],
+  "engines": [
+    {"engine": "whisper_cpp_bridge_noisy_environment", "format": "json_payload", "artifact": "tests/fixtures/golden/whisper_cpp_noisy_environment_output.json", "expect_within_tolerance": true},
+    {"engine": "insanely_fast_bridge_noisy_environment", "format": "json_payload", "artifact": "tests/fixtures/golden/insanely_fast_noisy_environment_output.json", "expect_within_tolerance": true},
+    {"engine": "whisper_diarization_bridge_noisy_environment", "format": "diarization_srt", "artifact": "tests/fixtures/golden/diarization_noisy_environment_output.srt", "expect_within_tolerance": true}
+  ]
+}

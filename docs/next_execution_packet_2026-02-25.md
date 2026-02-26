@@ -1,62 +1,32 @@
-# Next Execution Packet (2026-02-25, refreshed 20:44 UTC)
+# Next Execution Packet (2026-02-25, refreshed 23:50 UTC)
 
-This packet is the current execution source-of-truth for remaining cross-repo
-work after bead reconciliation (`bd-1a1`, `bd-244`, `bd-217`).
+This packet is the current execution source-of-truth after U1/U5 reconciliation.
 
 ## Remaining Open Work (Current Snapshot)
 
-### EP-01: Unblock `bd-1a1` Golden-Checksum Drift Quantification
-
-- Bead: `bd-1a1`
-- Status: `blocked`
-- Owner: `PearlAnchor`
-- Scope:
-  - restore/provide required fuzz corpus path for `bd_1lsfu_2`:
-    `fuzz/corpus/fuzz_sql_parser`;
-  - rerun checksum gate and collect parser/planner/execution mismatch counts;
-  - perform controlled refresh only after mismatch evidence is captured.
-- Evidence artifact:
-  - `rch exec -- cargo test -p fsqlite-harness --test bd_1lsfu_2_core_sql_golden_checksums -- --nocapture`
-  - current failure: `bead_id=bd-1lsfu.2 case=fuzz_dir_canonicalize ... No such file or directory`.
-- Verification criteria:
-  - checksum test reaches `case=checksum_mismatch` or pass state (not corpus path failure);
-  - quantified mismatch breakdown is recorded;
-  - update-command path is executed only with explicit artifact capture.
-
-### EP-02: Complete `bd-244` SSI Runtime Containment + Mandatory Gate Closure
+### EP-01: Complete `bd-244` SSI Runtime Containment + Mandatory Gate Closure
 
 - Bead: `bd-244`
 - Status: `in_progress`
 - Owner: `TealCove`
 - Scope:
-  - validate practical runtime envelope for `ssi_serialization_correctness_ci_scale`
-    and `ssi_serialization_correctness_single_writer_smoke`;
-  - add guardrails if CI-scale remains non-practical;
-  - rerun mandatory gates after U1/U2 closure.
+  - finish CI-scale runtime/correctness containment path;
+  - publish mandatory gate matrix after containment/fix path converges.
 - Required command style:
   - all cargo gates offloaded via `rch exec -- ...`.
 - Verification criteria:
-  - runtime findings + guardrail decisions documented with command evidence;
-  - mandatory gate matrix reported with explicit pass/fail + blocker provenance.
+  - practical runtime evidence for `ci_scale` and `single_writer_smoke`;
+  - explicit pass/fail gate outcomes with blocker provenance.
 
-### EP-03: Close `bd-217` Reconciliation Packet
+## Recently Completed
 
-- Bead: `bd-217`
-- Status: `in_progress`
-- Owner: `PearlAnchor`
-- Scope:
-  - keep tracker/doc packet aligned to real bead/mail state;
-  - ensure only genuinely remaining work appears as open.
-- Verification criteria:
-  - `TODO_IMPLEMENTATION_TRACKER.md` reflects real status/evidence;
-  - cross-repo summary + residual-risk + next-execution docs are synchronized;
-  - bead is closed once synchronization is complete.
+- `bd-1a1` (`PearlAnchor`): corpus-path unblock + controlled golden refresh + checksum lane green + adjacent manifest/checksum tests green.
+- `bd-217` (`PearlAnchor`): tracker/doc reconciliation packet closed.
 
 ## Suggested Execution Order
 
-1. Resolve EP-01 blocker precondition (corpus source path) so U1 can emit real drift diagnostics.
-2. Finish EP-02 runtime containment and gate reruns.
-3. Close EP-03 packet once EP-01/EP-02 states are stable.
+1. Finish EP-01 (`bd-244`) and publish evidence.
+2. Re-run `bv --robot-triage` and open only truly remaining work.
 
 ## Done/Blocked Decision Rule
 

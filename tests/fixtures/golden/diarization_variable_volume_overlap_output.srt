@@ -1,0 +1,19 @@
+1
+00:00:00,000 --> 00:00:02,200
+[SPEAKER_00] Speaker one starts softly and states the rollout status.
+
+2
+00:00:02,200 --> 00:00:04,500
+[SPEAKER_01] Speaker two cuts in loudly with an urgent correction.
+
+3
+00:00:04,500 --> 00:00:06,700
+[SPEAKER_00] Speaker one responds at medium volume and clarifies scope.
+
+4
+00:00:06,700 --> 00:00:09,000
+[SPEAKER_02] Speaker three overlaps quietly to request a repeat.
+
+5
+00:00:09,000 --> 00:00:11,400
+[SPEAKER_01] All speakers align on the final action and volume normalizes.

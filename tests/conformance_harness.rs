@@ -12,12 +12,16 @@ use franken_whisper::conformance::{
 };
 use franken_whisper::model::{ReplayEnvelope, TranscriptionSegment};
 
-const MIN_CORPUS_FIXTURES: usize = 6;
-const REQUIRED_CORPUS_TAGS: [&str; 4] = [
+const MIN_CORPUS_FIXTURES: usize = 10;
+const REQUIRED_CORPUS_TAGS: [&str; 8] = [
     "long_form",
     "multilingual",
     "multi_speaker_overlap",
     "silence_heavy",
+    "noisy_environment",
+    "code_switching",
+    "short_utterance",
+    "variable_volume_overlap",
 ];
 
 #[derive(Debug, Deserialize)]

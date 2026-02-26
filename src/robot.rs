@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::error::{FwError, FwResult};
 use crate::model::{
@@ -612,6 +612,25 @@ pub fn emit_health_report(report: &HealthReport) -> FwResult<()> {
     emit_line(&health_report_value(report))
 }
 
+/// Extract acceleration stream ownership/cancellation telemetry from run evidence.
+#[must_use]
+pub fn acceleration_context_from_evidence(evidence: &[Value]) -> Option<Value> {
+    evidence.iter().rev().find_map(|entry| {
+        let has_stream_owner = entry
+            .get("logical_stream_owner_id")
+            .and_then(Value::as_str)
+            .is_some();
+        let has_fence = entry
+            .get("cancellation_fence")
+            .is_some_and(Value::is_object);
+        if has_stream_owner && has_fence {
+            Some(entry.clone())
+        } else {
+            None
+        }
+    })
+}
+
 fn dependency_check_json(check: &DependencyCheck) -> serde_json::Value {
     json!({
         "name": check.name,
@@ -675,6 +694,13 @@ pub fn robot_schema_value() -> serde_json::Value {
                     "transcript": "hello world",
                     "segments": [],
                     "acceleration": {"backend": "none", "normalized_confidences": true},
+                    "acceleration_context": {
+                        "logical_stream_owner_id": "trace:acceleration:none:cpu",
+                        "logical_stream_kind": "cpu_lane",
+                        "acceleration_backend": "none",
+                        "mode": "cpu_fallback",
+                        "cancellation_fence": {"status": "open"}
+                    },
                     "warnings": [],
                     "evidence": [],
                 }),
@@ -874,7 +900,7 @@ fn run_stage_value(run_id: &str, event: &RunEvent) -> serde_json::Value {
 }
 
 fn run_complete_value(report: &RunReport) -> serde_json::Value {
-    json!({
+    let mut value = json!({
         "event": "run_complete",
         "schema_version": ROBOT_SCHEMA_VERSION,
         "run_id": report.run_id,
@@ -888,7 +914,13 @@ fn run_complete_value(report: &RunReport) -> serde_json::Value {
         "acceleration": report.result.acceleration,
         "warnings": report.warnings,
         "evidence": report.evidence,
-    })
+    });
+    if let Some(acceleration_context) = acceleration_context_from_evidence(&report.evidence)
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("acceleration_context".to_owned(), acceleration_context);
+    }
+    value
 }
 
 #[cfg(test)]
@@ -1854,6 +1886,69 @@ mod tests {
         let value = run_complete_value(&report);
         assert!(value["acceleration"].is_object());
         assert_eq!(value["acceleration"]["backend"], "frankentorch");
+    }
+
+    #[test]
+    fn run_complete_includes_acceleration_context_when_present_in_evidence() {
+        use crate::model::{
+            BackendKind, BackendParams, InputSource, RunReport, TranscriptionResult,
+        };
+        use std::path::PathBuf;
+
+        let report = RunReport {
+            run_id: "accel-ctx-run".to_owned(),
+            trace_id: "00000000000000000000000000000000".to_owned(),
+            started_at_rfc3339: "2026-02-22T00:00:00Z".to_owned(),
+            finished_at_rfc3339: "2026-02-22T00:00:05Z".to_owned(),
+            input_path: "input.wav".to_owned(),
+            normalized_wav_path: "normalized.wav".to_owned(),
+            request: crate::model::TranscribeRequest {
+                input: InputSource::File {
+                    path: PathBuf::from("input.wav"),
+                },
+                backend: BackendKind::Auto,
+                model: None,
+                language: None,
+                translate: false,
+                diarize: false,
+                persist: false,
+                db_path: PathBuf::from("db.sqlite3"),
+                timeout_ms: None,
+                backend_params: BackendParams::default(),
+            },
+            result: TranscriptionResult {
+                backend: BackendKind::WhisperCpp,
+                transcript: "accel ctx".to_owned(),
+                language: Some("en".to_owned()),
+                segments: vec![],
+                acceleration: None,
+                raw_output: json!({}),
+                artifact_paths: vec![],
+            },
+            events: vec![],
+            warnings: vec![],
+            evidence: vec![
+                json!({"artifact": "other"}),
+                json!({
+                    "logical_stream_owner_id": "trace:acceleration:none:cpu",
+                    "logical_stream_kind": "cpu_lane",
+                    "acceleration_backend": "none",
+                    "mode": "cpu_fallback",
+                    "cancellation_fence": {"status": "open"},
+                }),
+            ],
+            replay: crate::model::ReplayEnvelope::default(),
+        };
+
+        let value = run_complete_value(&report);
+        assert_eq!(
+            value["acceleration_context"]["logical_stream_owner_id"],
+            "trace:acceleration:none:cpu"
+        );
+        assert_eq!(
+            value["acceleration_context"]["cancellation_fence"]["status"],
+            "open"
+        );
     }
 
     #[test]
@@ -3736,5 +3831,355 @@ mod tests {
             assert!(!dep.issues.is_empty(), "issues when unavailable");
             assert!(dep.issues[0].contains("not found"));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-1tl: acceleration_context_from_evidence tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn acceleration_context_from_evidence_returns_none_on_empty() {
+        let evidence: Vec<serde_json::Value> = vec![];
+        assert!(super::acceleration_context_from_evidence(&evidence).is_none());
+    }
+
+    #[test]
+    fn acceleration_context_from_evidence_returns_none_without_required_fields() {
+        let evidence = vec![
+            json!({"some_key": "some_value"}),
+            json!({"logical_stream_owner_id": "trace:accel:none:cpu"}),
+            json!({"cancellation_fence": {"epoch": 1}}),
+        ];
+        assert!(
+            super::acceleration_context_from_evidence(&evidence).is_none(),
+            "should return None when no single entry has both required fields"
+        );
+    }
+
+    #[test]
+    fn acceleration_context_from_evidence_returns_matching_entry() {
+        let matching = json!({
+            "logical_stream_owner_id": "trace:acceleration:none:cpu",
+            "cancellation_fence": {"epoch": 1, "reason": "budget_exceeded"},
+            "extra_field": 42,
+        });
+        let evidence = vec![json!({"unrelated": true}), matching.clone()];
+        let result = super::acceleration_context_from_evidence(&evidence);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), matching);
+    }
+
+    #[test]
+    fn acceleration_context_from_evidence_returns_last_matching_entry() {
+        let first_match = json!({
+            "logical_stream_owner_id": "trace:accel:v1",
+            "cancellation_fence": {"epoch": 1},
+        });
+        let second_match = json!({
+            "logical_stream_owner_id": "trace:accel:v2",
+            "cancellation_fence": {"epoch": 2},
+        });
+        let evidence = vec![first_match, second_match.clone()];
+        let result = super::acceleration_context_from_evidence(&evidence).unwrap();
+        assert_eq!(
+            result["logical_stream_owner_id"], "trace:accel:v2",
+            "should return the last (most recent) matching entry"
+        );
+    }
+
+    #[test]
+    fn acceleration_context_from_evidence_ignores_null_stream_owner() {
+        let evidence = vec![json!({
+            "logical_stream_owner_id": null,
+            "cancellation_fence": {"epoch": 1},
+        })];
+        assert!(
+            super::acceleration_context_from_evidence(&evidence).is_none(),
+            "null stream owner should not match (as_str returns None)"
+        );
+    }
+
+    #[test]
+    fn acceleration_context_from_evidence_ignores_non_object_fence() {
+        let evidence = vec![json!({
+            "logical_stream_owner_id": "trace:accel:cpu",
+            "cancellation_fence": "not-an-object",
+        })];
+        assert!(
+            super::acceleration_context_from_evidence(&evidence).is_none(),
+            "string cancellation_fence should not match (is_object returns false)"
+        );
+    }
+
+    #[test]
+    fn acceleration_context_from_evidence_ignores_array_fence() {
+        let evidence = vec![json!({
+            "logical_stream_owner_id": "trace:accel:cpu",
+            "cancellation_fence": [1, 2, 3],
+        })];
+        assert!(
+            super::acceleration_context_from_evidence(&evidence).is_none(),
+            "array cancellation_fence should not match"
+        );
+    }
+
+    #[test]
+    fn acceleration_context_from_evidence_accepts_empty_object_fence() {
+        let entry = json!({
+            "logical_stream_owner_id": "trace:accel:cpu",
+            "cancellation_fence": {},
+        });
+        let evidence = vec![entry.clone()];
+        let result = super::acceleration_context_from_evidence(&evidence).unwrap();
+        assert_eq!(result, entry, "empty object is still a valid object fence");
+    }
+
+    #[test]
+    fn acceleration_context_from_evidence_skips_numeric_stream_owner() {
+        let evidence = vec![json!({
+            "logical_stream_owner_id": 12345,
+            "cancellation_fence": {"epoch": 1},
+        })];
+        assert!(
+            super::acceleration_context_from_evidence(&evidence).is_none(),
+            "numeric stream owner should not match (as_str returns None)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-1tl: run_complete_value includes acceleration_context when present
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn run_complete_value_includes_acceleration_context_when_evidence_has_it() {
+        use crate::model::{
+            BackendKind, BackendParams, InputSource, RunReport, TranscriptionResult,
+        };
+        use std::path::PathBuf;
+
+        let report = RunReport {
+            run_id: "accel-ctx-test".to_owned(),
+            trace_id: "00000000000000000000000000000000".to_owned(),
+            started_at_rfc3339: "2026-02-26T00:00:00Z".to_owned(),
+            finished_at_rfc3339: "2026-02-26T00:00:01Z".to_owned(),
+            input_path: "test.wav".to_owned(),
+            normalized_wav_path: "norm.wav".to_owned(),
+            request: crate::model::TranscribeRequest {
+                input: InputSource::File {
+                    path: PathBuf::from("test.wav"),
+                },
+                backend: BackendKind::Auto,
+                model: None,
+                language: None,
+                translate: false,
+                diarize: false,
+                persist: false,
+                db_path: PathBuf::from("test.db"),
+                timeout_ms: None,
+                backend_params: BackendParams::default(),
+            },
+            result: TranscriptionResult {
+                backend: BackendKind::WhisperCpp,
+                transcript: "hello".to_owned(),
+                language: Some("en".to_owned()),
+                segments: vec![],
+                acceleration: None,
+                raw_output: json!({}),
+                artifact_paths: vec![],
+            },
+            events: vec![],
+            warnings: vec![],
+            evidence: vec![json!({
+                "logical_stream_owner_id": "trace:acceleration:none:cpu",
+                "cancellation_fence": {"epoch": 1},
+                "logical_stream_kind": "cpu_lane",
+            })],
+            replay: Default::default(),
+        };
+
+        let value = super::run_complete_value(&report);
+        assert!(
+            value.get("acceleration_context").is_some(),
+            "run_complete should include acceleration_context when evidence matches"
+        );
+        assert_eq!(
+            value["acceleration_context"]["logical_stream_owner_id"],
+            "trace:acceleration:none:cpu"
+        );
+    }
+
+    #[test]
+    fn run_complete_value_omits_acceleration_context_when_evidence_lacks_it() {
+        use crate::model::{
+            BackendKind, BackendParams, InputSource, RunReport, TranscriptionResult,
+        };
+        use std::path::PathBuf;
+
+        let report = RunReport {
+            run_id: "no-ctx-test".to_owned(),
+            trace_id: "00000000000000000000000000000000".to_owned(),
+            started_at_rfc3339: "2026-02-26T00:00:00Z".to_owned(),
+            finished_at_rfc3339: "2026-02-26T00:00:01Z".to_owned(),
+            input_path: "test.wav".to_owned(),
+            normalized_wav_path: "norm.wav".to_owned(),
+            request: crate::model::TranscribeRequest {
+                input: InputSource::File {
+                    path: PathBuf::from("test.wav"),
+                },
+                backend: BackendKind::Auto,
+                model: None,
+                language: None,
+                translate: false,
+                diarize: false,
+                persist: false,
+                db_path: PathBuf::from("test.db"),
+                timeout_ms: None,
+                backend_params: BackendParams::default(),
+            },
+            result: TranscriptionResult {
+                backend: BackendKind::WhisperCpp,
+                transcript: "hello".to_owned(),
+                language: Some("en".to_owned()),
+                segments: vec![],
+                acceleration: None,
+                raw_output: json!({}),
+                artifact_paths: vec![],
+            },
+            events: vec![],
+            warnings: vec![],
+            evidence: vec![json!({"unrelated": "data"})],
+            replay: Default::default(),
+        };
+
+        let value = super::run_complete_value(&report);
+        assert!(
+            value.get("acceleration_context").is_none(),
+            "run_complete should not include acceleration_context when evidence has no matching entry"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-1tl: transcript_retract_value schema compliance
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transcript_retract_value_contains_required_fields() {
+        let value = super::transcript_retract_value(
+            "run-retract",
+            42,
+            7,
+            "quality model disagrees",
+            "whisper-large-v3",
+        );
+        for field in super::TRANSCRIPT_RETRACT_REQUIRED_FIELDS {
+            assert!(
+                value.get(*field).is_some(),
+                "transcript.retract missing required field `{field}`"
+            );
+        }
+        assert_eq!(value["event"], "transcript.retract");
+        assert_eq!(value["retracted_seq"], 42);
+        assert_eq!(value["window_id"], 7);
+        assert_eq!(value["reason"], "quality model disagrees");
+        assert_eq!(value["quality_model_id"], "whisper-large-v3");
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-1tl: speculation_stats_value edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn speculation_stats_value_zero_windows_produces_zero_rate() {
+        let stats = crate::speculation::SpeculationStats {
+            windows_processed: 0,
+            corrections_emitted: 0,
+            confirmations_emitted: 0,
+            correction_rate: 0.0,
+            mean_fast_latency_ms: 0.0,
+            mean_quality_latency_ms: 0.0,
+            current_window_size_ms: 5000,
+            mean_drift_wer: 0.0,
+        };
+        let value = super::speculation_stats_value("run-zero", &stats);
+        assert_eq!(value["windows_processed"], 0);
+        assert_eq!(value["correction_rate"], 0.0);
+        assert_eq!(value["current_window_size_ms"], 5000);
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-1tl: transcript_partial_value edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transcript_partial_value_with_all_none_optional_fields() {
+        use crate::model::TranscriptionSegment;
+        let seg = TranscriptionSegment {
+            text: "hello".to_owned(),
+            start_sec: None,
+            end_sec: None,
+            confidence: None,
+            speaker: None,
+        };
+        let value = super::transcript_partial_value("run-opt", 0, "2026-02-26T00:00:00Z", &seg);
+        assert!(value["start_sec"].is_null());
+        assert!(value["end_sec"].is_null());
+        assert!(value["confidence"].is_null());
+        assert!(value["speaker"].is_null());
+        assert_eq!(value["text"], "hello");
+    }
+
+    #[test]
+    fn transcript_partial_value_with_all_fields_populated() {
+        use crate::model::TranscriptionSegment;
+        let seg = TranscriptionSegment {
+            text: "world".to_owned(),
+            start_sec: Some(1.5),
+            end_sec: Some(3.25),
+            confidence: Some(0.875),
+            speaker: Some("SPEAKER_01".to_owned()),
+        };
+        let value = super::transcript_partial_value("run-full", 5, "2026-02-26T00:01:00Z", &seg);
+        assert_eq!(value["text"], "world");
+        assert_eq!(value["start_sec"], 1.5);
+        assert_eq!(value["end_sec"], 3.25);
+        assert_eq!(value["confidence"], 0.875);
+        assert_eq!(value["speaker"], "SPEAKER_01");
+        assert_eq!(value["seq"], 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-1tl: backends_discovery_value edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn backends_discovery_value_empty_backends_list() {
+        use crate::model::BackendsReport;
+        let report = BackendsReport { backends: vec![] };
+        let value = super::backends_discovery_value(&report);
+        assert_eq!(value["event"], "backends.discovery");
+        assert!(value["backends"].as_array().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // bd-1tl: CheckStatus edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_status_debug_representation() {
+        assert_eq!(format!("{:?}", super::CheckStatus::Ok), "Ok");
+        assert_eq!(format!("{:?}", super::CheckStatus::Degraded), "Degraded");
+        assert_eq!(
+            format!("{:?}", super::CheckStatus::Unavailable),
+            "Unavailable"
+        );
+    }
+
+    #[test]
+    fn check_status_clone_and_copy() {
+        let status = super::CheckStatus::Degraded;
+        let cloned = status.clone();
+        let copied = status;
+        assert_eq!(cloned, copied);
+        assert_eq!(status, super::CheckStatus::Degraded);
     }
 }

@@ -3,6 +3,15 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
+use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+use symphonia::default::{get_codecs, get_probe};
+
 use crate::error::{FwError, FwResult};
 use crate::model::InputSource;
 use crate::process::{run_command_cancellable, run_command_with_timeout};
@@ -82,6 +91,22 @@ pub(crate) fn normalize_to_wav_with_timeout(
     token: Option<&crate::orchestrator::CancellationToken>,
 ) -> FwResult<PathBuf> {
     let output = work_dir.join("normalized_16k_mono.wav");
+    if should_use_builtin_normalizer() {
+        tracing::warn!(
+            stage = "normalize",
+            input = %input.display(),
+            "ffmpeg unavailable or bypassed; using built-in Rust normalizer fallback"
+        );
+        if let Some(tok) = token {
+            tok.checkpoint()?;
+        }
+        normalize_to_wav_with_builtin_decoder(input, &output)?;
+        if let Some(tok) = token {
+            tok.checkpoint()?;
+        }
+        return Ok(output);
+    }
+
     let args = vec![
         "-hide_banner".to_owned(),
         "-loglevel".to_owned(),
@@ -103,6 +128,207 @@ pub(crate) fn normalize_to_wav_with_timeout(
         run_command_with_timeout("ffmpeg", &args, None, Some(timeout))?;
     }
     Ok(output)
+}
+
+fn should_use_builtin_normalizer() -> bool {
+    let forced = std::env::var("FRANKEN_WHISPER_FORCE_BUILTIN_NORMALIZE")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+    forced || !crate::process::command_exists("ffmpeg")
+}
+
+fn normalize_to_wav_with_builtin_decoder(input: &Path, output: &Path) -> FwResult<()> {
+    let file = fs::File::open(input)?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = input.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
+
+    let mut probed = get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|error| {
+            FwError::Unsupported(format!(
+                "built-in normalizer could not open `{}`: {error}",
+                input.display()
+            ))
+        })?;
+
+    let (track_id, codec_params, sample_rate, channel_count) = {
+        let track = probed.format.default_track().ok_or_else(|| {
+            FwError::Unsupported(format!(
+                "built-in normalizer found no default audio track in `{}`",
+                input.display()
+            ))
+        })?;
+        if track.codec_params.codec == CODEC_TYPE_NULL {
+            return Err(FwError::Unsupported(format!(
+                "built-in normalizer found unsupported codec in `{}`",
+                input.display()
+            )));
+        }
+        let sample_rate = track.codec_params.sample_rate.ok_or_else(|| {
+            FwError::Unsupported(format!(
+                "built-in normalizer missing sample rate metadata in `{}`",
+                input.display()
+            ))
+        })?;
+        let channel_count = track
+            .codec_params
+            .channels
+            .map(|channels| channels.count())
+            .ok_or_else(|| {
+                FwError::Unsupported(format!(
+                    "built-in normalizer missing channel metadata in `{}`",
+                    input.display()
+                ))
+            })?;
+        (
+            track.id,
+            track.codec_params.clone(),
+            sample_rate,
+            channel_count,
+        )
+    };
+
+    let mut decoder = get_codecs()
+        .make(&codec_params, &DecoderOptions::default())
+        .map_err(|error| {
+            FwError::Unsupported(format!(
+                "built-in normalizer could not initialize decoder for `{}`: {error}",
+                input.display()
+            ))
+        })?;
+
+    let mut mono_samples = Vec::<f32>::new();
+    loop {
+        let packet = match probed.format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(io_err))
+                if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(error) => {
+                return Err(FwError::Unsupported(format!(
+                    "built-in normalizer failed while reading `{}`: {error}",
+                    input.display()
+                )));
+            }
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        match decoder.decode(&packet) {
+            Ok(decoded) => append_decoded_audio_to_mono(&mut mono_samples, decoded, channel_count),
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(SymphoniaError::IoError(io_err))
+                if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(SymphoniaError::ResetRequired) => {
+                return Err(FwError::Unsupported(format!(
+                    "built-in normalizer does not support codec reset streams for `{}`",
+                    input.display()
+                )));
+            }
+            Err(error) => {
+                return Err(FwError::Unsupported(format!(
+                    "built-in normalizer decode failed for `{}`: {error}",
+                    input.display()
+                )));
+            }
+        }
+    }
+
+    if mono_samples.is_empty() {
+        return Err(FwError::Unsupported(format!(
+            "built-in normalizer decoded no audio frames from `{}`; install ffmpeg for broader format support",
+            input.display()
+        )));
+    }
+
+    let normalized = resample_mono_linear(&mono_samples, sample_rate, 16_000);
+    write_mono_wav_i16(output, &normalized, 16_000)
+}
+
+fn append_decoded_audio_to_mono(
+    destination: &mut Vec<f32>,
+    decoded: AudioBufferRef<'_>,
+    channel_count: usize,
+) {
+    let mut sample_buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+    sample_buffer.copy_interleaved_ref(decoded);
+    let interleaved = sample_buffer.samples();
+
+    if channel_count <= 1 {
+        destination.extend_from_slice(interleaved);
+        return;
+    }
+
+    for frame in interleaved.chunks(channel_count) {
+        let sum: f32 = frame.iter().copied().sum();
+        destination.push(sum / channel_count as f32);
+    }
+}
+
+fn resample_mono_linear(input: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+    if src_rate == dst_rate {
+        return input.to_vec();
+    }
+
+    let ratio = src_rate as f64 / dst_rate as f64;
+    let output_len = (((input.len() as f64) * dst_rate as f64) / src_rate as f64).ceil() as usize;
+    let mut output = Vec::with_capacity(output_len.max(1));
+
+    for idx in 0..output_len.max(1) {
+        let src_pos = idx as f64 * ratio;
+        let left_idx = src_pos.floor() as usize;
+        let right_idx = left_idx.saturating_add(1);
+
+        let left = input[left_idx.min(input.len().saturating_sub(1))];
+        let right = input[right_idx.min(input.len().saturating_sub(1))];
+        let frac = (src_pos - left_idx as f64) as f32;
+        output.push(left + (right - left) * frac);
+    }
+
+    output
+}
+
+fn write_mono_wav_i16(path: &Path, samples: &[f32], sample_rate: u32) -> FwResult<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec).map_err(hound_error_to_fw)?;
+    for sample in samples {
+        let quantized = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16;
+        writer.write_sample(quantized).map_err(hound_error_to_fw)?;
+    }
+    writer.finalize().map_err(hound_error_to_fw)?;
+    Ok(())
+}
+
+fn hound_error_to_fw(error: hound::Error) -> FwError {
+    FwError::Io(std::io::Error::other(error.to_string()))
 }
 
 pub fn probe_duration_seconds(input: &Path) -> Option<f64> {
@@ -346,6 +572,25 @@ mod tests {
         // Either succeeds (ffmpeg installed and processes it somehow) or fails
         // gracefully with an error — no panics.
         let _ = result;
+    }
+
+    #[test]
+    fn builtin_normalizer_rewrites_wav_to_16k_mono() {
+        use super::normalize_to_wav_with_builtin_decoder;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input_wav = dir.path().join("input_8k.wav");
+        let output_wav = dir.path().join("normalized.wav");
+        let samples = vec![1_000i16; 8_000];
+        write_test_wav(&input_wav, &samples, 8_000);
+
+        normalize_to_wav_with_builtin_decoder(&input_wav, &output_wav)
+            .expect("built-in normalizer should decode wav");
+
+        let reader = hound::WavReader::open(&output_wav).expect("normalized wav should open");
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.sample_rate, 16_000);
     }
 
     #[test]

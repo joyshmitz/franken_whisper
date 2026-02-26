@@ -141,7 +141,7 @@ The release profile is optimized for size (`opt-level = "z"`, LTO, single codege
 ### Prerequisites
 
 - **Rust nightly** (2024 edition)
-- **ffmpeg**, required for audio normalization (must be on `$PATH`)
+- **ffmpeg** (recommended), used for maximum-format normalization and microphone capture; when unavailable, file-based normalization falls back to a built-in Rust decoder/resampler for common audio formats
 - **Backend binaries** (at least one):
   - `whisper-cli` (from whisper.cpp); override: `FRANKEN_WHISPER_WHISPER_CPP_BIN`
   - `insanely-fast-whisper` (Python); override: `FRANKEN_WHISPER_INSANELY_FAST_BIN`
@@ -713,7 +713,7 @@ The CPU fallback uses safe division: `value / sum` with a guard for near-zero su
 
 ### Audio Normalization Pipeline
 
-All input audio passes through ffmpeg before reaching any backend:
+By default, input audio is normalized with ffmpeg before reaching any backend:
 
 ```bash
 ffmpeg -hide_banner -loglevel error -y \
@@ -722,7 +722,9 @@ ffmpeg -hide_banner -loglevel error -y \
   <output_normalized_16k_mono.wav>
 ```
 
-This produces a standardized 16 kHz, mono, 16-bit PCM WAV regardless of input format. The normalize stage handles:
+This produces a standardized 16 kHz, mono, 16-bit PCM WAV regardless of input format. When ffmpeg is unavailable, franken_whisper falls back to a built-in Rust normalizer for common audio file formats (for example MP3/WAV/AAC-in-MP4); mic capture still requires ffmpeg.
+
+The normalize stage handles:
 
 - Any format ffmpeg can decode (MP3, FLAC, OGG, M4A, video files with audio tracks, etc.)
 - Sample rate conversion (44.1 kHz, 48 kHz, etc. down to 16 kHz)
@@ -981,7 +983,7 @@ For in-place strict replacement flows, use `--conflict-policy overwrite-strict`.
 ## Limitations
 
 - **Backend binaries required.** franken_whisper orchestrates external ASR engines; it does not include inference runtimes. You need whisper.cpp, insanely-fast-whisper, or whisper-diarization installed.
-- **ffmpeg required.** Audio normalization depends on ffmpeg being on PATH. There is no built-in audio decoder.
+- **ffmpeg strongly recommended.** ffmpeg enables the broadest media/container support and is required for microphone capture. A built-in Rust fallback can normalize common file-based audio formats when ffmpeg is unavailable.
 - **Path dependencies.** The project depends on sibling Cargo workspace members (`asupersync`, `frankensqlite`, etc.) via relative paths. It is not published to crates.io as a standalone crate.
 - **Native engines are pilots.** Native Rust engine implementations are deterministic conformance pilots. They can execute in-process when `FRANKEN_WHISPER_NATIVE_EXECUTION=1` and rollout stage is `primary|sole`; otherwise bridge adapters remain active.
 - **No bidirectional sync.** JSONL export/import is one-way. There is no merge or conflict resolution beyond the explicit `--conflict-policy` flag.
@@ -1071,7 +1073,7 @@ No. franken_whisper works with any single backend. The `auto` router will use wh
 
 **Q: What audio formats are supported?**
 
-Anything ffmpeg can decode. The normalize stage converts all input to 16kHz mono WAV before passing to backends.
+Anything ffmpeg can decode. If ffmpeg is missing, the built-in fallback still supports common file-based audio formats and normalizes to 16kHz mono WAV before backend execution.
 
 **Q: Can I use this as a library?**
 

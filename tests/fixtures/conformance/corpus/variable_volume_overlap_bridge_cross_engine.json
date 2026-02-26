@@ -1,0 +1,27 @@
+{
+  "name": "golden_variable_volume_overlap_bridge_cross_engine",
+  "tags": ["variable_volume_overlap", "bridge"],
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "pair_drift_caps": {
+    "max_timestamp_violations": 0,
+    "max_text_mismatches": 0,
+    "max_speaker_mismatches": 0,
+    "allow_length_mismatch": false
+  },
+  "canonical": [
+    {"start_sec": 0.0, "end_sec": 2.2, "text": "Speaker one starts softly and states the rollout status.", "speaker": null, "confidence": null},
+    {"start_sec": 2.2, "end_sec": 4.5, "text": "Speaker two cuts in loudly with an urgent correction.", "speaker": null, "confidence": null},
+    {"start_sec": 4.5, "end_sec": 6.7, "text": "Speaker one responds at medium volume and clarifies scope.", "speaker": null, "confidence": null},
+    {"start_sec": 6.7, "end_sec": 9.0, "text": "Speaker three overlaps quietly to request a repeat.", "speaker": null, "confidence": null},
+    {"start_sec": 9.0, "end_sec": 11.4, "text": "All speakers align on the final action and volume normalizes.", "speaker": null, "confidence": null}
+  ],
+  "engines": [
+    {"engine": "whisper_cpp_bridge_variable_volume_overlap", "format": "json_payload", "artifact": "tests/fixtures/golden/whisper_cpp_variable_volume_overlap_output.json", "expect_within_tolerance": true},
+    {"engine": "insanely_fast_bridge_variable_volume_overlap", "format": "json_payload", "artifact": "tests/fixtures/golden/insanely_fast_variable_volume_overlap_output.json", "expect_within_tolerance": true},
+    {"engine": "whisper_diarization_bridge_variable_volume_overlap", "format": "diarization_srt", "artifact": "tests/fixtures/golden/diarization_variable_volume_overlap_output.srt", "expect_within_tolerance": true}
+  ]
+}

@@ -107,7 +107,7 @@ fn write_whisper_cpp_stub_binary(dir: &std::path::Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     let stub_path = dir.join("whisper_cpp_stub.sh");
-    let script = r#"#!/usr/bin/env bash
+    let script = r#"#!/bin/bash
 set -euo pipefail
 out_prefix=""
 while [[ $# -gt 0 ]]; do
@@ -125,10 +125,7 @@ if [[ -z "${out_prefix}" ]]; then
   echo "missing -of output prefix" >&2
   exit 2
 fi
-mkdir -p "$(dirname "${out_prefix}")"
-cat > "${out_prefix}.json" <<'JSON'
-{"text":"stub transcript","language":"en","segments":[{"start":0.0,"end":0.5,"text":"stub transcript","speaker":"SPEAKER_00","confidence":0.9}]}
-JSON
+printf '%s\n' '{"text":"stub transcript","language":"en","segments":[{"start":0.0,"end":0.5,"text":"stub transcript","speaker":"SPEAKER_00","confidence":0.9}]}' > "${out_prefix}.json"
 "#;
     fs::write(&stub_path, script).expect("write stub");
     let mut perms = fs::metadata(&stub_path).expect("metadata").permissions();
@@ -182,17 +179,51 @@ fn generate_voiced_wav(path: &std::path::Path) {
 }
 
 #[cfg(unix)]
+fn generate_voiced_wav_without_ffmpeg(path: &std::path::Path) {
+    use std::f32::consts::TAU;
+
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 8_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec).expect("create wav");
+    let total_samples = 8_000usize / 4; // 250ms clip
+    for idx in 0..total_samples {
+        let phase = TAU * 440.0 * (idx as f32 / 8_000.0);
+        let sample = (phase.sin() * 0.25 * f32::from(i16::MAX)).round() as i16;
+        writer.write_sample(sample).expect("write sample");
+    }
+    writer.finalize().expect("finalize wav");
+}
+
+#[cfg(unix)]
 fn run_transcribe_json_with_stub(
     args: &[&str],
     stdin_payload: Option<&[u8]>,
     stub_bin: &std::path::Path,
     state_root: &std::path::Path,
 ) -> serde_json::Value {
+    run_transcribe_json_with_stub_env(args, stdin_payload, stub_bin, state_root, &[])
+}
+
+#[cfg(unix)]
+fn run_transcribe_json_with_stub_env(
+    args: &[&str],
+    stdin_payload: Option<&[u8]>,
+    stub_bin: &std::path::Path,
+    state_root: &std::path::Path,
+    extra_env: &[(&str, &str)],
+) -> serde_json::Value {
     let mut cmd = ProcessCommand::new(env!("CARGO_BIN_EXE_franken_whisper"));
     cmd.arg("transcribe");
     cmd.args(args);
     cmd.env("FRANKEN_WHISPER_WHISPER_CPP_BIN", stub_bin);
     cmd.env("FRANKEN_WHISPER_STATE_DIR", state_root);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -1773,6 +1804,42 @@ fn transcribe_file_input_crosses_ingest_normalize_backend_with_stub_whisper_cpp(
 
 #[cfg(unix)]
 #[test]
+fn transcribe_file_input_uses_builtin_normalizer_when_ffmpeg_missing() {
+    let dir = tempdir().expect("tempdir");
+    let state_root = dir.path().join("state");
+    let stub_bin = write_whisper_cpp_stub_binary(dir.path());
+    let input_wav = dir.path().join("file_input_builtin.wav");
+    generate_voiced_wav_without_ffmpeg(&input_wav);
+
+    let report = run_transcribe_json_with_stub_env(
+        &[
+            "--input",
+            input_wav.to_str().expect("utf8"),
+            "--backend",
+            "whisper-cpp",
+            "--no-persist",
+            "--json",
+        ],
+        None,
+        &stub_bin,
+        &state_root,
+        &[
+            ("PATH", ""),
+            ("FRANKEN_WHISPER_FORCE_BUILTIN_NORMALIZE", "1"),
+        ],
+    );
+
+    assert_eq!(report["result"]["backend"], "whisper_cpp");
+    assert_eq!(report["result"]["transcript"], "stub transcript");
+    let events = report["events"].as_array().expect("events");
+    assert!(
+        events.iter().any(|event| event["code"] == "normalize.ok"),
+        "expected normalize.ok event in report events"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn transcribe_stdin_input_crosses_ingest_normalize_backend_with_stub_whisper_cpp() {
     if !ffmpeg_available() {
         return;
@@ -2021,6 +2088,20 @@ fn transcribe_acceleration_context_telemetry_round_trips_in_run_artifacts() {
     assert!(fence["budget_remaining_ms"].is_number() || fence["budget_remaining_ms"].is_null());
     assert!(fence["error"].is_null());
     assert!(fence["error_code"].is_null());
+
+    let run_level_context = &report["acceleration_context"];
+    assert_eq!(
+        run_level_context["logical_stream_owner_id"],
+        payload["logical_stream_owner_id"]
+    );
+    assert_eq!(
+        run_level_context["logical_stream_kind"],
+        payload["logical_stream_kind"]
+    );
+    assert_eq!(
+        run_level_context["cancellation_fence"],
+        payload["cancellation_fence"]
+    );
 
     let evidence = report["evidence"]
         .as_array()
@@ -2598,4 +2679,85 @@ fn run_report_with_evidence_and_warnings_round_trips() {
     assert_eq!(details.run_id, "evidence-1");
     assert_eq!(details.segments.len(), 2);
     assert_eq!(details.events.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Robot: health subcommand
+// ---------------------------------------------------------------------------
+
+#[test]
+fn robot_health_args_parse_correctly() {
+    use clap::Parser;
+    let cli = Cli::parse_from([
+        "franken_whisper",
+        "robot",
+        "health",
+        "--db",
+        "/tmp/health_test.sqlite3",
+    ]);
+    match cli.command {
+        Command::Robot { command } => match command {
+            franken_whisper::cli::RobotCommand::Health(args) => {
+                assert_eq!(
+                    args.db,
+                    std::path::PathBuf::from("/tmp/health_test.sqlite3")
+                );
+            }
+            other => panic!("expected Health, got {other:?}"),
+        },
+        other => panic!("expected Robot, got {other:?}"),
+    }
+}
+
+#[test]
+fn robot_health_default_db_path() {
+    use clap::Parser;
+    let cli = Cli::parse_from(["franken_whisper", "robot", "health"]);
+    match cli.command {
+        Command::Robot { command } => match command {
+            franken_whisper::cli::RobotCommand::Health(args) => {
+                assert_eq!(
+                    args.db,
+                    std::path::PathBuf::from(".franken_whisper/storage.sqlite3")
+                );
+            }
+            other => panic!("expected Health, got {other:?}"),
+        },
+        other => panic!("expected Robot, got {other:?}"),
+    }
+}
+
+#[test]
+fn robot_health_produces_valid_ndjson_event() {
+    use franken_whisper::robot::{
+        HEALTH_REPORT_REQUIRED_FIELDS, build_health_report, health_report_value,
+    };
+
+    let report = build_health_report(std::path::Path::new("/tmp/health_integration_test.sqlite3"));
+    let value = health_report_value(&report);
+
+    // Verify all required fields are present.
+    for field in HEALTH_REPORT_REQUIRED_FIELDS {
+        assert!(
+            value.get(field).is_some(),
+            "health report missing required field `{field}`"
+        );
+    }
+
+    // Verify event type.
+    assert_eq!(value["event"], "health.report");
+
+    // Verify overall_status is one of the valid values.
+    let status = value["overall_status"].as_str().unwrap();
+    assert!(
+        ["ok", "degraded", "unavailable"].contains(&status),
+        "unexpected overall_status: {status}"
+    );
+
+    // Verify backends is an array.
+    assert!(value["backends"].is_array(), "backends should be an array");
+
+    // Verify the output serializes to valid NDJSON.
+    let serialized = serde_json::to_string(&value).expect("serialize");
+    let _roundtrip: serde_json::Value = serde_json::from_str(&serialized).expect("roundtrip parse");
 }

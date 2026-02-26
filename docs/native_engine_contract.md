@@ -73,18 +73,40 @@ Golden corpus fixtures live in `tests/fixtures/conformance/corpus/`. Each fixtur
 
 ```json
 {
-  "name": "short-english-male",
-  "audio_fixture": "tests/fixtures/audio/short-english-male.wav",
-  "canonical_segments": [ ... ],
-  "engines": {
-    "whisper.cpp": { "format": "json_payload", "payload": { ... } },
-    "whisper.cpp-native": { "format": "json_payload", "payload": { ... } }
-  },
+  "name": "golden_short_utterance_bridge_cross_engine",
+  "tags": ["short_utterance", "bridge"],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,
     "require_speaker_exact": false
-  }
+  },
+  "pair_drift_caps": {
+    "max_timestamp_violations": 0,
+    "max_text_mismatches": 0,
+    "max_speaker_mismatches": 0,
+    "allow_length_mismatch": false
+  },
+  "canonical": [ ... ],
+  "engines": [
+    {
+      "engine": "whisper_cpp_bridge_short_utterance",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/whisper_cpp_short_utterance_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "insanely_fast_bridge_short_utterance",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/insanely_fast_short_utterance_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_diarization_bridge_short_utterance",
+      "format": "diarization_srt",
+      "artifact": "tests/fixtures/golden/diarization_short_utterance_output.srt",
+      "expect_within_tolerance": true
+    }
+  ]
 }
 ```
 
@@ -95,8 +117,8 @@ must satisfy all of these gates:
 
 | Gate | Requirement | Enforcement |
 |---|---|---|
-| Corpus size | `>= 6` fixtures | `MIN_CORPUS_FIXTURES` in `tests/conformance_harness.rs` |
-| Scenario tags | Must include `long_form`, `multilingual`, `multi_speaker_overlap`, `silence_heavy` | `REQUIRED_CORPUS_TAGS` in `tests/conformance_harness.rs` |
+| Corpus size | `>= 10` fixtures | `MIN_CORPUS_FIXTURES` in `tests/conformance_harness.rs` |
+| Scenario tags | Must include `long_form`, `multilingual`, `multi_speaker_overlap`, `silence_heavy`, `noisy_environment`, `code_switching`, `short_utterance`, `variable_volume_overlap` | `REQUIRED_CORPUS_TAGS` in `tests/conformance_harness.rs` |
 | Backend-family presence | For each family (`whisper_cpp`, `insanely_fast`, `whisper_diarization`), at least one bridge + one native engine fixture must be present | `per_backend_family_coverage` gate summary |
 | Pairwise drift caps | Every engine pair must remain within per-fixture `pair_drift_caps` | `pair_report_within_caps` gate check |
 
@@ -106,7 +128,7 @@ Harness outputs a machine-readable gate summary in:
 
 ### 3.3 Canonical Segments
 
-Each fixture defines `canonical_segments` as the ground-truth reference. This is typically derived from the bridge adapter's output on a fixed engine version, manually verified for correctness.
+Each fixture defines `canonical` segments as the ground-truth reference. This is typically derived from the bridge adapter's output on a fixed engine version, manually verified for correctness.
 
 ## 4. Shadow-Run Comparison
 

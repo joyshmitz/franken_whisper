@@ -61,7 +61,7 @@
 - [x] Persist replay envelope metadata (input hash, engine identity/version, output hash) for deterministic drift checks (`ReplayEnvelope` struct with `input_content_hash`, `backend_identity`, `backend_version`, `output_payload_hash`; populated in orchestrator; persisted in storage; round-trip tests in `tests/replay_envelope.rs`).
 - [x] Engine compatibility spec (docs/engine_compatibility_spec.md: timestamp monotonicity, confidence [0,1] bounds, speaker label validation, cross-engine tolerance bands, replay determinism requirements).
 - [x] Runtime segment conformance validation (confidence bounds [0,1], empty speaker label rejection, timestamp ordering) enforced in orchestrator between backend and acceleration stages.
-- [ ] Add GPU device/stream ownership and cancellation semantics to run-level telemetry.
+- [x] Add GPU device/stream ownership and cancellation semantics to run-level telemetry (run-level `acceleration_context` now emitted in transcribe JSON and robot `run_complete` when evidence is present; covered by `tests/cli_integration.rs::transcribe_acceleration_context_telemetry_round_trips_in_run_artifacts` and `src/robot.rs::run_complete_includes_acceleration_context_when_present_in_evidence`).
 
 ## Non-Negotiable Contracts
 

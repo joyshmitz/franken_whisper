@@ -7,8 +7,8 @@ use franken_whisper::cli::{
     SyncCommand, TtyAudioCommand, TtyAudioControlCommand, TtyAudioRecoveryPolicy,
 };
 use franken_whisper::robot::{
-    build_health_report, emit_health_report, emit_robot_complete, emit_robot_error,
-    emit_robot_stage, emit_robot_start, robot_schema_value,
+    acceleration_context_from_evidence, build_health_report, emit_health_report,
+    emit_robot_complete, emit_robot_error, emit_robot_stage, emit_robot_start, robot_schema_value,
 };
 use franken_whisper::storage::RunStore;
 use franken_whisper::tty_audio;
@@ -49,7 +49,14 @@ fn run() -> FwResult<()> {
             let report = engine.transcribe(request)?;
 
             if args.json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                let mut value = serde_json::to_value(&report)?;
+                if let Some(acceleration_context) =
+                    acceleration_context_from_evidence(&report.evidence)
+                    && let Some(object) = value.as_object_mut()
+                {
+                    object.insert("acceleration_context".to_owned(), acceleration_context);
+                }
+                println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
                 println!("{}", report.result.transcript);
             }

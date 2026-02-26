@@ -1,6 +1,6 @@
 mod insanely_fast;
 mod insanely_fast_native;
-mod native_audio;
+pub(crate) mod native_audio;
 pub mod normalize;
 mod whisper_cpp;
 mod whisper_cpp_native;
@@ -938,6 +938,9 @@ impl StreamingEngine for WhisperCppNativeEngine {
 }
 
 /// Unit struct for the insanely-fast-whisper engine.
+///
+/// `StreamingEngine` is implemented via the default batch-then-replay adapter
+/// because insanely-fast-whisper does not natively support streaming output.
 pub struct InsanelyFastEngine;
 
 impl Engine for InsanelyFastEngine {
@@ -969,6 +972,8 @@ impl Engine for InsanelyFastEngine {
         insanely_fast::run(request, normalized_wav, work_dir, timeout, None)
     }
 }
+
+impl StreamingEngine for InsanelyFastEngine {}
 
 /// Unit struct for the native insanely-fast engine (bd-1rj.10 pilot).
 ///
@@ -1007,7 +1012,12 @@ impl Engine for InsanelyFastNativeEngine {
     }
 }
 
+impl StreamingEngine for InsanelyFastNativeEngine {}
+
 /// Unit struct for the whisper-diarization engine.
+///
+/// `StreamingEngine` is implemented via the default batch-then-replay adapter
+/// because whisper-diarization does not natively support streaming output.
 pub struct WhisperDiarizationEngine;
 
 impl Engine for WhisperDiarizationEngine {
@@ -1039,6 +1049,8 @@ impl Engine for WhisperDiarizationEngine {
         whisper_diarization::run(request, normalized_wav, work_dir, timeout, None)
     }
 }
+
+impl StreamingEngine for WhisperDiarizationEngine {}
 
 /// Unit struct for the native whisper-diarization engine (bd-1rj.11 pilot).
 ///
@@ -1077,6 +1089,8 @@ impl Engine for WhisperDiarizationNativeEngine {
     }
 }
 
+impl StreamingEngine for WhisperDiarizationNativeEngine {}
+
 /// Returns all registered engines as trait objects.
 pub fn all_engines() -> Vec<Box<dyn Engine>> {
     vec![
@@ -1097,6 +1111,32 @@ pub fn engine_for(kind: BackendKind) -> Option<Box<dyn Engine>> {
         BackendKind::WhisperDiarization => Some(Box::new(WhisperDiarizationEngine)),
         BackendKind::Auto => None,
     }
+}
+
+/// Look up a streaming-capable engine by `BackendKind`.
+///
+/// All concrete backend engines implement `StreamingEngine`. Backends that
+/// do not natively support streaming use the default batch-then-replay
+/// adapter provided by the trait.
+pub fn streaming_engine_for(kind: BackendKind) -> Option<Box<dyn StreamingEngine>> {
+    match kind {
+        BackendKind::WhisperCpp => Some(Box::new(WhisperCppEngine)),
+        BackendKind::InsanelyFast => Some(Box::new(InsanelyFastEngine)),
+        BackendKind::WhisperDiarization => Some(Box::new(WhisperDiarizationEngine)),
+        BackendKind::Auto => None,
+    }
+}
+
+/// Returns all registered engines as streaming-capable trait objects.
+pub fn all_streaming_engines() -> Vec<Box<dyn StreamingEngine>> {
+    vec![
+        Box::new(WhisperCppEngine),
+        Box::new(WhisperCppNativeEngine),
+        Box::new(InsanelyFastEngine),
+        Box::new(InsanelyFastNativeEngine),
+        Box::new(WhisperDiarizationEngine),
+        Box::new(WhisperDiarizationNativeEngine),
+    ]
 }
 
 #[derive(Debug, Clone)]
@@ -3635,16 +3675,16 @@ mod tests {
         ADAPTIVE_FALLBACK_CALIBRATION_THRESHOLD, ADAPTIVE_MIN_SAMPLES, BackendHealthReport,
         BackendImplementation, BackendSelectionContract, CANONICAL_SEGMENT_TOLERANCE_MS,
         CalibrationState, DiarizationPilot, DiarizedSegment, DiarizedTranscript, Engine,
-        InsanelyFastPilot, NativeEngineContract, QualitySelector, ROUTER_HISTORY_WINDOW,
-        RouterState, RoutingEvidenceLedger, RoutingEvidenceLedgerEntry, RoutingOutcomeRecord,
-        SegmentConformanceReport, SegmentConformanceViolation, SegmentViolationKind,
-        ShadowDivergenceKind, ShadowRunConfig, ShadowRunDivergence, ShadowRunReport, SpeakerInfo,
-        TranscriptSegment, TwoLaneExecutor, WhisperCppPilot, auto_priority,
-        check_segment_conformance, compare_shadow_results, duration_bucket,
-        evaluate_backend_selection, extract_segments_from_json, is_hf_token_set, latency_proxy,
-        native_runtime_metadata, number_millis_to_secs, number_to_secs,
-        posterior_success_probability, prior_for, probe_system_health,
-        probe_system_health_uncached, quality_proxy, runtime_metadata,
+        InsanelyFastEngine, InsanelyFastPilot, NativeEngineContract, QualitySelector,
+        ROUTER_HISTORY_WINDOW, RouterState, RoutingEvidenceLedger, RoutingEvidenceLedgerEntry,
+        RoutingOutcomeRecord, SegmentConformanceReport, SegmentConformanceViolation,
+        SegmentViolationKind, ShadowDivergenceKind, ShadowRunConfig, ShadowRunDivergence,
+        ShadowRunReport, SpeakerInfo, TranscriptSegment, TwoLaneExecutor, WhisperCppEngine,
+        WhisperCppPilot, WhisperDiarizationEngine, auto_priority, check_segment_conformance,
+        compare_shadow_results, duration_bucket, evaluate_backend_selection,
+        extract_segments_from_json, is_hf_token_set, latency_proxy, native_runtime_metadata,
+        number_millis_to_secs, number_to_secs, posterior_success_probability, prior_for,
+        probe_system_health, probe_system_health_uncached, quality_proxy, runtime_metadata,
         runtime_metadata_with_implementation, segment_end, segment_start, transcript_from_segments,
     };
     use crate::conformance::NativeEngineRolloutStage;
@@ -5922,6 +5962,69 @@ mod tests {
         }
     }
 
+    // ── StreamingEngine impl coverage for all concrete engines ──
+
+    #[test]
+    fn all_engines_implement_streaming_engine() {
+        let engines = super::all_streaming_engines();
+        assert_eq!(
+            engines.len(),
+            6,
+            "all 6 concrete engines should be streaming-capable"
+        );
+        let names: Vec<&str> = engines.iter().map(|e| e.name()).collect();
+        assert!(names.contains(&"whisper.cpp"));
+        assert!(names.contains(&"whisper.cpp-native"));
+        assert!(names.contains(&"insanely-fast-whisper"));
+        assert!(names.contains(&"insanely-fast-native"));
+        assert!(names.contains(&"whisper-diarization"));
+        assert!(names.contains(&"whisper-diarization-native"));
+    }
+
+    #[test]
+    fn streaming_engine_for_returns_correct_engines() {
+        let cpp = super::streaming_engine_for(BackendKind::WhisperCpp);
+        assert!(cpp.is_some());
+        assert_eq!(cpp.unwrap().name(), "whisper.cpp");
+
+        let fast = super::streaming_engine_for(BackendKind::InsanelyFast);
+        assert!(fast.is_some());
+        assert_eq!(fast.unwrap().name(), "insanely-fast-whisper");
+
+        let diar = super::streaming_engine_for(BackendKind::WhisperDiarization);
+        assert!(diar.is_some());
+        assert_eq!(diar.unwrap().name(), "whisper-diarization");
+
+        assert!(super::streaming_engine_for(BackendKind::Auto).is_none());
+    }
+
+    #[test]
+    fn insanely_fast_engine_streaming_reports_non_native() {
+        let engine = InsanelyFastEngine;
+        assert!(
+            !engine.capabilities().supports_streaming,
+            "insanely-fast does not natively support streaming"
+        );
+    }
+
+    #[test]
+    fn whisper_diarization_engine_streaming_reports_non_native() {
+        let engine = WhisperDiarizationEngine;
+        assert!(
+            !engine.capabilities().supports_streaming,
+            "whisper-diarization does not natively support streaming"
+        );
+    }
+
+    #[test]
+    fn whisper_cpp_engine_streaming_reports_native() {
+        let engine = WhisperCppEngine;
+        assert!(
+            engine.capabilities().supports_streaming,
+            "whisper.cpp natively supports streaming"
+        );
+    }
+
     // =========================================================================
     // Adaptive Router State tests (bd-efr.1)
     // =========================================================================
@@ -7445,6 +7548,103 @@ mod tests {
         }
     }
 
+    // ── bd-vup: WhisperCppPilot error scenario tests ──
+
+    #[test]
+    fn whisper_cpp_pilot_zero_duration_produces_empty() {
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let segments = pilot.transcribe(0);
+        assert!(
+            segments.is_empty(),
+            "zero-duration audio should produce no segments"
+        );
+    }
+
+    #[test]
+    fn whisper_cpp_pilot_very_short_duration_single_segment() {
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        // 1ms of audio → still one segment due to div_ceil.
+        let segments = pilot.transcribe(1);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start_ms, 0);
+        assert_eq!(segments[0].end_ms, 1);
+    }
+
+    #[test]
+    fn whisper_cpp_pilot_extremely_long_duration() {
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        // 24 hours of audio = 86_400_000 ms.
+        let segments = pilot.transcribe(86_400_000);
+        // 86_400_000 / 5000 = 17_280 segments.
+        assert_eq!(segments.len(), 17_280);
+
+        // First segment starts at 0, last ends at duration.
+        assert_eq!(segments[0].start_ms, 0);
+        assert_eq!(segments.last().unwrap().end_ms, 86_400_000);
+
+        // Confidence wraps through phrase cycle but always decreases.
+        assert!(segments[0].confidence > segments.last().unwrap().confidence);
+    }
+
+    #[test]
+    fn whisper_cpp_pilot_empty_model_path_still_works() {
+        // Pilot is a mock — empty model path should not cause a panic.
+        let pilot = WhisperCppPilot::new(String::new(), 4, None, false);
+        let segments = pilot.transcribe(5000);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(pilot.model_path, "");
+    }
+
+    #[test]
+    fn whisper_cpp_pilot_zero_threads() {
+        // Zero threads: the pilot is a mock so this should not panic.
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 0, None, false);
+        assert_eq!(pilot.n_threads, 0);
+        let segments = pilot.transcribe(10_000);
+        assert_eq!(segments.len(), 2);
+    }
+
+    #[test]
+    fn whisper_cpp_pilot_translate_flag_stored() {
+        let pilot = WhisperCppPilot::new("m.bin".to_owned(), 2, Some("ja".to_owned()), true);
+        assert!(pilot.translate);
+        assert_eq!(pilot.language.as_deref(), Some("ja"));
+        // Translate flag doesn't affect mock output, but should be stored.
+        let segments = pilot.transcribe(5000);
+        assert_eq!(segments.len(), 1);
+    }
+
+    #[test]
+    fn whisper_cpp_pilot_phrase_cycle_wraps() {
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        // 5 segments → phrases cycle at index 4 (mod 4 == 0).
+        let segments = pilot.transcribe(25_000);
+        assert_eq!(segments.len(), 5);
+        assert_eq!(segments[0].text, segments[4].text);
+    }
+
+    #[test]
+    fn whisper_cpp_pilot_segment_boundaries_are_contiguous() {
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let segments = pilot.transcribe(20_000);
+        for window in segments.windows(2) {
+            assert_eq!(
+                window[0].end_ms, window[1].start_ms,
+                "segments should be contiguous: end of one = start of next"
+            );
+        }
+    }
+
+    #[test]
+    fn whisper_cpp_pilot_exact_boundary_duration() {
+        // Exactly 5000ms → exactly 1 segment, not 2.
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let segments = pilot.transcribe(5000);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start_ms, 0);
+        assert_eq!(segments[0].end_ms, 5000);
+    }
+
     // ── bd-1rj.10: InsanelyFastPilot tests ──
 
     #[test]
@@ -7512,6 +7712,123 @@ mod tests {
         );
         let results = pilot.transcribe_batch(&[]);
         assert!(results.is_empty());
+    }
+
+    // ── bd-rxn: InsanelyFastPilot edge-case tests ──
+
+    #[test]
+    fn insanely_fast_pilot_zero_duration_in_batch() {
+        let pilot = InsanelyFastPilot::new(
+            "model".to_owned(),
+            4,
+            "cuda:0".to_owned(),
+            "float16".to_owned(),
+        );
+        let results = pilot.transcribe_batch(&[0, 10_000, 0]);
+        assert_eq!(results.len(), 3);
+        assert!(
+            results[0].is_empty(),
+            "zero-duration should produce no segments"
+        );
+        assert!(!results[1].is_empty(), "10s should produce segments");
+        assert!(
+            results[2].is_empty(),
+            "zero-duration should produce no segments"
+        );
+    }
+
+    #[test]
+    fn insanely_fast_pilot_single_ms_duration() {
+        let pilot = InsanelyFastPilot::new(
+            "model".to_owned(),
+            1,
+            "cpu".to_owned(),
+            "float32".to_owned(),
+        );
+        let results = pilot.transcribe_batch(&[1]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].len(), 1);
+        assert_eq!(results[0][0].start_ms, 0);
+        assert_eq!(results[0][0].end_ms, 1);
+    }
+
+    #[test]
+    fn insanely_fast_pilot_extremely_long_batch() {
+        let pilot = InsanelyFastPilot::new(
+            "model".to_owned(),
+            4,
+            "cuda:0".to_owned(),
+            "float16".to_owned(),
+        );
+        // 12 hours = 43_200_000 ms, segment_duration = 10_000 ms → 4320 segments.
+        let results = pilot.transcribe_batch(&[43_200_000]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].len(), 4320);
+        assert_eq!(results[0].last().unwrap().end_ms, 43_200_000);
+    }
+
+    #[test]
+    fn insanely_fast_pilot_batch_segments_are_contiguous() {
+        let pilot = InsanelyFastPilot::new(
+            "model".to_owned(),
+            4,
+            "cuda:0".to_owned(),
+            "float16".to_owned(),
+        );
+        let results = pilot.transcribe_batch(&[30_000]);
+        for window in results[0].windows(2) {
+            assert_eq!(
+                window[0].end_ms, window[1].start_ms,
+                "segments within a batch file should be contiguous"
+            );
+        }
+    }
+
+    #[test]
+    fn insanely_fast_pilot_confidence_decreases_within_file() {
+        let pilot = InsanelyFastPilot::new(
+            "model".to_owned(),
+            4,
+            "cuda:0".to_owned(),
+            "float16".to_owned(),
+        );
+        let results = pilot.transcribe_batch(&[30_000]);
+        for window in results[0].windows(2) {
+            assert!(
+                window[0].confidence > window[1].confidence,
+                "confidence should decrease with segment index"
+            );
+        }
+    }
+
+    #[test]
+    fn insanely_fast_pilot_phrase_cycle_wraps_per_batch_index() {
+        let pilot = InsanelyFastPilot::new(
+            "model".to_owned(),
+            4,
+            "cuda:0".to_owned(),
+            "float16".to_owned(),
+        );
+        // Two files: texts should differ based on batch_idx offset.
+        let results = pilot.transcribe_batch(&[10_000, 10_000]);
+        assert_ne!(
+            results[0][0].text, results[1][0].text,
+            "different batch indices should produce different starting phrases"
+        );
+    }
+
+    #[test]
+    fn insanely_fast_pilot_exact_boundary_duration() {
+        let pilot = InsanelyFastPilot::new(
+            "model".to_owned(),
+            4,
+            "cuda:0".to_owned(),
+            "float16".to_owned(),
+        );
+        // Exactly 10_000ms → exactly 1 segment.
+        let results = pilot.transcribe_batch(&[10_000]);
+        assert_eq!(results[0].len(), 1);
+        assert_eq!(results[0][0].end_ms, 10_000);
     }
 
     // ── bd-1rj.11: DiarizationPilot tests ──
@@ -7636,6 +7953,151 @@ mod tests {
         let result = pilot.process(4000);
         assert_eq!(result.segments.len(), 2);
         assert_eq!(result.segments[1].end_ms, 4000);
+    }
+
+    // ── bd-rxn: DiarizationPilot edge-case tests ──
+
+    #[test]
+    fn diarization_pilot_single_speaker() {
+        let pilot = DiarizationPilot::new(
+            "whisper".to_owned(),
+            "wav2vec2".to_owned(),
+            Some(1),
+            "en".to_owned(),
+        );
+        let result = pilot.process(9000);
+        assert_eq!(result.speakers.len(), 1);
+        assert_eq!(result.speakers[0].id, "SPEAKER_00");
+        for seg in &result.segments {
+            assert_eq!(
+                seg.speaker_id, "SPEAKER_00",
+                "all segments should be one speaker"
+            );
+        }
+    }
+
+    #[test]
+    fn diarization_pilot_many_speakers() {
+        let pilot = DiarizationPilot::new(
+            "whisper".to_owned(),
+            "wav2vec2".to_owned(),
+            Some(5),
+            "en".to_owned(),
+        );
+        let result = pilot.process(15_000);
+        assert_eq!(result.speakers.len(), 5);
+        // Speakers should be ordered by ID.
+        for window in result.speakers.windows(2) {
+            assert!(
+                window[0].id < window[1].id,
+                "speakers should be sorted by id"
+            );
+        }
+    }
+
+    #[test]
+    fn diarization_pilot_auto_speakers_defaults_to_two() {
+        let pilot = DiarizationPilot::new(
+            "whisper".to_owned(),
+            "wav2vec2".to_owned(),
+            None,
+            "en".to_owned(),
+        );
+        let result = pilot.process(6000);
+        assert_eq!(result.speakers.len(), 2, "auto-detect should default to 2");
+    }
+
+    #[test]
+    fn diarization_pilot_extremely_long_duration() {
+        let pilot = DiarizationPilot::new(
+            "whisper".to_owned(),
+            "wav2vec2".to_owned(),
+            Some(3),
+            "en".to_owned(),
+        );
+        // 1 hour = 3_600_000 ms, segment_duration = 3000 ms → 1200 segments.
+        let result = pilot.process(3_600_000);
+        assert_eq!(result.segments.len(), 1200);
+        assert_eq!(result.segments.last().unwrap().end_ms, 3_600_000);
+    }
+
+    #[test]
+    fn diarization_pilot_segments_are_contiguous() {
+        let pilot = DiarizationPilot::new(
+            "whisper".to_owned(),
+            "wav2vec2".to_owned(),
+            Some(2),
+            "en".to_owned(),
+        );
+        let result = pilot.process(12_000);
+        for window in result.segments.windows(2) {
+            assert_eq!(
+                window[0].end_ms, window[1].start_ms,
+                "segments should be contiguous"
+            );
+        }
+    }
+
+    #[test]
+    fn diarization_pilot_speaker_durations_sum_to_total() {
+        let pilot = DiarizationPilot::new(
+            "whisper".to_owned(),
+            "wav2vec2".to_owned(),
+            Some(2),
+            "en".to_owned(),
+        );
+        let result = pilot.process(12_000);
+        let total_speaker_ms: u64 = result.speakers.iter().map(|s| s.total_duration_ms).sum();
+        let total_segment_ms: u64 = result.segments.iter().map(|s| s.end_ms - s.start_ms).sum();
+        assert_eq!(
+            total_speaker_ms, total_segment_ms,
+            "speaker durations should sum to total segment time"
+        );
+    }
+
+    #[test]
+    fn diarization_pilot_confidence_decreases() {
+        let pilot = DiarizationPilot::new(
+            "whisper".to_owned(),
+            "wav2vec2".to_owned(),
+            Some(2),
+            "en".to_owned(),
+        );
+        let result = pilot.process(12_000);
+        for window in result.segments.windows(2) {
+            assert!(
+                window[0].confidence > window[1].confidence,
+                "confidence should decrease with segment index"
+            );
+        }
+    }
+
+    #[test]
+    fn diarization_pilot_utterance_cycle_wraps() {
+        let pilot = DiarizationPilot::new(
+            "whisper".to_owned(),
+            "wav2vec2".to_owned(),
+            Some(2),
+            "en".to_owned(),
+        );
+        // 7 segments → utterances cycle at index 6 (mod 6 == 0).
+        let result = pilot.process(21_000);
+        assert_eq!(result.segments.len(), 7);
+        assert_eq!(result.segments[0].text, result.segments[6].text);
+    }
+
+    #[test]
+    fn diarization_pilot_single_ms_duration() {
+        let pilot = DiarizationPilot::new(
+            "whisper".to_owned(),
+            "wav2vec2".to_owned(),
+            Some(2),
+            "en".to_owned(),
+        );
+        let result = pilot.process(1);
+        assert_eq!(result.segments.len(), 1);
+        assert_eq!(result.segments[0].start_ms, 0);
+        assert_eq!(result.segments[0].end_ms, 1);
     }
 
     // ── bd-efr.3: TwoLaneExecutor tests ──
