@@ -4175,11 +4175,11 @@ mod tests {
     }
 
     #[test]
-    fn check_status_clone_and_copy() {
+    fn check_status_copy_semantics() {
         let status = super::CheckStatus::Degraded;
-        let cloned = status.clone();
         let copied = status;
-        assert_eq!(cloned, copied);
+        let copied2 = status;
+        assert_eq!(copied, copied2);
         assert_eq!(status, super::CheckStatus::Degraded);
     }
 }

@@ -1,0 +1,11 @@
+{
+  "text": "Speaker one starts softly and states the rollout status. Speaker two cuts in loudly with an urgent correction. Speaker one responds at medium volume and clarifies scope. Speaker three overlaps quietly to request a repeat. All speakers align on the final action and volume normalizes.",
+  "segments": [
+    {"start": 0.0, "end": 2.2, "text": " Speaker one starts softly and states the rollout status.", "avg_logprob": -0.24, "no_speech_prob": 0.01},
+    {"start": 2.2, "end": 4.5, "text": " Speaker two cuts in loudly with an urgent correction.", "avg_logprob": -0.23, "no_speech_prob": 0.01},
+    {"start": 4.5, "end": 6.7, "text": " Speaker one responds at medium volume and clarifies scope.", "avg_logprob": -0.22, "no_speech_prob": 0.01},
+    {"start": 6.7, "end": 9.0, "text": " Speaker three overlaps quietly to request a repeat.", "avg_logprob": -0.22, "no_speech_prob": 0.01},
+    {"start": 9.0, "end": 11.4, "text": " All speakers align on the final action and volume normalizes.", "avg_logprob": -0.21, "no_speech_prob": 0.01}
+  ],
+  "language": "en"
+}

@@ -1,0 +1,10 @@
+{
+  "text": "We start in English before switching languages mid sentence. Ahora cambiamos a espanol para validar code switching estable. On bascule en francais puis on revient sans perdre le contexte. Wir wechseln kurz ins Deutsche und keep the same intent. Finally we return to English to close the mixed language sample.",
+  "chunks": [
+    {"text": " We start in English before switching languages mid sentence.", "timestamp": [0.0, 3.6]},
+    {"text": " Ahora cambiamos a espanol para validar code switching estable.", "timestamp": [3.6, 7.4]},
+    {"text": " On bascule en francais puis on revient sans perdre le contexte.", "timestamp": [7.4, 11.0]},
+    {"text": " Wir wechseln kurz ins Deutsche und keep the same intent.", "timestamp": [11.0, 14.8]},
+    {"text": " Finally we return to English to close the mixed language sample.", "timestamp": [14.8, 18.2]}
+  ]
+}

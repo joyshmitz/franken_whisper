@@ -1,0 +1,11 @@
+{
+  "text": "We start in English before switching languages mid sentence. Ahora cambiamos a espanol para validar code switching estable. On bascule en francais puis on revient sans perdre le contexte. Wir wechseln kurz ins Deutsche und keep the same intent. Finally we return to English to close the mixed language sample.",
+  "segments": [
+    {"start": 0.0, "end": 3.6, "text": " We start in English before switching languages mid sentence.", "avg_logprob": -0.24, "no_speech_prob": 0.01},
+    {"start": 3.6, "end": 7.4, "text": " Ahora cambiamos a espanol para validar code switching estable.", "avg_logprob": -0.23, "no_speech_prob": 0.01},
+    {"start": 7.4, "end": 11.0, "text": " On bascule en francais puis on revient sans perdre le contexte.", "avg_logprob": -0.22, "no_speech_prob": 0.01},
+    {"start": 11.0, "end": 14.8, "text": " Wir wechseln kurz ins Deutsche und keep the same intent.", "avg_logprob": -0.22, "no_speech_prob": 0.01},
+    {"start": 14.8, "end": 18.2, "text": " Finally we return to English to close the mixed language sample.", "avg_logprob": -0.21, "no_speech_prob": 0.01}
+  ],
+  "language": "multi"
+}

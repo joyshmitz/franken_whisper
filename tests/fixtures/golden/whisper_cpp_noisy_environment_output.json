@@ -1,0 +1,11 @@
+{
+  "text": "Background fan noise is present but speech remains intelligible. Street traffic rises while the speaker confirms checkpoint alpha. A keyboard clatter appears and the transcript should stay stable. The channel briefly clips, then recovers without dropping words. Final noisy segment confirms robustness under layered interference.",
+  "segments": [
+    {"start": 0.0, "end": 3.2, "text": " Background fan noise is present but speech remains intelligible.", "avg_logprob": -0.24, "no_speech_prob": 0.01},
+    {"start": 3.2, "end": 6.7, "text": " Street traffic rises while the speaker confirms checkpoint alpha.", "avg_logprob": -0.23, "no_speech_prob": 0.01},
+    {"start": 6.7, "end": 9.9, "text": " A keyboard clatter appears and the transcript should stay stable.", "avg_logprob": -0.22, "no_speech_prob": 0.01},
+    {"start": 9.9, "end": 13.4, "text": " The channel briefly clips, then recovers without dropping words.", "avg_logprob": -0.22, "no_speech_prob": 0.01},
+    {"start": 13.4, "end": 16.8, "text": " Final noisy segment confirms robustness under layered interference.", "avg_logprob": -0.21, "no_speech_prob": 0.01}
+  ],
+  "language": "en"
+}

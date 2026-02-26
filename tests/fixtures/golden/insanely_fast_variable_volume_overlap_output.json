@@ -1,0 +1,10 @@
+{
+  "text": "Speaker one starts softly and states the rollout status. Speaker two cuts in loudly with an urgent correction. Speaker one responds at medium volume and clarifies scope. Speaker three overlaps quietly to request a repeat. All speakers align on the final action and volume normalizes.",
+  "chunks": [
+    {"text": " Speaker one starts softly and states the rollout status.", "timestamp": [0.0, 2.2]},
+    {"text": " Speaker two cuts in loudly with an urgent correction.", "timestamp": [2.2, 4.5]},
+    {"text": " Speaker one responds at medium volume and clarifies scope.", "timestamp": [4.5, 6.7]},
+    {"text": " Speaker three overlaps quietly to request a repeat.", "timestamp": [6.7, 9.0]},
+    {"text": " All speakers align on the final action and volume normalizes.", "timestamp": [9.0, 11.4]}
+  ]
+}

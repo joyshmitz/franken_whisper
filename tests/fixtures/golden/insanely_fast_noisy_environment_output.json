@@ -1,0 +1,10 @@
+{
+  "text": "Background fan noise is present but speech remains intelligible. Street traffic rises while the speaker confirms checkpoint alpha. A keyboard clatter appears and the transcript should stay stable. The channel briefly clips, then recovers without dropping words. Final noisy segment confirms robustness under layered interference.",
+  "chunks": [
+    {"text": " Background fan noise is present but speech remains intelligible.", "timestamp": [0.0, 3.2]},
+    {"text": " Street traffic rises while the speaker confirms checkpoint alpha.", "timestamp": [3.2, 6.7]},
+    {"text": " A keyboard clatter appears and the transcript should stay stable.", "timestamp": [6.7, 9.9]},
+    {"text": " The channel briefly clips, then recovers without dropping words.", "timestamp": [9.9, 13.4]},
+    {"text": " Final noisy segment confirms robustness under layered interference.", "timestamp": [13.4, 16.8]}
+  ]
+}
