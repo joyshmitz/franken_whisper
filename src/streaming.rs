@@ -131,12 +131,14 @@ impl SpeculativeStreamingPipeline {
 
         let fast_bridge = move || -> Vec<TranscriptSegment> {
             let original = fast_fn();
-            *fast_holder_bridge.lock().expect("lock poisoned") = original.clone();
+            *fast_holder_bridge.lock().unwrap_or_else(|e| e.into_inner()) = original.clone();
             original.iter().map(to_backend_segment).collect()
         };
         let quality_bridge = move || -> Vec<TranscriptSegment> {
             let original = quality_fn();
-            *quality_holder_bridge.lock().expect("lock poisoned") = original.clone();
+            *quality_holder_bridge
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = original.clone();
             original.iter().map(to_backend_segment).collect()
         };
 
@@ -147,7 +149,10 @@ impl SpeculativeStreamingPipeline {
             |_primary, _secondary, _p_lat, _q_lat| {},
         );
 
-        let fast_segments = fast_holder.lock().expect("lock poisoned").clone();
+        let fast_segments = fast_holder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         // Register with tracker and window manager.
         let fast_ts = chrono::Utc::now().to_rfc3339();
@@ -185,7 +190,10 @@ impl SpeculativeStreamingPipeline {
         }
 
         // Use captured original model segments (no round-trip conversion).
-        let quality_segments = quality_holder.lock().expect("lock poisoned").clone();
+        let quality_segments = quality_holder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         self.window_manager
             .record_quality_result(window_id, quality_segments.clone());
 
@@ -518,6 +526,34 @@ mod tests {
         assert_eq!(bs2.start_ms, 0);
         assert_eq!(bs2.end_ms, 0);
         assert!((bs2.confidence - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn poisoned_mutex_recovers_via_into_inner() {
+        // Verify the pattern used in process_window_by_id: if one lane panics
+        // while holding a Mutex, the other lane (and the caller) can still
+        // recover the stored data via `unwrap_or_else(|e| e.into_inner())`.
+        let holder: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
+        let h = holder.clone();
+
+        // Poison the mutex by panicking while holding the lock.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut guard = h.lock().unwrap();
+            guard.push(42);
+            panic!("intentional panic to poison the mutex");
+        }));
+        assert!(result.is_err(), "closure should have panicked");
+
+        // The mutex is now poisoned — .lock() returns Err.
+        assert!(holder.lock().is_err());
+
+        // But unwrap_or_else(|e| e.into_inner()) recovers the data.
+        let recovered = holder.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            *recovered,
+            vec![42],
+            "data should be recoverable from poisoned mutex"
+        );
     }
 
     #[test]
