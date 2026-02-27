@@ -2535,14 +2535,18 @@ fn extract_word_level_segments(chunks: &[Value]) -> Vec<TranscriptionSegment> {
 
         if let Some(words) = chunk.get("words").and_then(Value::as_array) {
             for word_node in words {
-                let start = word_node
-                    .get("start")
-                    .or_else(|| word_node.pointer("/timestamp/0"))
-                    .and_then(number_to_secs);
-                let end = word_node
-                    .get("end")
-                    .or_else(|| word_node.pointer("/timestamp/1"))
-                    .and_then(number_to_secs);
+                let start = sanitize_timestamp(
+                    word_node
+                        .get("start")
+                        .or_else(|| word_node.pointer("/timestamp/0"))
+                        .and_then(number_to_secs),
+                );
+                let end = sanitize_timestamp(
+                    word_node
+                        .get("end")
+                        .or_else(|| word_node.pointer("/timestamp/1"))
+                        .and_then(number_to_secs),
+                );
                 let text = word_node
                     .get("word")
                     .or_else(|| word_node.get("text"))
@@ -2638,23 +2642,27 @@ fn segments_from_nodes(nodes: &[Value]) -> Vec<TranscriptionSegment> {
 }
 
 fn segment_start(node: &Value) -> Option<f64> {
-    if let Some(value) = node.pointer("/offsets/from") {
-        return number_millis_to_secs(value);
-    }
-    node.get("start")
-        .or_else(|| node.pointer("/timestamp/0"))
-        .or_else(|| node.pointer("/timestamp/start"))
-        .and_then(number_to_secs)
+    let raw = if let Some(value) = node.pointer("/offsets/from") {
+        number_millis_to_secs(value)
+    } else {
+        node.get("start")
+            .or_else(|| node.pointer("/timestamp/0"))
+            .or_else(|| node.pointer("/timestamp/start"))
+            .and_then(number_to_secs)
+    };
+    sanitize_timestamp(raw)
 }
 
 fn segment_end(node: &Value) -> Option<f64> {
-    if let Some(value) = node.pointer("/offsets/to") {
-        return number_millis_to_secs(value);
-    }
-    node.get("end")
-        .or_else(|| node.pointer("/timestamp/1"))
-        .or_else(|| node.pointer("/timestamp/end"))
-        .and_then(number_to_secs)
+    let raw = if let Some(value) = node.pointer("/offsets/to") {
+        number_millis_to_secs(value)
+    } else {
+        node.get("end")
+            .or_else(|| node.pointer("/timestamp/1"))
+            .or_else(|| node.pointer("/timestamp/end"))
+            .and_then(number_to_secs)
+    };
+    sanitize_timestamp(raw)
 }
 
 fn number_to_secs(value: &Value) -> Option<f64> {
@@ -2663,6 +2671,16 @@ fn number_to_secs(value: &Value) -> Option<f64> {
 
 fn number_millis_to_secs(value: &Value) -> Option<f64> {
     number_to_secs(value).map(|seconds| seconds / 1_000.0)
+}
+
+/// Sanitize a raw timestamp: strip NaN, Infinity, and negative values.
+///
+/// Backend JSON output can produce non-finite or negative timestamps
+/// when the model fails to align audio.  Replacing them with `None`
+/// at the extraction boundary keeps downstream pipeline stages safe
+/// and matches the conformance contract checked later in the pipeline.
+fn sanitize_timestamp(t: Option<f64>) -> Option<f64> {
+    t.filter(|v| v.is_finite() && *v >= 0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -3740,7 +3758,8 @@ mod tests {
         latency_proxy, native_runtime_metadata, number_millis_to_secs, number_to_secs,
         posterior_success_probability, prior_for, probe_system_health,
         probe_system_health_uncached, quality_proxy, runtime_metadata,
-        runtime_metadata_with_implementation, segment_end, segment_start, transcript_from_segments,
+        runtime_metadata_with_implementation, sanitize_timestamp, segment_end, segment_start,
+        transcript_from_segments,
     };
     use crate::conformance::NativeEngineRolloutStage;
     use crate::model::{
@@ -4476,25 +4495,45 @@ mod tests {
     }
 
     #[test]
-    fn extract_segments_negative_timestamps_are_preserved() {
+    fn extract_segments_negative_timestamps_are_sanitized() {
         let input = serde_json::json!({
             "segments": [{"text": "negative", "start": -1.0, "end": -0.5}]
         });
         let segments = extract_segments_from_json(&input);
-        assert_eq!(segments[0].start_sec, Some(-1.0));
-        assert_eq!(segments[0].end_sec, Some(-0.5));
+        assert_eq!(
+            segments[0].start_sec, None,
+            "negative start should be sanitized to None"
+        );
+        assert_eq!(
+            segments[0].end_sec, None,
+            "negative end should be sanitized to None"
+        );
     }
 
     #[test]
-    fn extract_segments_infinity_nan_timestamps() {
+    fn extract_segments_infinity_nan_timestamps_sanitized() {
+        // Infinity case (JSON encodes infinity as null, but test the sanitization path).
         let input = serde_json::json!({
             "segments": [{"text": "inf", "start": f64::INFINITY}]
         });
         let segments = extract_segments_from_json(&input);
-        // JSON encodes infinity as null, so it should be None
-        assert!(
-            segments[0].start_sec.is_none() || segments[0].start_sec == Some(f64::INFINITY),
-            "infinity handled gracefully"
+        assert_eq!(
+            segments[0].start_sec, None,
+            "infinity should be sanitized to None"
+        );
+
+        // NaN case — JSON can't represent NaN directly, but test via negative infinity.
+        let input_neg = serde_json::json!({
+            "segments": [{"text": "neginf", "start": f64::NEG_INFINITY, "end": f64::NEG_INFINITY}]
+        });
+        let segments_neg = extract_segments_from_json(&input_neg);
+        assert_eq!(
+            segments_neg[0].start_sec, None,
+            "negative infinity should be sanitized"
+        );
+        assert_eq!(
+            segments_neg[0].end_sec, None,
+            "negative infinity should be sanitized"
         );
     }
 
@@ -4508,6 +4547,72 @@ mod tests {
         let input = serde_json::json!({"segments": items});
         let segments = extract_segments_from_json(&input);
         assert_eq!(segments.len(), 1000);
+    }
+
+    #[test]
+    fn sanitize_timestamp_strips_nan() {
+        assert_eq!(sanitize_timestamp(Some(f64::NAN)), None);
+    }
+
+    #[test]
+    fn sanitize_timestamp_strips_positive_infinity() {
+        assert_eq!(sanitize_timestamp(Some(f64::INFINITY)), None);
+    }
+
+    #[test]
+    fn sanitize_timestamp_strips_negative_infinity() {
+        assert_eq!(sanitize_timestamp(Some(f64::NEG_INFINITY)), None);
+    }
+
+    #[test]
+    fn sanitize_timestamp_strips_negative_values() {
+        assert_eq!(sanitize_timestamp(Some(-0.5)), None);
+        assert_eq!(sanitize_timestamp(Some(-100.0)), None);
+    }
+
+    #[test]
+    fn sanitize_timestamp_preserves_zero() {
+        assert_eq!(sanitize_timestamp(Some(0.0)), Some(0.0));
+    }
+
+    #[test]
+    fn sanitize_timestamp_preserves_valid_positive() {
+        assert_eq!(sanitize_timestamp(Some(1.5)), Some(1.5));
+        assert_eq!(sanitize_timestamp(Some(3600.0)), Some(3600.0));
+    }
+
+    #[test]
+    fn sanitize_timestamp_preserves_none() {
+        assert_eq!(sanitize_timestamp(None), None);
+    }
+
+    #[test]
+    fn extract_segments_zero_timestamp_preserved() {
+        let input = serde_json::json!({
+            "segments": [{"text": "start", "start": 0.0, "end": 1.0}]
+        });
+        let segments = extract_segments_from_json(&input);
+        assert_eq!(segments[0].start_sec, Some(0.0));
+        assert_eq!(segments[0].end_sec, Some(1.0));
+    }
+
+    #[test]
+    fn extract_segments_word_level_negative_timestamps_sanitized() {
+        let input = serde_json::json!({
+            "chunks": [{
+                "words": [{"word": "bad", "start": -1.0, "end": 2.0}]
+            }]
+        });
+        let segments = extract_segments_from_json(&input);
+        assert_eq!(
+            segments[0].start_sec, None,
+            "word-level negative start sanitized"
+        );
+        assert_eq!(
+            segments[0].end_sec,
+            Some(2.0),
+            "word-level valid end preserved"
+        );
     }
 
     // --- Engine trait implementation tests ---
