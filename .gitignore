@@ -57,3 +57,12 @@ storage.sqlite3-shm
 *.corrupt
 *.corrupt-*
 *.bak-wal
+
+# Build artifacts
+a.out
+
+# Beads recovery/orphan artifacts
+.beads/*.orphan_*
+.beads/*.corrupt_*
+.beads/*.pre_recovery_*
+.beads/*.recover*.sql
