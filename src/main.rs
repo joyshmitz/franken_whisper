@@ -4,7 +4,7 @@ use std::time::Duration;
 use clap::Parser;
 use franken_whisper::cli::{
     Cli, Command, ControlFrameKind, RobotCommand, RunsOutputFormat, ShutdownController,
-    SyncCommand, TtyAudioCommand, TtyAudioControlCommand, TtyAudioRecoveryPolicy,
+    SyncCommand, TtyAudioCommand, TtyAudioControlCommand,
 };
 use franken_whisper::robot::{
     acceleration_context_from_evidence, build_health_report, emit_health_report,
@@ -241,26 +241,10 @@ fn run() -> FwResult<()> {
                 tty_audio::encode_to_stdout(&input, chunk_ms)
             }
             TtyAudioCommand::Decode { output, recovery } => {
-                let policy = match recovery {
-                    TtyAudioRecoveryPolicy::FailClosed => {
-                        tty_audio::DecodeRecoveryPolicy::FailClosed
-                    }
-                    TtyAudioRecoveryPolicy::SkipMissing => {
-                        tty_audio::DecodeRecoveryPolicy::SkipMissing
-                    }
-                };
-                tty_audio::decode_from_stdin_to_wav_with_policy(&output, policy)
+                tty_audio::decode_from_stdin_to_wav_with_policy(&output, recovery.into())
             }
             TtyAudioCommand::RetransmitPlan { recovery } => {
-                let policy = match recovery {
-                    TtyAudioRecoveryPolicy::FailClosed => {
-                        tty_audio::DecodeRecoveryPolicy::FailClosed
-                    }
-                    TtyAudioRecoveryPolicy::SkipMissing => {
-                        tty_audio::DecodeRecoveryPolicy::SkipMissing
-                    }
-                };
-                let plan = tty_audio::retransmit_plan_from_stdin(policy)?;
+                let plan = tty_audio::retransmit_plan_from_stdin(recovery.into())?;
                 println!("{}", serde_json::to_string(&plan)?);
                 Ok(())
             }
@@ -306,15 +290,7 @@ fn run() -> FwResult<()> {
                     )
                 }
                 TtyAudioControlCommand::RetransmitLoop { recovery, rounds } => {
-                    let policy = match recovery {
-                        TtyAudioRecoveryPolicy::FailClosed => {
-                            tty_audio::DecodeRecoveryPolicy::FailClosed
-                        }
-                        TtyAudioRecoveryPolicy::SkipMissing => {
-                            tty_audio::DecodeRecoveryPolicy::SkipMissing
-                        }
-                    };
-                    tty_audio::emit_retransmit_loop_from_stdin(policy, rounds)
+                    tty_audio::emit_retransmit_loop_from_stdin(recovery.into(), rounds)
                 }
             },
 
@@ -323,15 +299,7 @@ fn run() -> FwResult<()> {
 
             // bd-2xe.4: convenience retransmit command
             TtyAudioCommand::Retransmit { recovery, rounds } => {
-                let policy = match recovery {
-                    TtyAudioRecoveryPolicy::FailClosed => {
-                        tty_audio::DecodeRecoveryPolicy::FailClosed
-                    }
-                    TtyAudioRecoveryPolicy::SkipMissing => {
-                        tty_audio::DecodeRecoveryPolicy::SkipMissing
-                    }
-                };
-                tty_audio::emit_retransmit_loop_from_stdin(policy, rounds)
+                tty_audio::emit_retransmit_loop_from_stdin(recovery.into(), rounds)
             }
         },
         Command::Tui => franken_whisper::tui::run_tui(),

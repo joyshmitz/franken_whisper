@@ -66,3 +66,5 @@ a.out
 .beads/*.corrupt_*
 .beads/*.pre_recovery_*
 .beads/*.recover*.sql
+.env
+.claude/settings.local.json

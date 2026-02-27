@@ -600,6 +600,15 @@ pub enum TtyAudioRecoveryPolicy {
     SkipMissing,
 }
 
+impl From<TtyAudioRecoveryPolicy> for crate::tty_audio::DecodeRecoveryPolicy {
+    fn from(value: TtyAudioRecoveryPolicy) -> Self {
+        match value {
+            TtyAudioRecoveryPolicy::FailClosed => Self::FailClosed,
+            TtyAudioRecoveryPolicy::SkipMissing => Self::SkipMissing,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum TtyAudioControlCommand {
     Handshake {

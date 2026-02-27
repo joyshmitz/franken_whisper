@@ -88,6 +88,10 @@ pub fn validate_segment_invariants(segments: &[TranscriptionSegment]) -> FwResul
     validate_segment_invariants_with_policy(segments, SegmentConformancePolicy::default())
 }
 
+fn conformance_err(index: usize, msg: impl std::fmt::Display) -> FwError {
+    FwError::Unsupported(format!("conformance violation: segment {index} {msg}"))
+}
+
 pub fn validate_segment_invariants_with_policy(
     segments: &[TranscriptionSegment],
     policy: SegmentConformancePolicy,
@@ -98,66 +102,59 @@ pub fn validate_segment_invariants_with_policy(
         if let Some(start) = segment.start_sec
             && !start.is_finite()
         {
-            return Err(FwError::Unsupported(format!(
-                "conformance violation: segment {index} start_sec ({start}) is not finite"
-            )));
+            return Err(conformance_err(index, format_args!("start_sec ({start}) is not finite")));
         }
 
         if let Some(end) = segment.end_sec
             && !end.is_finite()
         {
-            return Err(FwError::Unsupported(format!(
-                "conformance violation: segment {index} end_sec ({end}) is not finite"
-            )));
+            return Err(conformance_err(index, format_args!("end_sec ({end}) is not finite")));
         }
 
         if let Some(start) = segment.start_sec
             && start < 0.0
         {
-            return Err(FwError::Unsupported(format!(
-                "conformance violation: segment {index} start_sec ({start}) is negative"
-            )));
+            return Err(conformance_err(index, format_args!("start_sec ({start}) is negative")));
         }
 
         if let Some(end) = segment.end_sec
             && end < 0.0
         {
-            return Err(FwError::Unsupported(format!(
-                "conformance violation: segment {index} end_sec ({end}) is negative"
-            )));
+            return Err(conformance_err(index, format_args!("end_sec ({end}) is negative")));
         }
 
         if let (Some(start), Some(end)) = (segment.start_sec, segment.end_sec)
             && end + policy.timestamp_epsilon_sec < start
         {
-            return Err(FwError::Unsupported(format!(
-                "conformance violation: segment {index} end_sec ({end}) is before start_sec ({start})"
-            )));
+            return Err(conformance_err(
+                index,
+                format_args!("end_sec ({end}) is before start_sec ({start})"),
+            ));
         }
 
         if !policy.allow_overlap
             && let (Some(prev_end), Some(start)) = (previous_end, segment.start_sec)
             && start + policy.timestamp_epsilon_sec < prev_end
         {
-            return Err(FwError::Unsupported(format!(
-                "conformance violation: segment {index} start_sec ({start}) overlaps previous end_sec ({prev_end})"
-            )));
+            return Err(conformance_err(
+                index,
+                format_args!("start_sec ({start}) overlaps previous end_sec ({prev_end})"),
+            ));
         }
 
         if let Some(confidence) = segment.confidence
             && !(0.0..=1.0).contains(&confidence)
         {
-            return Err(FwError::Unsupported(format!(
-                "conformance violation: segment {index} confidence ({confidence}) is outside [0.0, 1.0]"
-            )));
+            return Err(conformance_err(
+                index,
+                format_args!("confidence ({confidence}) is outside [0.0, 1.0]"),
+            ));
         }
 
         if let Some(ref speaker) = segment.speaker
             && speaker.trim().is_empty()
         {
-            return Err(FwError::Unsupported(format!(
-                "conformance violation: segment {index} has empty speaker label"
-            )));
+            return Err(conformance_err(index, "has empty speaker label"));
         }
 
         if let Some(end) = segment.end_sec {

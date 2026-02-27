@@ -1884,7 +1884,9 @@ fn probe_system_health_uncached() -> SystemHealthReport {
         BackendKind::WhisperDiarization,
     ] {
         let available = available_for_mode(kind, mode);
-        let capabilities = engine_for(kind).unwrap().capabilities();
+        let capabilities = engine_for(kind)
+            .expect("engine_for returns Some for concrete backend kinds")
+            .capabilities();
         let mut issues = Vec::new();
 
         // Check binary existence.

@@ -511,7 +511,6 @@ impl CancellationToken {
 // ---------------------------------------------------------------------------
 
 /// A cleanup action registered with the pipeline for execution at shutdown.
-#[allow(dead_code)]
 pub(crate) enum Finalizer {
     /// Log that temp-dir cleanup was requested.  Actual removal is handled by
     /// `tempfile::TempDir`'s `Drop` impl -- this variant exists so the
@@ -519,8 +518,10 @@ pub(crate) enum Finalizer {
     TempDir(PathBuf),
     /// Attempt to kill a subprocess by PID.  Silently succeeds if the process
     /// has already exited.
+    #[allow(dead_code)] // constructed only in tests for now
     Process(u32),
     /// Arbitrary cleanup closure.
+    #[allow(dead_code)] // constructed only in tests for now
     Custom(Box<dyn FnOnce() + Send>),
 }
 
@@ -574,7 +575,6 @@ impl FinalizerRegistry {
     }
 
     /// Execute all registered finalizers in reverse (LIFO) order.
-    #[allow(dead_code)]
     pub(crate) fn run_all(&mut self) {
         while let Some((label, finalizer)) = self.entries.pop() {
             match finalizer {
@@ -1352,16 +1352,8 @@ async fn run_pipeline_body(
             // the caller should use SpeculativeStreamingPipeline instead of this
             // single-backend execution path. See streaming::SpeculativeStreamingPipeline.
             PipelineStage::Backend => {
-                execute_backend(
-                    pcx,
-                    log,
-                    request,
-                    run_tmp_dir,
-                    stage_budgets,
-                    trace_id_str,
-                    &mut inter,
-                )
-                .await?;
+                execute_backend(pcx, log, request, run_tmp_dir, stage_budgets, &mut inter)
+                    .await?;
             }
             PipelineStage::Accelerate => {
                 execute_accelerate(pcx, log, request, stage_budgets, trace_id_str, &mut inter)
@@ -1623,14 +1615,12 @@ async fn execute_normalize(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_backend(
     pcx: &mut PipelineCx,
     log: &mut EventLog,
     request: &TranscribeRequest,
     run_tmp_dir: &tempfile::TempDir,
     stage_budgets: StageBudgetPolicy,
-    _trace_id_str: &str,
     inter: &mut PipelineIntermediate,
 ) -> FwResult<()> {
     let normalized_wav = inter
@@ -2313,7 +2303,6 @@ struct VadReport {
 /// Fallback path:
 /// - if native waveform parsing fails, use a legacy energy scanner with
 ///   deterministic behavior and emit fallback evidence.
-#[allow(dead_code)]
 fn vad_energy_detect(
     normalized_wav: &Path,
     config: &VadConfig,
@@ -3405,7 +3394,8 @@ fn diarize_segments(
         }
 
         if best_sim >= similarity_threshold {
-            let cid = best_cluster.unwrap();
+            let cid = best_cluster
+                .expect("best_cluster is always Some when centroids is non-empty");
             assignments.push(cid);
             cluster_members[cid].push(emb.clone());
             centroids[cid] = SpeakerEmbedding::centroid(&cluster_members[cid]);
