@@ -11058,4 +11058,169 @@ mod tests {
         assert!(json.get("max_speech_duration_ms").is_some());
         assert!(json.get("speech_pad_ms").is_some());
     }
+
+    // -----------------------------------------------------------------------
+    // Speaker constraints integration (bd-3g8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_speaker_target_none_when_no_constraints() {
+        assert!(resolve_speaker_target(None).is_none());
+    }
+
+    #[test]
+    fn resolve_speaker_target_uses_num_speakers() {
+        use crate::model::SpeakerConstraints;
+        let sc = SpeakerConstraints {
+            num_speakers: Some(3),
+            min_speakers: Some(1),
+            max_speakers: Some(10),
+        };
+        assert_eq!(resolve_speaker_target(Some(&sc)), Some(3));
+    }
+
+    #[test]
+    fn resolve_speaker_target_falls_back_to_max_speakers() {
+        use crate::model::SpeakerConstraints;
+        let sc = SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(1),
+            max_speakers: Some(5),
+        };
+        assert_eq!(resolve_speaker_target(Some(&sc)), Some(5));
+    }
+
+    #[test]
+    fn resolve_speaker_target_none_when_only_min() {
+        use crate::model::SpeakerConstraints;
+        let sc = SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(2),
+            max_speakers: None,
+        };
+        assert!(resolve_speaker_target(Some(&sc)).is_none());
+    }
+
+    #[test]
+    fn resolve_speaker_target_ignores_zero_num_speakers() {
+        use crate::model::SpeakerConstraints;
+        let sc = SpeakerConstraints {
+            num_speakers: Some(0),
+            min_speakers: None,
+            max_speakers: Some(4),
+        };
+        assert_eq!(resolve_speaker_target(Some(&sc)), Some(4));
+    }
+
+    #[test]
+    fn diarize_respects_num_speakers_constraint() {
+        use crate::model::SpeakerConstraints;
+        let token = CancellationToken::no_deadline();
+        // Create segments with very different characteristics so the
+        // unconstrained diarizer produces more than 2 clusters.
+        let mut segments = vec![
+            make_segment(0.0, 1.0, "hello world"),
+            make_segment(1.0, 2.0, "hi there"),
+            make_segment(5.0, 8.0, "this is a very long segment with many words to change features"),
+            make_segment(8.0, 11.0, "another very long segment different vocabulary complexity"),
+            make_segment(20.0, 21.0, "far away short"),
+            make_segment(25.0, 30.0, "way at the end of the recording totally different position"),
+        ];
+
+        let sc = SpeakerConstraints {
+            num_speakers: Some(2),
+            min_speakers: None,
+            max_speakers: None,
+        };
+        let report =
+            diarize_segments(&mut segments, Some(30.0), Some(&sc), &token).unwrap();
+
+        assert_eq!(
+            report.speakers_detected, 2,
+            "should merge clusters down to 2 speakers, got {}",
+            report.speakers_detected
+        );
+        // All segments should have speaker labels.
+        for seg in &segments {
+            assert!(seg.speaker.is_some(), "every segment should have a speaker label");
+        }
+        // Labels should be SPEAKER_00 and SPEAKER_01 only.
+        for seg in &segments {
+            let spk = seg.speaker.as_ref().unwrap();
+            assert!(
+                spk == "SPEAKER_00" || spk == "SPEAKER_01",
+                "label should be SPEAKER_00 or SPEAKER_01, got {spk}"
+            );
+        }
+    }
+
+    #[test]
+    fn diarize_respects_max_speakers_constraint() {
+        use crate::model::SpeakerConstraints;
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![
+            make_segment(0.0, 1.0, "short"),
+            make_segment(5.0, 8.0, "this is a very long segment with many words"),
+            make_segment(20.0, 21.0, "far away"),
+            make_segment(25.0, 30.0, "way at the end totally different"),
+        ];
+
+        let sc = SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: None,
+            max_speakers: Some(2),
+        };
+        let report =
+            diarize_segments(&mut segments, Some(30.0), Some(&sc), &token).unwrap();
+
+        assert!(
+            report.speakers_detected <= 2,
+            "should have at most 2 speakers, got {}",
+            report.speakers_detected
+        );
+    }
+
+    #[test]
+    fn diarize_notes_min_speakers_deficit() {
+        use crate::model::SpeakerConstraints;
+        let token = CancellationToken::no_deadline();
+        // A single segment can only produce 1 speaker — min_speakers=3
+        // should produce a note.
+        let mut segments = vec![make_segment(0.0, 5.0, "only one speaker here")];
+
+        let sc = SpeakerConstraints {
+            num_speakers: None,
+            min_speakers: Some(3),
+            max_speakers: None,
+        };
+        let report =
+            diarize_segments(&mut segments, Some(5.0), Some(&sc), &token).unwrap();
+
+        assert_eq!(report.speakers_detected, 1);
+        assert!(
+            report.notes.iter().any(|n| n.contains("min_speakers=3")),
+            "should note the min_speakers deficit, notes: {:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn diarize_constraint_none_same_as_empty_default() {
+        let token = CancellationToken::no_deadline();
+        let mut segments1 = vec![
+            make_segment(0.0, 2.0, "hello world"),
+            make_segment(2.0, 4.0, "goodbye world"),
+        ];
+        let mut segments2 = segments1.clone();
+
+        let r1 = diarize_segments(&mut segments1, Some(5.0), None, &token).unwrap();
+        let empty_sc = crate::model::SpeakerConstraints::default();
+        let r2 =
+            diarize_segments(&mut segments2, Some(5.0), Some(&empty_sc), &token).unwrap();
+
+        assert_eq!(
+            r1.speakers_detected, r2.speakers_detected,
+            "empty constraints should behave same as None"
+        );
+    }
 }
