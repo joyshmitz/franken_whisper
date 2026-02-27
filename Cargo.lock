@@ -788,6 +788,7 @@ version = "0.1.0"
 dependencies = [
  "fj-core",
  "fj-dispatch",
+ "fj-trace",
 ]
 
 [[package]]
@@ -824,8 +825,10 @@ dependencies = [
  "fj-cache",
  "fj-core",
  "fj-interpreters",
+ "fj-lax",
  "fj-ledger",
  "fj-runtime",
+ "rustc-hash",
 ]
 
 [[package]]
@@ -858,6 +861,14 @@ version = "0.1.0"
 dependencies = [
  "fj-core",
  "fj-ledger",
+]
+
+[[package]]
+name = "fj-trace"
+version = "0.1.0"
+dependencies = [
+ "fj-core",
+ "smallvec",
 ]
 
 [[package]]
@@ -1195,6 +1206,8 @@ dependencies = [
  "fsqlite-error",
  "fsqlite-types",
  "fsqlite-vfs",
+ "parking_lot",
+ "serde",
  "tracing",
  "xxhash-rust",
 ]
