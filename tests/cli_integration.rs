@@ -3068,3 +3068,215 @@ fn robot_health_produces_valid_ndjson_event() {
     let serialized = serde_json::to_string(&value).expect("serialize");
     let _roundtrip: serde_json::Value = serde_json::from_str(&serialized).expect("roundtrip parse");
 }
+
+// ---------------------------------------------------------------------------
+// Robot: backends subcommand (bd-38s)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn robot_backends_args_parse_correctly() {
+    use clap::Parser;
+    let cli = Cli::parse_from(["franken_whisper", "robot", "backends"]);
+    match cli.command {
+        Command::Robot {
+            command: franken_whisper::cli::RobotCommand::Backends,
+        } => {}
+        other => panic!("expected Robot Backends, got {other:?}"),
+    }
+}
+
+#[test]
+fn robot_backends_report_contains_all_backend_kinds() {
+    use franken_whisper::robot::build_backends_report;
+
+    let report = build_backends_report();
+    let names: Vec<&str> = report.backends.iter().map(|b| b.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"whisper.cpp"),
+        "missing whisper.cpp in backends report"
+    );
+    assert!(
+        names.contains(&"insanely-fast-whisper"),
+        "missing insanely-fast-whisper in backends report"
+    );
+    assert!(
+        names.contains(&"whisper-diarization"),
+        "missing whisper-diarization in backends report"
+    );
+}
+
+#[test]
+fn robot_backends_discovery_event_has_required_fields() {
+    use franken_whisper::robot::{
+        BACKENDS_DISCOVERY_REQUIRED_FIELDS, backends_discovery_value, build_backends_report,
+    };
+
+    let report = build_backends_report();
+    let value = backends_discovery_value(&report);
+
+    for field in BACKENDS_DISCOVERY_REQUIRED_FIELDS {
+        assert!(
+            value.get(field).is_some(),
+            "backends discovery missing required field `{field}`"
+        );
+    }
+
+    assert_eq!(value["event"], "backends.discovery");
+    assert!(value["backends"].is_array(), "backends should be an array");
+
+    // Each backend entry should have name, kind, available, and capabilities.
+    for entry in value["backends"].as_array().unwrap() {
+        assert!(entry.get("name").is_some(), "backend entry missing `name`");
+        assert!(entry.get("kind").is_some(), "backend entry missing `kind`");
+        assert!(
+            entry.get("available").is_some(),
+            "backend entry missing `available`"
+        );
+        assert!(
+            entry.get("capabilities").is_some(),
+            "backend entry missing `capabilities`"
+        );
+    }
+}
+
+#[test]
+fn robot_backends_discovery_serializes_to_valid_ndjson() {
+    use franken_whisper::robot::{backends_discovery_value, build_backends_report};
+
+    let report = build_backends_report();
+    let value = backends_discovery_value(&report);
+    let serialized = serde_json::to_string(&value).expect("serialize backends discovery");
+
+    // Must be valid JSON (single line = valid NDJSON entry).
+    let roundtrip: serde_json::Value = serde_json::from_str(&serialized).expect("roundtrip parse");
+    assert_eq!(roundtrip["event"], "backends.discovery");
+
+    // Must not contain embedded newlines (valid NDJSON = single line).
+    assert!(
+        !serialized.contains('\n'),
+        "NDJSON must be single-line, but got newlines"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Robot: schema subcommand (bd-38s)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn robot_schema_args_parse_correctly() {
+    use clap::Parser;
+    let cli = Cli::parse_from(["franken_whisper", "robot", "schema"]);
+    match cli.command {
+        Command::Robot {
+            command: franken_whisper::cli::RobotCommand::Schema,
+        } => {}
+        other => panic!("expected Robot Schema, got {other:?}"),
+    }
+}
+
+#[test]
+fn robot_schema_value_contains_version_and_events() {
+    use franken_whisper::robot::robot_schema_value;
+
+    let schema = robot_schema_value();
+
+    assert!(schema.get("version").is_some(), "schema missing `version`");
+    assert!(
+        schema.get("schema_version").is_some(),
+        "schema missing `schema_version`"
+    );
+    assert!(schema.get("events").is_some(), "schema missing `events`");
+    assert_eq!(
+        schema["line_oriented"], "ndjson",
+        "schema should declare ndjson line-oriented format"
+    );
+}
+
+#[test]
+fn robot_schema_value_documents_all_core_event_types() {
+    use franken_whisper::robot::robot_schema_value;
+
+    let schema = robot_schema_value();
+    let events = schema["events"]
+        .as_object()
+        .expect("events should be an object");
+
+    let expected_events = [
+        "run_start",
+        "stage",
+        "run_complete",
+        "run_error",
+        "backends.discovery",
+        "health.report",
+    ];
+
+    for event_name in expected_events {
+        assert!(
+            events.contains_key(event_name),
+            "schema missing event type `{event_name}`"
+        );
+    }
+}
+
+#[test]
+fn robot_schema_event_entries_have_required_and_example() {
+    use franken_whisper::robot::robot_schema_value;
+
+    let schema = robot_schema_value();
+    let events = schema["events"]
+        .as_object()
+        .expect("events should be an object");
+
+    for (name, entry) in events {
+        assert!(
+            entry.get("required").is_some(),
+            "event `{name}` missing `required` field"
+        );
+        assert!(
+            entry.get("example").is_some(),
+            "event `{name}` missing `example` field"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Robot: routing-history with empty DB (bd-38s)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn robot_routing_history_empty_db_returns_no_events() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("empty_routing.sqlite3");
+    let store = RunStore::open(&db_path).expect("store open");
+
+    // Query with no runs — should return empty.
+    let runs = store.list_recent_runs(10).expect("list runs");
+    assert!(runs.is_empty(), "fresh DB should have no runs");
+}
+
+#[test]
+fn robot_routing_history_filters_by_run_id() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("filter_routing.sqlite3");
+    let store = RunStore::open(&db_path).expect("store open");
+
+    // Insert two reports with different IDs.
+    let report_a = fixture_report("routing-filter-a", &db_path);
+    let report_b = fixture_report("routing-filter-b", &db_path);
+    store.persist_report(&report_a).expect("persist a");
+    store.persist_report(&report_b).expect("persist b");
+
+    // Filtering by specific run_id should return only that run.
+    let details = store
+        .load_run_details("routing-filter-a")
+        .expect("load details");
+    assert!(details.is_some(), "should find run routing-filter-a");
+    assert_eq!(details.unwrap().run_id, "routing-filter-a");
+
+    // Non-existent run_id should return None.
+    let missing = store
+        .load_run_details("nonexistent-run-xyz")
+        .expect("load missing");
+    assert!(missing.is_none(), "non-existent run_id should return None");
+}

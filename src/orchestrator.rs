@@ -3261,9 +3261,7 @@ fn silhouette_score(
 ///
 /// Priority: `num_speakers` > `max_speakers` > inferred from `(min + max) / 2`.
 /// Returns `None` when no upper bound is specified.
-fn resolve_speaker_target(
-    constraints: Option<&crate::model::SpeakerConstraints>,
-) -> Option<usize> {
+fn resolve_speaker_target(constraints: Option<&crate::model::SpeakerConstraints>) -> Option<usize> {
     let sc = constraints?;
     // Explicit num_speakers overrides everything.
     if let Some(n) = sc.num_speakers.filter(|&n| n > 0) {
@@ -3700,8 +3698,8 @@ mod tests {
         acceleration_stream_owner_id, apply_padding, budget_duration, checkpoint_or_emit,
         ctc_forced_align, diarize_segments, event_elapsed_ms, is_abbreviation_period,
         is_decimal_period, is_ellipsis_period, merge_regions_by_gap, ms_to_frames, parse_budget_ms,
-        parse_event_ts_ms, punctuate_segments, recommended_budget, run_pipeline,
-        run_stage_with_budget, sanitize_process_pid, sha256_bytes_hex, sha256_file,
+        parse_event_ts_ms, punctuate_segments, recommended_budget, resolve_speaker_target,
+        run_pipeline, run_stage_with_budget, sanitize_process_pid, sha256_bytes_hex, sha256_file,
         sha256_json_value, silhouette_score, source_separate, split_long_regions, stage_budget_ms,
         stage_failure_code, stage_failure_message, stage_latency_profile, state_root,
         vad_energy_detect,
@@ -11121,10 +11119,22 @@ mod tests {
         let mut segments = vec![
             make_segment(0.0, 1.0, "hello world"),
             make_segment(1.0, 2.0, "hi there"),
-            make_segment(5.0, 8.0, "this is a very long segment with many words to change features"),
-            make_segment(8.0, 11.0, "another very long segment different vocabulary complexity"),
+            make_segment(
+                5.0,
+                8.0,
+                "this is a very long segment with many words to change features",
+            ),
+            make_segment(
+                8.0,
+                11.0,
+                "another very long segment different vocabulary complexity",
+            ),
             make_segment(20.0, 21.0, "far away short"),
-            make_segment(25.0, 30.0, "way at the end of the recording totally different position"),
+            make_segment(
+                25.0,
+                30.0,
+                "way at the end of the recording totally different position",
+            ),
         ];
 
         let sc = SpeakerConstraints {
@@ -11132,8 +11142,7 @@ mod tests {
             min_speakers: None,
             max_speakers: None,
         };
-        let report =
-            diarize_segments(&mut segments, Some(30.0), Some(&sc), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(30.0), Some(&sc), &token).unwrap();
 
         assert_eq!(
             report.speakers_detected, 2,
@@ -11142,7 +11151,10 @@ mod tests {
         );
         // All segments should have speaker labels.
         for seg in &segments {
-            assert!(seg.speaker.is_some(), "every segment should have a speaker label");
+            assert!(
+                seg.speaker.is_some(),
+                "every segment should have a speaker label"
+            );
         }
         // Labels should be SPEAKER_00 and SPEAKER_01 only.
         for seg in &segments {
@@ -11170,8 +11182,7 @@ mod tests {
             min_speakers: None,
             max_speakers: Some(2),
         };
-        let report =
-            diarize_segments(&mut segments, Some(30.0), Some(&sc), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(30.0), Some(&sc), &token).unwrap();
 
         assert!(
             report.speakers_detected <= 2,
@@ -11193,8 +11204,7 @@ mod tests {
             min_speakers: Some(3),
             max_speakers: None,
         };
-        let report =
-            diarize_segments(&mut segments, Some(5.0), Some(&sc), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(5.0), Some(&sc), &token).unwrap();
 
         assert_eq!(report.speakers_detected, 1);
         assert!(
@@ -11215,8 +11225,7 @@ mod tests {
 
         let r1 = diarize_segments(&mut segments1, Some(5.0), None, &token).unwrap();
         let empty_sc = crate::model::SpeakerConstraints::default();
-        let r2 =
-            diarize_segments(&mut segments2, Some(5.0), Some(&empty_sc), &token).unwrap();
+        let r2 = diarize_segments(&mut segments2, Some(5.0), Some(&empty_sc), &token).unwrap();
 
         assert_eq!(
             r1.speakers_detected, r2.speakers_detected,
