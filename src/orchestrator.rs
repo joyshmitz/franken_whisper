@@ -1265,7 +1265,6 @@ async fn run_pipeline(
 }
 
 /// Mutable intermediate state threaded through the composable pipeline stages.
-#[allow(dead_code)]
 struct PipelineIntermediate {
     input_path: Option<PathBuf>,
     normalized_wav: Option<PathBuf>,
@@ -2197,7 +2196,6 @@ async fn execute_align(
 /// applies deterministic post-processing. If native waveform parsing fails,
 /// we deterministically fall back to the legacy energy scanner.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct VadConfig {
     /// RMS threshold used when filtering native regions and legacy fallback.
     rms_threshold: f64,
@@ -2284,7 +2282,6 @@ struct VadRegionMs {
 
 /// Report produced by the VAD stage.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct VadReport {
     /// Number of frames analyzed.
     frames_total: usize,
@@ -2577,7 +2574,6 @@ fn vad_energy_detect_legacy(
     })
 }
 
-#[allow(dead_code)]
 async fn execute_vad(
     pcx: &mut PipelineCx,
     log: &mut EventLog,
@@ -2685,7 +2681,6 @@ async fn execute_vad(
 
 /// Report produced by the source separation stage.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct SeparateReport {
     /// Whether the audio was determined to contain predominantly vocal content.
     vocal_isolated: bool,
@@ -2709,7 +2704,6 @@ struct SeparateReport {
 /// The `vocal_isolated` flag is set to `true` when the speech coverage
 /// fraction exceeds the minimum threshold, indicating the audio has
 /// sufficient vocal content for downstream transcription.
-#[allow(dead_code)]
 fn source_separate(normalized_wav: &Path, token: &CancellationToken) -> FwResult<SeparateReport> {
     token.checkpoint()?;
 
@@ -2766,7 +2760,6 @@ fn source_separate(normalized_wav: &Path, token: &CancellationToken) -> FwResult
     })
 }
 
-#[allow(dead_code)]
 async fn execute_separate(
     pcx: &mut PipelineCx,
     log: &mut EventLog,
@@ -2839,7 +2832,6 @@ async fn execute_separate(
 
 /// Report produced by the punctuation restoration stage.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct PunctuateReport {
     /// Number of segments processed.
     segments_total: usize,
@@ -2924,7 +2916,6 @@ fn is_ellipsis_period(text: &str, period_byte_pos: usize) -> bool {
 /// 4. Capitalize after sentence-ending punctuation (. ? !) — but NOT after
 ///    abbreviations (Mr., Dr., etc.), decimal numbers (3.14), or
 ///    ellipses (...).
-#[allow(dead_code)]
 fn punctuate_segments(
     segments: &mut [crate::model::TranscriptionSegment],
     token: &CancellationToken,
@@ -3035,7 +3026,6 @@ fn punctuate_segments(
     })
 }
 
-#[allow(dead_code)]
 async fn execute_punctuate(
     pcx: &mut PipelineCx,
     log: &mut EventLog,
@@ -3112,7 +3102,6 @@ async fn execute_punctuate(
 
 /// Report produced by the speaker diarization stage.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct DiarizeReport {
     /// Number of segments processed.
     segments_total: usize,
@@ -3143,14 +3132,12 @@ struct DiarizeReport {
 ///   4. average word length / 12.0 (vocabulary complexity proxy)
 ///   5. text character count / max_text_len (output volume)
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct SpeakerEmbedding {
     features: [f64; 6],
 }
 
 impl SpeakerEmbedding {
     /// Cosine similarity between two embeddings.
-    #[allow(dead_code)]
     fn cosine_similarity(&self, other: &SpeakerEmbedding) -> f64 {
         let dot: f64 = self
             .features
@@ -3169,7 +3156,6 @@ impl SpeakerEmbedding {
     }
 
     /// Compute the element-wise mean of a slice of embeddings.
-    #[allow(dead_code)]
     fn centroid(embeddings: &[SpeakerEmbedding]) -> SpeakerEmbedding {
         let n = embeddings.len() as f64;
         if n < 1.0 {
@@ -3188,7 +3174,6 @@ impl SpeakerEmbedding {
     }
 
     /// Euclidean distance between two embeddings.
-    #[allow(dead_code)]
     fn euclidean_distance(&self, other: &SpeakerEmbedding) -> f64 {
         self.features
             .iter()
@@ -3208,7 +3193,6 @@ impl SpeakerEmbedding {
 ///
 /// Returns `None` when there are fewer than 2 clusters or fewer than 2 points,
 /// since the metric is undefined in those cases.
-#[allow(dead_code)]
 fn silhouette_score(
     embeddings: &[SpeakerEmbedding],
     assignments: &[usize],
@@ -3289,7 +3273,6 @@ fn silhouette_score(
 /// This is a heuristic-only implementation (no neural speaker encoder);
 /// accuracy improves significantly when combined with downstream
 /// model-backed diarization.
-#[allow(dead_code)]
 fn diarize_segments(
     segments: &mut [crate::model::TranscriptionSegment],
     audio_duration: Option<f64>,
@@ -3435,7 +3418,6 @@ fn diarize_segments(
     })
 }
 
-#[allow(dead_code)]
 async fn execute_diarize(
     pcx: &mut PipelineCx,
     log: &mut EventLog,

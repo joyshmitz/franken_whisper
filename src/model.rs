@@ -212,6 +212,9 @@ pub struct BackendParams {
     pub word_threshold: Option<f32>,
     /// Regex pattern to suppress matching tokens (whisper.cpp: --suppress-regex).
     pub suppress_regex: Option<String>,
+    /// Enable TinyDiarize speaker-turn token injection (whisper.cpp: --tdrz).
+    #[serde(default)]
+    pub tiny_diarize: bool,
     // -----------------------------------------------------------------
     // bd-1rj.2: whisper.cpp word-level timestamps
     // -----------------------------------------------------------------

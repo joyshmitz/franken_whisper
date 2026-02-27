@@ -33,7 +33,7 @@ Features originating from or inspired by the whisper.cpp (C/C++) project.
 | Threading parameters | legacy_whispercpp | `backend::whisper_cpp`, `model::BackendParams` | Done | Thread count (`-t`) and processor count (`-p`) forwarded to whisper-cli. |
 | Audio windowing | legacy_whispercpp | `model::BackendParams`, `backend::whisper_cpp` | Done | Offset (`-ot`) and duration (`-d`) parameters, audio context size (`-ac`), and word threshold (`-wt`) supported. |
 | Initial prompt / prompt biasing | legacy_whispercpp | `model::BackendParams`, `backend::whisper_cpp` | Done | `--prompt` and `--carry-initial-prompt` flags forwarded. |
-| TinyDiarize (speaker turn detection) | legacy_whispercpp | -- | Todo | whisper.cpp's lightweight `--tdrz` speaker-turn token injection is not exposed in the current backend adapter. |
+| TinyDiarize (speaker turn detection) | legacy_whispercpp | `backend::whisper_cpp`, `model::BackendParams` | Done | `--tdrz` flag forwarded to whisper-cli when `tiny_diarize` is enabled. Activates lightweight speaker-turn token injection. |
 | HTTP server mode | legacy_whispercpp | -- | N/A | Intentionally excluded. franken_whisper is a CLI/library, not an HTTP server. |
 
 ---
@@ -121,7 +121,7 @@ Features that span all legacy projects or are new to franken_whisper.
 
 | Legacy Project | Done | Partial | Todo | N/A | Total | Completion % |
 |---|---|---|---|---|---|---|
-| legacy_whispercpp | 13 | 0 | 2 | 1 | 16 | 81% |
+| legacy_whispercpp | 14 | 0 | 1 | 1 | 16 | 88% |
 | legacy_insanely_fast_whisper | 9 | 0 | 0 | 0 | 9 | 100% |
 | legacy_whisper_diarization | 4 | 4 | 0 | 1 | 9 | 44% (89% via bridge) |
 
@@ -139,19 +139,15 @@ Features that span all legacy projects or are new to franken_whisper.
 
 | Category | Done | Partial | Todo | N/A | Total Tracked |
 |---|---|---|---|---|---|
-| All features | 56 | 4 | 2 | 2 | 64 |
-| **Completion (Done + Partial)** | | | | | **94%** |
-| **Completion (Done only)** | | | | | **88%** |
+| All features | 57 | 4 | 1 | 2 | 64 |
+| **Completion (Done + Partial)** | | | | | **95%** |
+| **Completion (Done only)** | | | | | **89%** |
 
 ### Key Gaps Remaining
 
 1. **Streaming transcription (live audio chunked inference)**: whisper.cpp's real-time sliding-window transcription is not yet replicated natively. The `StreamingEngine` trait is implemented and `WhisperCppEngine` has a streaming adapter, but native chunked audio streaming inference (sliding-window on live audio) is not yet available. The `LiveTranscriptionView` TUI component is ready to consume streaming segments.
 
-2. **TinyDiarize**: whisper.cpp's lightweight `--tdrz` speaker-turn token injection is not exposed through the backend adapter.
-
-3. **Native diarization pipeline stages**: Source separation, forced alignment, punctuation restoration, and speaker embedding extraction are all functional via the legacy Python subprocess bridge, but none have native Rust implementations. The pipeline now has dedicated `PipelineStage` variants (Vad, Separate, Align, Punctuate, Diarize) and model-layer configuration types (`AlignmentConfig`, `PunctuationConfig`, `SourceSeparationConfig`), but the actual compute for these stages still delegates to the legacy Python environment.
-
-4. **Health CLI command**: The `HealthReport` infrastructure (build, emit, probe all subsystems) is implemented in `robot.rs` but is not yet wired into a CLI subcommand (e.g. `robot health`). The building blocks are complete and ready for integration.
+2. **Native diarization pipeline stages**: Source separation, forced alignment, punctuation restoration, and speaker embedding extraction are all functional via the legacy Python subprocess bridge, but none have native Rust implementations. The pipeline now has dedicated `PipelineStage` variants (Vad, Separate, Align, Punctuate, Diarize) and model-layer configuration types (`AlignmentConfig`, `PunctuationConfig`, `SourceSeparationConfig`), but the actual compute for these stages still delegates to the legacy Python environment.
 
 ---
 

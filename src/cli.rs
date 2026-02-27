@@ -392,6 +392,10 @@ pub struct TranscribeArgs {
     #[arg(long)]
     pub suppress_nst: bool,
 
+    /// Enable TinyDiarize speaker-turn token injection (whisper.cpp).
+    #[arg(long)]
+    pub tiny_diarize: bool,
+
     /// Time offset in milliseconds to start processing (whisper.cpp).
     #[arg(long)]
     pub offset_ms: Option<u64>,
@@ -806,6 +810,7 @@ impl TranscribeArgs {
             audio_ctx: self.audio_ctx,
             word_threshold: self.word_threshold,
             suppress_regex: self.suppress_regex.clone(),
+            tiny_diarize: self.tiny_diarize,
             word_timestamps: None,
             insanely_fast_tuning: None,
             alignment: None,
@@ -937,6 +942,7 @@ mod tests {
             carry_initial_prompt: false,
             no_fallback: false,
             suppress_nst: false,
+            tiny_diarize: false,
             offset_ms: None,
             duration_ms: None,
             audio_ctx: None,
@@ -1129,6 +1135,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tiny_diarize_flag_forwarded() {
+        let mut args = minimal_args();
+        args.tiny_diarize = true;
+        let request = args.to_request().expect("should succeed");
+        assert!(request.backend_params.tiny_diarize);
+    }
+
+    #[test]
+    fn tiny_diarize_default_false() {
+        let args = minimal_args();
+        let request = args.to_request().expect("should succeed");
+        assert!(!request.backend_params.tiny_diarize);
+    }
+
     // --- Speaker constraints ---
 
     #[test]
@@ -1316,6 +1337,7 @@ mod tests {
         assert!(!request.backend_params.carry_initial_prompt);
         assert!(!request.backend_params.no_fallback);
         assert!(!request.backend_params.suppress_nst);
+        assert!(!request.backend_params.tiny_diarize);
         assert!(request.backend_params.offset_ms.is_none());
         assert!(request.backend_params.duration_ms.is_none());
         assert!(request.backend_params.audio_ctx.is_none());

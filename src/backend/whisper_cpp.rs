@@ -242,6 +242,9 @@ pub(crate) fn build_args(
     if bp.suppress_nst {
         args.push("-sns".to_owned());
     }
+    if bp.tiny_diarize {
+        args.push("--tdrz".to_owned());
+    }
     if let Some(regex) = &bp.suppress_regex {
         args.push("--suppress-regex".to_owned());
         args.push(regex.clone());
@@ -758,6 +761,29 @@ mod tests {
             .position(|a| a == "--suppress-regex")
             .expect("--suppress-regex");
         assert_eq!(args[idx + 1], r"\[.*\]");
+    }
+
+    #[test]
+    fn tiny_diarize_flag() {
+        let mut request = minimal_request();
+        request.backend_params.tiny_diarize = true;
+        let args = build_args(
+            &request,
+            &PathBuf::from("n.wav"),
+            &PathBuf::from("/tmp/out"),
+        );
+        assert!(args.contains(&"--tdrz".to_owned()));
+    }
+
+    #[test]
+    fn tiny_diarize_omitted_by_default() {
+        let request = minimal_request();
+        let args = build_args(
+            &request,
+            &PathBuf::from("n.wav"),
+            &PathBuf::from("/tmp/out"),
+        );
+        assert!(!args.contains(&"--tdrz".to_owned()));
     }
 
     #[test]

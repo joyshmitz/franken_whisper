@@ -218,14 +218,18 @@ while [[ $# -gt 0 ]]; do
   output="$1"
   shift
 done
-if [[ -z "$input" || -z "$output" ]]; then
-  echo "stub ffmpeg missing required input/output args" >&2
+if [[ -z "$output" ]]; then
+  echo "stub ffmpeg missing required output arg" >&2
   exit 2
 fi
 if [[ -n "${FRANKEN_WHISPER_TEST_FFMPEG_MARKER:-}" ]]; then
-  printf '%s\n' "$input -> $output" > "${FRANKEN_WHISPER_TEST_FFMPEG_MARKER}"
+  printf '%s\n' "$input -> $output" >> "${FRANKEN_WHISPER_TEST_FFMPEG_MARKER}"
 fi
-/bin/cp "$input" "$output"
+if [[ -n "$input" && -f "$input" ]]; then
+  /bin/cp "$input" "$output"
+else
+  : > "$output"
+fi
 "#;
     fs::write(&stub_path, script).expect("write ffmpeg stub");
     let mut perms = fs::metadata(&stub_path).expect("metadata").permissions();
@@ -243,6 +247,21 @@ fn write_provisioned_ffprobe_stub(bin_dir: &std::path::Path) -> PathBuf {
     let stub_path = bin_dir.join("ffprobe");
     let script = r#"#!/bin/bash
 set -euo pipefail
+input=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -*)
+      shift
+      ;;
+    *)
+      input="$1"
+      shift
+      ;;
+  esac
+done
+if [[ -n "${FRANKEN_WHISPER_TEST_FFPROBE_MARKER:-}" ]]; then
+  printf '%s\n' "$input" >> "${FRANKEN_WHISPER_TEST_FFPROBE_MARKER}"
+fi
 printf '0.25\n'
 "#;
     fs::write(&stub_path, script).expect("write ffprobe stub");
@@ -880,6 +899,7 @@ fn transcribe_args_rejects_no_input() {
         carry_initial_prompt: false,
         no_fallback: false,
         suppress_nst: false,
+        tiny_diarize: false,
         offset_ms: None,
         duration_ms: None,
         audio_ctx: None,
@@ -966,6 +986,7 @@ fn transcribe_args_rejects_multiple_inputs() {
         carry_initial_prompt: false,
         no_fallback: false,
         suppress_nst: false,
+        tiny_diarize: false,
         offset_ms: None,
         duration_ms: None,
         audio_ctx: None,
@@ -1546,6 +1567,7 @@ fn backend_params_populated_round_trips_through_json() {
         carry_initial_prompt: true,
         no_fallback: false,
         suppress_nst: true,
+        tiny_diarize: false,
         offset_ms: Some(1000),
         duration_ms: Some(30000),
         audio_ctx: Some(0),
@@ -1678,6 +1700,7 @@ fn transcribe_args_maps_output_formats_to_backend_params() {
         carry_initial_prompt: false,
         no_fallback: false,
         suppress_nst: false,
+        tiny_diarize: false,
         offset_ms: None,
         duration_ms: None,
         audio_ctx: None,
@@ -1887,6 +1910,10 @@ fn transcribe_file_input_uses_builtin_normalizer_when_ffmpeg_missing() {
     assert_eq!(report["result"]["transcript"], "stub transcript");
     let events = report["events"].as_array().expect("events");
     assert!(
+        events.iter().any(|event| event["code"] == "ingest.ok"),
+        "expected ingest.ok event in report events"
+    );
+    assert!(
         events.iter().any(|event| event["code"] == "normalize.ok"),
         "expected normalize.ok event in report events"
     );
@@ -1913,15 +1940,16 @@ fn transcribe_file_input_falls_back_to_builtin_when_auto_provision_is_disabled()
         None,
         &stub_bin,
         &state_root,
-        &[
-            ("PATH", ""),
-            ("FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG", "0"),
-        ],
+        &[("PATH", ""), ("FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG", "0")],
     );
 
     assert_eq!(report["result"]["backend"], "whisper_cpp");
     assert_eq!(report["result"]["transcript"], "stub transcript");
     let events = report["events"].as_array().expect("events");
+    assert!(
+        events.iter().any(|event| event["code"] == "ingest.ok"),
+        "expected ingest.ok event in report events"
+    );
     assert!(
         events.iter().any(|event| event["code"] == "normalize.ok"),
         "expected normalize.ok event in report events"
@@ -1937,10 +1965,14 @@ fn transcribe_file_input_uses_state_dir_provisioned_ffmpeg_when_path_is_missing(
     let input_wav = dir.path().join("file_input_provisioned_ffmpeg.wav");
     let provisioned_bin_dir = state_root.join("tools/ffmpeg/bin");
     let ffmpeg_marker = dir.path().join("ffmpeg_invocation.txt");
+    let ffprobe_marker = dir.path().join("ffprobe_invocation.txt");
     generate_voiced_wav_without_ffmpeg(&input_wav);
     write_provisioned_ffmpeg_stub(&provisioned_bin_dir);
     write_provisioned_ffprobe_stub(&provisioned_bin_dir);
-    let marker_env = ffmpeg_marker
+    let ffmpeg_marker_env = ffmpeg_marker
+        .to_str()
+        .expect("marker path should be valid utf-8");
+    let ffprobe_marker_env = ffprobe_marker
         .to_str()
         .expect("marker path should be valid utf-8");
 
@@ -1959,7 +1991,8 @@ fn transcribe_file_input_uses_state_dir_provisioned_ffmpeg_when_path_is_missing(
         &[
             ("PATH", ""),
             ("FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG", "0"),
-            ("FRANKEN_WHISPER_TEST_FFMPEG_MARKER", marker_env),
+            ("FRANKEN_WHISPER_TEST_FFMPEG_MARKER", ffmpeg_marker_env),
+            ("FRANKEN_WHISPER_TEST_FFPROBE_MARKER", ffprobe_marker_env),
         ],
     );
 
@@ -1973,6 +2006,72 @@ fn transcribe_file_input_uses_state_dir_provisioned_ffmpeg_when_path_is_missing(
     assert!(
         ffmpeg_marker.is_file(),
         "state-dir provisioned ffmpeg should be invoked when PATH ffmpeg is unavailable"
+    );
+    assert!(
+        ffprobe_marker.is_file(),
+        "state-dir provisioned ffprobe should be invoked when PATH ffprobe is unavailable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn transcribe_mic_input_uses_state_dir_provisioned_ffmpeg_when_path_is_missing() {
+    let dir = tempdir().expect("tempdir");
+    let state_root = dir.path().join("state");
+    let stub_bin = write_whisper_cpp_stub_binary(dir.path());
+    let provisioned_bin_dir = state_root.join("tools/ffmpeg/bin");
+    let ffmpeg_marker = dir.path().join("ffmpeg_invocation_mic.txt");
+    let ffprobe_marker = dir.path().join("ffprobe_invocation_mic.txt");
+    write_provisioned_ffmpeg_stub(&provisioned_bin_dir);
+    write_provisioned_ffprobe_stub(&provisioned_bin_dir);
+    let ffmpeg_marker_env = ffmpeg_marker
+        .to_str()
+        .expect("marker path should be valid utf-8");
+    let ffprobe_marker_env = ffprobe_marker
+        .to_str()
+        .expect("marker path should be valid utf-8");
+
+    let report = run_transcribe_json_with_stub_env(
+        &[
+            "--mic",
+            "--mic-seconds",
+            "1",
+            "--mic-ffmpeg-format",
+            "lavfi",
+            "--mic-ffmpeg-source",
+            "anullsrc=r=16000:cl=mono",
+            "--backend",
+            "whisper-cpp",
+            "--no-persist",
+            "--json",
+        ],
+        None,
+        &stub_bin,
+        &state_root,
+        &[
+            ("PATH", ""),
+            ("FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG", "0"),
+            ("FRANKEN_WHISPER_TEST_FFMPEG_MARKER", ffmpeg_marker_env),
+            ("FRANKEN_WHISPER_TEST_FFPROBE_MARKER", ffprobe_marker_env),
+        ],
+    );
+
+    let events = report["events"].as_array().expect("events");
+    assert!(
+        events.iter().any(|event| event["code"] == "ingest.ok"),
+        "expected ingest.ok event in report events"
+    );
+    assert!(
+        events.iter().any(|event| event["code"] == "normalize.ok"),
+        "expected normalize.ok event in report events"
+    );
+    assert!(
+        ffmpeg_marker.is_file(),
+        "state-dir provisioned ffmpeg should be invoked for mic flow when PATH ffmpeg is unavailable"
+    );
+    assert!(
+        ffprobe_marker.is_file(),
+        "state-dir provisioned ffprobe should be invoked for mic flow when PATH ffprobe is unavailable"
     );
 }
 
@@ -2496,6 +2595,7 @@ fn transcribe_args_maps_mic_line_in_envelope_into_request() {
         carry_initial_prompt: false,
         no_fallback: false,
         suppress_nst: false,
+        tiny_diarize: false,
         offset_ms: None,
         duration_ms: None,
         audio_ctx: None,
