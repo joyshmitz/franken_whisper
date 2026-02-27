@@ -1900,10 +1900,7 @@ fn transcribe_file_input_uses_builtin_normalizer_when_ffmpeg_missing() {
         None,
         &stub_bin,
         &state_root,
-        &[
-            ("PATH", ""),
-            ("FRANKEN_WHISPER_FORCE_BUILTIN_NORMALIZE", "1"),
-        ],
+        &[("PATH", "")],
     );
 
     assert_eq!(report["result"]["backend"], "whisper_cpp");

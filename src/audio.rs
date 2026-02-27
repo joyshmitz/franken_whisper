@@ -18,7 +18,7 @@ use crate::process::{run_command_cancellable, run_command_with_timeout};
 
 const FFMPEG_BIN_ENV: &str = "FRANKEN_WHISPER_FFMPEG_BIN";
 const FFPROBE_BIN_ENV: &str = "FRANKEN_WHISPER_FFPROBE_BIN";
-const FORCE_BUILTIN_NORMALIZE_ENV: &str = "FRANKEN_WHISPER_FORCE_BUILTIN_NORMALIZE";
+const FORCE_FFMPEG_NORMALIZE_ENV: &str = "FRANKEN_WHISPER_FORCE_FFMPEG_NORMALIZE";
 const AUTO_PROVISION_FFMPEG_ENV: &str = "FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG";
 const DEFAULT_STATE_DIR: &str = ".franken_whisper";
 const FFMPEG_TOOLS_DIR: &str = "tools/ffmpeg";
@@ -105,41 +105,59 @@ pub(crate) fn normalize_to_wav_with_timeout(
     token: Option<&crate::orchestrator::CancellationToken>,
 ) -> FwResult<PathBuf> {
     let output = work_dir.join("normalized_16k_mono.wav");
-    if force_builtin_normalizer() {
-        tracing::warn!(
+
+    // If the user explicitly forces ffmpeg, skip the built-in path entirely.
+    if force_ffmpeg_normalizer() {
+        tracing::info!(
             stage = "normalize",
             input = %input.display(),
-            "built-in normalizer forced via env; skipping ffmpeg path"
+            "ffmpeg normalizer forced via env; skipping built-in path"
         );
-        if let Some(tok) = token {
-            tok.checkpoint()?;
-        }
-        normalize_to_wav_with_builtin_decoder(input, &output)?;
-        if let Some(tok) = token {
-            tok.checkpoint()?;
-        }
-        return Ok(output);
+        return normalize_via_ffmpeg(input, &output, work_dir, timeout, token);
     }
 
-    let ffmpeg_program = match resolve_ffmpeg_program(Some(work_dir)) {
-        Ok(program) => program,
-        Err(error) => {
-            tracing::warn!(
+    // Primary path: built-in Rust decoder (symphonia).
+    // Handles MP3, AAC, FLAC, WAV, OGG/Vorbis, ALAC, WavPack with zero
+    // external dependencies.
+    if let Some(tok) = token {
+        tok.checkpoint()?;
+    }
+    match normalize_to_wav_with_builtin_decoder(input, &output) {
+        Ok(()) => {
+            tracing::debug!(
                 stage = "normalize",
                 input = %input.display(),
-                reason = %error,
-                "ffmpeg unavailable; using built-in Rust normalizer fallback"
+                "normalized with built-in Rust decoder (no external dependencies)"
             );
-            if let Some(tok) = token {
-                tok.checkpoint()?;
-            }
-            normalize_to_wav_with_builtin_decoder(input, &output)?;
             if let Some(tok) = token {
                 tok.checkpoint()?;
             }
             return Ok(output);
         }
-    };
+        Err(builtin_error) => {
+            tracing::info!(
+                stage = "normalize",
+                input = %input.display(),
+                reason = %builtin_error,
+                "built-in decoder cannot handle this format; falling back to ffmpeg"
+            );
+        }
+    }
+
+    // Fallback: ffmpeg for formats symphonia doesn't support (video files,
+    // exotic audio codecs, etc.).
+    normalize_via_ffmpeg(input, &output, work_dir, timeout, token)
+}
+
+/// Normalize audio via external ffmpeg subprocess.
+fn normalize_via_ffmpeg(
+    input: &Path,
+    output: &Path,
+    work_dir: &Path,
+    timeout: Duration,
+    token: Option<&crate::orchestrator::CancellationToken>,
+) -> FwResult<PathBuf> {
+    let ffmpeg_program = resolve_ffmpeg_program(Some(work_dir))?;
 
     let args = vec![
         "-hide_banner".to_owned(),
@@ -148,6 +166,7 @@ pub(crate) fn normalize_to_wav_with_timeout(
         "-y".to_owned(),
         "-i".to_owned(),
         input.display().to_string(),
+        "-vn".to_owned(),
         "-ar".to_owned(),
         "16000".to_owned(),
         "-ac".to_owned(),
@@ -161,12 +180,12 @@ pub(crate) fn normalize_to_wav_with_timeout(
     } else {
         run_command_with_timeout(&ffmpeg_program, &args, None, Some(timeout))?;
     }
-    Ok(output)
+    Ok(output.to_path_buf())
 }
 
-fn force_builtin_normalizer() -> bool {
+fn force_ffmpeg_normalizer() -> bool {
     bool_env_enabled_from_raw(
-        std::env::var(FORCE_BUILTIN_NORMALIZE_ENV).ok().as_deref(),
+        std::env::var(FORCE_FFMPEG_NORMALIZE_ENV).ok().as_deref(),
         false,
     )
 }
