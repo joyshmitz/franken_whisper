@@ -1374,7 +1374,7 @@ async fn run_pipeline_body(
                 execute_punctuate(pcx, log, stage_budgets, &mut inter).await?;
             }
             PipelineStage::Diarize => {
-                execute_diarize(pcx, log, stage_budgets, &mut inter).await?;
+                execute_diarize(pcx, log, request, stage_budgets, &mut inter).await?;
             }
             PipelineStage::Persist => {
                 // Persist is handled specially during report assembly below.
@@ -3257,6 +3257,25 @@ fn silhouette_score(
     Some(sum / n as f64)
 }
 
+/// Resolve the effective target speaker count from [`SpeakerConstraints`].
+///
+/// Priority: `num_speakers` > `max_speakers` > inferred from `(min + max) / 2`.
+/// Returns `None` when no upper bound is specified.
+fn resolve_speaker_target(
+    constraints: Option<&crate::model::SpeakerConstraints>,
+) -> Option<usize> {
+    let sc = constraints?;
+    // Explicit num_speakers overrides everything.
+    if let Some(n) = sc.num_speakers.filter(|&n| n > 0) {
+        return Some(n as usize);
+    }
+    // If only max_speakers is set, use it as the ceiling.
+    if let Some(max_k) = sc.max_speakers.filter(|&m| m > 0) {
+        return Some(max_k as usize);
+    }
+    None
+}
+
 /// Assign speaker labels to segments using acoustic-heuristic feature
 /// clustering.
 ///
@@ -3276,10 +3295,11 @@ fn silhouette_score(
 fn diarize_segments(
     segments: &mut [crate::model::TranscriptionSegment],
     audio_duration: Option<f64>,
+    speaker_constraints: Option<&crate::model::SpeakerConstraints>,
     token: &CancellationToken,
 ) -> FwResult<DiarizeReport> {
     let total = segments.len();
-    let notes: Vec<String> =
+    let mut notes: Vec<String> =
         vec!["heuristic: acoustic-feature clustering without neural speaker encoder".to_owned()];
 
     if segments.is_empty() {
@@ -3399,8 +3419,84 @@ fn diarize_segments(
         }
     }
 
+    // Step 2b: Apply speaker constraints by merging clusters if over the
+    // target count.  Determine effective max from constraints.
+    let effective_max = resolve_speaker_target(speaker_constraints);
+
+    let unconstrained_count = centroids.len();
+    if let Some(max_k) = effective_max {
+        let max_k = max_k.max(1); // at least 1 cluster
+        while centroids.len() > max_k {
+            // Find the two closest centroids and merge them.
+            let mut best_pair = (0, 1);
+            let mut best_dist = f64::INFINITY;
+            for i in 0..centroids.len() {
+                for j in (i + 1)..centroids.len() {
+                    let d = centroids[i].euclidean_distance(&centroids[j]);
+                    if d < best_dist {
+                        best_dist = d;
+                        best_pair = (i, j);
+                    }
+                }
+            }
+            let (keep, remove) = best_pair;
+            // Move all members of `remove` into `keep`.
+            let removed_members = cluster_members.swap_remove(remove);
+            centroids.swap_remove(remove);
+            // Fix assignments: `remove` was absorbed into `keep`; the
+            // cluster that was last is now at index `remove` due to
+            // swap_remove.
+            let last_idx = centroids.len(); // old len - 1 after swap_remove
+            for a in &mut assignments {
+                if *a == remove {
+                    *a = keep;
+                } else if *a == last_idx {
+                    // This was the swapped-in cluster (formerly at end).
+                    *a = remove;
+                }
+            }
+            cluster_members[keep].extend(removed_members);
+            centroids[keep] = SpeakerEmbedding::centroid(&cluster_members[keep]);
+        }
+
+        if unconstrained_count > centroids.len() {
+            notes.push(format!(
+                "merged {unconstrained_count} clusters down to {} to respect speaker constraints",
+                centroids.len()
+            ));
+        }
+    }
+
+    // Note if fewer speakers detected than requested minimum.
+    if let Some(sc) = speaker_constraints
+        && let Some(min_k) = sc.min_speakers.filter(|&m| m > 0)
+        && (centroids.len() as u32) < min_k
+    {
+        notes.push(format!(
+            "detected {} speakers but min_speakers={min_k} requested; \
+             heuristic cannot synthesize additional speakers",
+            centroids.len()
+        ));
+    }
+
+    // Compact assignment IDs to be contiguous 0..N after potential merges.
+    let unique_ids: Vec<usize> = {
+        let mut seen: Vec<usize> = assignments.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        seen
+    };
+    let id_map: std::collections::HashMap<usize, usize> = unique_ids
+        .iter()
+        .enumerate()
+        .map(|(new_id, &old_id)| (old_id, new_id))
+        .collect();
+    for a in &mut assignments {
+        *a = id_map[a];
+    }
+    let speakers_detected = unique_ids.len();
+
     // Step 3: Assign speaker labels.
-    let speakers_detected = centroids.len();
     let mut labeled = 0usize;
     for (seg, &cluster_id) in segments.iter_mut().zip(assignments.iter()) {
         seg.speaker = Some(format!("SPEAKER_{cluster_id:02}"));
@@ -3421,6 +3517,7 @@ fn diarize_segments(
 async fn execute_diarize(
     pcx: &mut PipelineCx,
     log: &mut EventLog,
+    request: &TranscribeRequest,
     stage_budgets: StageBudgetPolicy,
     inter: &mut PipelineIntermediate,
 ) -> FwResult<()> {
@@ -3440,16 +3537,27 @@ async fn execute_diarize(
             "segments": result.segments.len(),
             "budget_ms": stage_budgets.diarize_ms,
             "audio_duration_sec": inter.normalized_duration,
+            "speaker_constraints": request.backend_params.speaker_constraints.as_ref().map(|sc| json!({
+                "num_speakers": sc.num_speakers,
+                "min_speakers": sc.min_speakers,
+                "max_speakers": sc.max_speakers,
+            })),
         }),
     );
 
     let diarize_budget_ms = stage_budgets.diarize_ms;
     let diarize_token = pcx.cancellation_token();
     let audio_duration = inter.normalized_duration;
+    let speaker_constraints = request.backend_params.speaker_constraints.clone();
 
     let (updated_result, report) =
         match run_stage_with_budget("diarize", diarize_budget_ms, move || {
-            let report = diarize_segments(&mut result.segments, audio_duration, &diarize_token)?;
+            let report = diarize_segments(
+                &mut result.segments,
+                audio_duration,
+                speaker_constraints.as_ref(),
+                &diarize_token,
+            )?;
             Ok((result, report))
         })
         .await
@@ -8253,7 +8361,7 @@ mod tests {
     fn diarize_empty_segments() {
         let token = CancellationToken::no_deadline();
         let mut segments: Vec<TranscriptionSegment> = vec![];
-        let report = diarize_segments(&mut segments, Some(10.0), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(10.0), None, &token).unwrap();
         assert_eq!(report.segments_total, 0);
         assert_eq!(report.speakers_detected, 0);
         assert_eq!(report.segments_labeled, 0);
@@ -8263,7 +8371,7 @@ mod tests {
     fn diarize_single_segment_gets_speaker_label() {
         let token = CancellationToken::no_deadline();
         let mut segments = vec![make_segment(0.0, 5.0, "hello world")];
-        let report = diarize_segments(&mut segments, Some(5.0), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(5.0), None, &token).unwrap();
 
         assert_eq!(report.segments_total, 1);
         assert_eq!(report.speakers_detected, 1);
@@ -8279,7 +8387,7 @@ mod tests {
             make_segment(3.0, 6.0, "world"),
             make_segment(6.0, 10.0, "goodbye"),
         ];
-        let report = diarize_segments(&mut segments, Some(10.0), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(10.0), None, &token).unwrap();
 
         assert_eq!(report.segments_total, 3);
         assert_eq!(report.segments_labeled, 3);
@@ -8301,7 +8409,7 @@ mod tests {
             speaker: None,
             confidence: Some(0.95),
         }];
-        let _report = diarize_segments(&mut segments, Some(5.0), &token).unwrap();
+        let _report = diarize_segments(&mut segments, Some(5.0), None, &token).unwrap();
 
         assert_eq!(segments[0].text, "hello world");
         assert_eq!(segments[0].confidence, Some(0.95));
@@ -8318,7 +8426,7 @@ mod tests {
             make_segment(0.0, 5.0, "hello"),
             make_segment(5.0, 10.0, "world"),
         ];
-        let result = diarize_segments(&mut segments, Some(10.0), &token);
+        let result = diarize_segments(&mut segments, Some(10.0), None, &token);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), FwError::Cancelled(_)));
     }
@@ -8330,7 +8438,7 @@ mod tests {
             make_segment(0.0, 5.0, "hello"),
             make_segment(5.0, 10.0, "world"),
         ];
-        let report = diarize_segments(&mut segments, None, &token).unwrap();
+        let report = diarize_segments(&mut segments, None, None, &token).unwrap();
         assert_eq!(report.segments_total, 2);
         assert_eq!(report.segments_labeled, 2);
     }
@@ -8342,7 +8450,7 @@ mod tests {
             make_segment_no_timestamps("hello"),
             make_segment_no_timestamps("world"),
         ];
-        let report = diarize_segments(&mut segments, None, &token).unwrap();
+        let report = diarize_segments(&mut segments, None, None, &token).unwrap();
         assert_eq!(report.segments_labeled, 2);
         assert_eq!(report.speakers_detected, 1);
     }
@@ -8417,7 +8525,7 @@ mod tests {
     fn diarize_report_includes_heuristic_note() {
         let token = CancellationToken::no_deadline();
         let mut segments = vec![make_segment(0.0, 1.0, "test")];
-        let report = diarize_segments(&mut segments, Some(1.0), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(1.0), None, &token).unwrap();
         assert!(
             report.notes.iter().any(|n| n.contains("heuristic")),
             "diarize report should include heuristic note"
@@ -8489,7 +8597,7 @@ mod tests {
         assert_eq!(punct_report.segments_total, 3);
 
         // Then diarize the already-punctuated segments.
-        let diarize_report = diarize_segments(&mut segments, Some(30.0), &token).unwrap();
+        let diarize_report = diarize_segments(&mut segments, Some(30.0), None, &token).unwrap();
         assert_eq!(diarize_report.segments_total, 3);
         assert_eq!(diarize_report.segments_labeled, 3);
 
@@ -8517,7 +8625,7 @@ mod tests {
         ];
         let original_texts: Vec<String> = segments.iter().map(|s| s.text.clone()).collect();
 
-        let report = diarize_segments(&mut segments, Some(5.0), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(5.0), None, &token).unwrap();
         assert_eq!(report.segments_labeled, 2);
 
         for (seg, orig) in segments.iter().zip(original_texts.iter()) {
@@ -8545,7 +8653,7 @@ mod tests {
         assert_eq!(punct_report.segments_total, 3);
 
         // Diarize.
-        let diarize_report = diarize_segments(&mut segments, Some(30.0), &token).unwrap();
+        let diarize_report = diarize_segments(&mut segments, Some(30.0), None, &token).unwrap();
         assert_eq!(diarize_report.segments_total, 3);
         assert_eq!(diarize_report.segments_labeled, 3);
 
@@ -8655,7 +8763,7 @@ mod tests {
 
         // Diarize.
         let mut segs2 = vec![make_segment(0.0, 1.0, "hello")];
-        assert!(diarize_segments(&mut segs2, Some(2.0), &expired).is_err());
+        assert!(diarize_segments(&mut segs2, Some(2.0), None, &expired).is_err());
 
         // Align.
         let align_config = AlignConfig::default();
@@ -9614,7 +9722,7 @@ mod tests {
             make_segment(1.0, 2.0, "world"),
         ];
         // Some(0.0) → clamped to 1e-6, should not panic or produce NaN.
-        let report = diarize_segments(&mut segments, Some(0.0), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(0.0), None, &token).unwrap();
         assert_eq!(report.segments_total, 2);
         assert!(
             report.speakers_detected >= 1,
@@ -9710,7 +9818,7 @@ mod tests {
             make_segment(20.0, 22.0, "new speaker joins late"),
             make_segment(22.0, 24.0, "new speaker continues"),
         ];
-        let report = diarize_segments(&mut segments, Some(30.0), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(30.0), None, &token).unwrap();
 
         assert_eq!(report.segments_total, 4);
         assert_eq!(report.segments_labeled, 4);
@@ -9825,7 +9933,7 @@ mod tests {
             make_segment(20.0, 22.0, "new speaker joins late"),
             make_segment(22.0, 24.0, "new speaker continues"),
         ];
-        let report = diarize_segments(&mut segments, Some(30.0), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(30.0), None, &token).unwrap();
         if report.speakers_detected >= 2 {
             assert!(
                 report.silhouette_score.is_some(),
@@ -9843,7 +9951,7 @@ mod tests {
     fn diarize_single_segment_silhouette_is_none() {
         let token = CancellationToken::no_deadline();
         let mut segments = vec![make_segment(0.0, 2.0, "single segment only")];
-        let report = diarize_segments(&mut segments, Some(5.0), &token).unwrap();
+        let report = diarize_segments(&mut segments, Some(5.0), None, &token).unwrap();
         assert!(
             report.silhouette_score.is_none(),
             "single-segment diarization should have no silhouette score"
