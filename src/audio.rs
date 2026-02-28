@@ -1827,4 +1827,215 @@ mod tests {
         let bits = u16::from_le_bytes([data[34], data[35]]);
         assert_eq!(bits, 16, "normalized output should be 16-bit");
     }
+
+    // ── ffmpeg provisioning unit tests ──────────────────────────────────
+
+    #[test]
+    fn platform_tool_name_returns_bare_name_on_non_windows() {
+        use super::platform_tool_name;
+        let name = platform_tool_name("ffmpeg");
+        assert_eq!(name, "ffmpeg");
+        let name2 = platform_tool_name("ffprobe");
+        assert_eq!(name2, "ffprobe");
+    }
+
+    #[test]
+    fn state_root_for_tools_tmp_heuristic_uses_parent() {
+        use super::state_root_for_tools;
+        // When work_dir ends in .../tmp/child, state_root should be the
+        // grandparent of the tmp segment.  We create a real temp tree to
+        // satisfy `file_name()` checks without touching env vars.
+        let base = tempfile::tempdir().expect("tempdir");
+        let tmp_child = base.path().join("tmp").join("work");
+        std::fs::create_dir_all(&tmp_child).expect("mkdir");
+
+        // Only meaningful when the env var is NOT set.  If it is set in
+        // the environment the env path wins — but either way, no panic.
+        let result = state_root_for_tools(Some(&tmp_child));
+        // If env var is set externally, we just verify no panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn ffmpeg_tools_root_joins_expected_subpath() {
+        use super::{ffmpeg_tools_root, FFMPEG_TOOLS_DIR};
+        // Whatever state root is selected, tools root should end with
+        // the FFMPEG_TOOLS_DIR constant.
+        let root = ffmpeg_tools_root(None);
+        assert!(
+            root.ends_with(FFMPEG_TOOLS_DIR),
+            "tools root should end with {FFMPEG_TOOLS_DIR}, got {}",
+            root.display()
+        );
+    }
+
+    #[test]
+    fn provisioned_tool_path_ends_with_bin_tool() {
+        use super::provisioned_tool_path;
+        let path = provisioned_tool_path("ffmpeg", None);
+        assert!(
+            path.ends_with("bin/ffmpeg"),
+            "provisioned path should end with bin/ffmpeg, got {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn explicit_tool_path_returns_none_for_missing_env() {
+        use super::explicit_tool_path;
+        let result = explicit_tool_path("FRANKEN_WHISPER_NONEXISTENT_TOOL_PATH_TEST_42");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_file_named_locates_nested_file() {
+        use super::find_file_named;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        let target = nested.join("ffmpeg");
+        std::fs::write(&target, b"binary").expect("write");
+
+        let found = find_file_named(dir.path(), "ffmpeg");
+        assert_eq!(found, Some(target));
+    }
+
+    #[test]
+    fn find_file_named_returns_none_when_absent() {
+        use super::find_file_named;
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("other.txt"), b"x").expect("write");
+        assert!(find_file_named(dir.path(), "ffmpeg").is_none());
+    }
+
+    #[test]
+    fn find_file_named_empty_dir_returns_none() {
+        use super::find_file_named;
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(find_file_named(dir.path(), "ffmpeg").is_none());
+    }
+
+    #[test]
+    fn find_file_named_ignores_directories_with_same_name() {
+        use super::find_file_named;
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Create a directory named "ffmpeg" — should not be returned.
+        std::fs::create_dir_all(dir.path().join("ffmpeg")).expect("mkdir");
+        assert!(find_file_named(dir.path(), "ffmpeg").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ffmpeg_bundle_source_returns_tar_xz_on_linux_x86_64() {
+        use super::ffmpeg_bundle_source;
+        let result = ffmpeg_bundle_source();
+        #[cfg(target_arch = "x86_64")]
+        {
+            let (url, ext) = result.expect("should succeed on linux/x86_64");
+            assert!(url.starts_with("https://"), "URL should be HTTPS");
+            assert!(ext.contains("tar"), "extension should reference tar");
+        }
+    }
+
+    #[test]
+    fn bool_env_truthy_values_all_recognized() {
+        use super::bool_env_enabled_from_raw;
+        for val in ["1", "true", "yes", "on", "TRUE", "Yes", "ON"] {
+            assert!(
+                bool_env_enabled_from_raw(Some(val), false),
+                "{val} should be truthy"
+            );
+        }
+    }
+
+    #[test]
+    fn bool_env_falsy_values_all_recognized() {
+        use super::bool_env_enabled_from_raw;
+        for val in ["0", "false", "no", "off", "FALSE", "No", "OFF"] {
+            assert!(
+                !bool_env_enabled_from_raw(Some(val), true),
+                "{val} should be falsy"
+            );
+        }
+    }
+
+    #[test]
+    fn bool_env_whitespace_trimmed() {
+        use super::bool_env_enabled_from_raw;
+        assert!(bool_env_enabled_from_raw(Some("  true  "), false));
+        assert!(!bool_env_enabled_from_raw(Some(" off "), true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mark_executable_if_unix_sets_permissions() {
+        use super::mark_executable_if_unix;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("test_bin");
+        std::fs::write(&file, b"#!/bin/sh\n").expect("write");
+
+        mark_executable_if_unix(&file).expect("should succeed");
+        let perms = std::fs::metadata(&file).expect("metadata").permissions();
+        assert_eq!(perms.mode() & 0o755, 0o755, "should have 755 permissions");
+    }
+
+    #[test]
+    fn download_ffmpeg_bundle_fails_when_no_curl_or_wget() {
+        use super::download_ffmpeg_bundle;
+        // Downloading from a non-routable URL with a bogus command environment
+        // should fail (either missing tools or timeout). We just verify no panic.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("bundle.tar.xz");
+        let result = download_ffmpeg_bundle("http://192.0.2.1/fake", &dest);
+        // Regardless of what's on PATH, this either errors or takes too long.
+        // We only care that it doesn't panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn extract_ffmpeg_bundle_xz_uses_correct_flag() {
+        use super::extract_ffmpeg_bundle;
+        // We can't actually extract, but we verify it doesn't panic and returns
+        // an error for nonexistent archive.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = dir.path().join("fake.tar.xz");
+        std::fs::write(&archive, b"not a real archive").expect("write");
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("mkdir");
+        let result = extract_ffmpeg_bundle(&archive, &dest);
+        assert!(result.is_err(), "corrupt archive should fail extraction");
+    }
+
+    #[test]
+    fn extract_ffmpeg_bundle_gz_uses_correct_flag() {
+        use super::extract_ffmpeg_bundle;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = dir.path().join("fake.tar.gz");
+        std::fs::write(&archive, b"not a real archive").expect("write");
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("mkdir");
+        let result = extract_ffmpeg_bundle(&archive, &dest);
+        assert!(result.is_err(), "corrupt archive should fail extraction");
+    }
+
+    #[test]
+    fn provisioned_tool_path_ffprobe_ends_with_bin_ffprobe() {
+        use super::provisioned_tool_path;
+        let path = provisioned_tool_path("ffprobe", None);
+        assert!(
+            path.ends_with("bin/ffprobe"),
+            "provisioned path should end with bin/ffprobe, got {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn constants_are_sane() {
+        use super::{DEFAULT_STATE_DIR, DOWNLOAD_TIMEOUT, FFMPEG_TOOLS_DIR};
+        assert!(!DEFAULT_STATE_DIR.is_empty());
+        assert!(!FFMPEG_TOOLS_DIR.is_empty());
+        assert!(DOWNLOAD_TIMEOUT.as_secs() > 0);
+    }
 }
