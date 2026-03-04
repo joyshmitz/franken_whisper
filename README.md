@@ -210,7 +210,15 @@ Most tools in the ecosystem occupy one level. franken_whisper occupies the orche
 
 ## Installation
 
-### From Source (Recommended)
+### Quick Install (Pre-built Binary)
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/franken_whisper/main/install.sh?$(date +%s)" | bash
+```
+
+Options: `--system` (install to `/usr/local/bin`), `--easy-mode` (auto-update PATH), `--verify` (self-test), `--version vX.Y.Z`, `--uninstall`.
+
+### From Source
 
 ```bash
 git clone <repo-url>
