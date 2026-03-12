@@ -11,6 +11,8 @@ PROJECT_TAG="${PROJECT_TAG:-franken_whisper}"
 DRAIN_WORKERS="${DRAIN_WORKERS:-}"
 BLOCK_WORKERS="${BLOCK_WORKERS:-${DRAIN_WORKERS}}"
 LOCK_FILE="${LOCK_FILE:-/tmp/${PROJECT_TAG}_rch_quality_gates.lock}"
+QUARANTINE_FILE="${QUARANTINE_FILE:-/tmp/${PROJECT_TAG}_rch_worker_quarantine.txt}"
+QUARANTINE_TTL_SECONDS="${QUARANTINE_TTL_SECONDS:-1800}"
 
 retryable_pattern='No space left on device|Dependency planner fail-open|primary-root-only sync|Remote toolchain failure|toolchain missing|Project sync failed: rsync failed|Permission denied \(13\)|Connection refused|no workers with Rust installed|/data/projects/asupersync/src/runtime/scheduler/three_lane.rs|\[RCH\] local'
 declare -a blocked_workers=()
@@ -32,8 +34,30 @@ restore_workers() {
 
 trap restore_workers EXIT
 
+record_quarantine_worker() {
+    local worker="$1"
+    local ts
+    ts="$(date +%s)"
+    local temp_file
+    temp_file="$(mktemp)"
+
+    if [[ -f "${QUARANTINE_FILE}" ]]; then
+        while read -r existing_worker existing_ts; do
+            existing_worker="${existing_worker//[[:space:]]/}"
+            if [[ -z "${existing_worker}" || "${existing_worker}" == "${worker}" ]]; then
+                continue
+            fi
+            printf '%s %s\n' "${existing_worker}" "${existing_ts}" >>"${temp_file}"
+        done <"${QUARANTINE_FILE}"
+    fi
+
+    printf '%s %s\n' "${worker}" "${ts}" >>"${temp_file}"
+    mv "${temp_file}" "${QUARANTINE_FILE}"
+}
+
 disable_worker_for_retry() {
     local worker="$1"
+    local persist_record="${2:-1}"
     if [[ -z "${worker}" ]]; then
         return 0
     fi
@@ -48,7 +72,38 @@ disable_worker_for_retry() {
     echo "[routing] disabling worker ${worker} after retryable failure"
     if rch workers disable "${worker}" --reason "temporary quality-gate retry quarantine" -y >/dev/null; then
         blocked_workers+=("${worker}")
+        if [[ "${persist_record}" == "1" ]]; then
+            record_quarantine_worker "${worker}"
+        fi
     fi
+}
+
+preblock_quarantined_workers() {
+    if [[ ! -f "${QUARANTINE_FILE}" ]]; then
+        return 0
+    fi
+
+    local now
+    now="$(date +%s)"
+    local temp_file
+    temp_file="$(mktemp)"
+
+    while read -r worker ts; do
+        worker="${worker//[[:space:]]/}"
+        if [[ -z "${worker}" || -z "${ts}" ]]; then
+            continue
+        fi
+
+        if (( now - ts > QUARANTINE_TTL_SECONDS )); then
+            continue
+        fi
+
+        printf '%s %s\n' "${worker}" "${ts}" >>"${temp_file}"
+        echo "[routing] preblocking recently quarantined worker ${worker}"
+        disable_worker_for_retry "${worker}" 0
+    done <"${QUARANTINE_FILE}"
+
+    mv "${temp_file}" "${QUARANTINE_FILE}"
 }
 
 preblock_unreachable_workers() {
@@ -154,6 +209,7 @@ if ! rch check; then
 fi
 
 preblock_unreachable_workers
+preblock_quarantined_workers
 
 if [[ -n "${BLOCK_WORKERS}" ]]; then
     IFS=',' read -r -a selected_workers <<<"${BLOCK_WORKERS}"
