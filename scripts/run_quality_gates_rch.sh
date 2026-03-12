@@ -10,9 +10,16 @@ RUN_TEST_GATE="${RUN_TEST_GATE:-1}"
 PROJECT_TAG="${PROJECT_TAG:-franken_whisper}"
 DRAIN_WORKERS="${DRAIN_WORKERS:-}"
 BLOCK_WORKERS="${BLOCK_WORKERS:-${DRAIN_WORKERS}}"
+LOCK_FILE="${LOCK_FILE:-/tmp/${PROJECT_TAG}_rch_quality_gates.lock}"
 
 retryable_pattern='No space left on device|Dependency planner fail-open|primary-root-only sync|Remote toolchain failure|toolchain missing|Project sync failed: rsync failed|Permission denied \(13\)|Connection refused|no workers with Rust installed|/data/projects/asupersync/src/runtime/scheduler/three_lane.rs|\[RCH\] local'
 declare -a blocked_workers=()
+
+exec 9>"${LOCK_FILE}"
+if ! flock -n 9; then
+    echo "[routing] another quality-gate run is already active (${LOCK_FILE})"
+    exit 1
+fi
 
 restore_workers() {
     local exit_code=$?
@@ -42,6 +49,41 @@ disable_worker_for_retry() {
     if rch workers disable "${worker}" --reason "temporary quality-gate retry quarantine" -y >/dev/null; then
         blocked_workers+=("${worker}")
     fi
+}
+
+preblock_unreachable_workers() {
+    local probe_json
+    probe_json="$(rch workers probe --all --json 2>/dev/null)" || return 0
+
+    local unreachable_workers=""
+    if command -v jq >/dev/null 2>&1; then
+        unreachable_workers="$(
+            jq -r '.data[] | select(.status != "ok") | .id' <<<"${probe_json}" 2>/dev/null
+        )"
+    elif command -v python3 >/dev/null 2>&1; then
+        unreachable_workers="$(
+            python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for worker in data.get("data", []):
+    if worker.get("status") != "ok":
+        print(worker.get("id", ""))
+' <<<"${probe_json}" 2>/dev/null
+        )"
+    fi
+
+    if [[ -z "${unreachable_workers}" ]]; then
+        return 0
+    fi
+
+    while IFS= read -r worker; do
+        worker="${worker//[[:space:]]/}"
+        if [[ -z "${worker}" ]]; then
+            continue
+        fi
+        echo "[routing] preblocking unreachable worker ${worker}"
+        disable_worker_for_retry "${worker}"
+    done <<<"${unreachable_workers}"
 }
 
 run_gate() {
@@ -110,6 +152,8 @@ run_gate() {
 if ! rch check; then
     echo "[routing] rch check reported degraded worker state; continuing with retry-based routing"
 fi
+
+preblock_unreachable_workers
 
 if [[ -n "${BLOCK_WORKERS}" ]]; then
     IFS=',' read -r -a selected_workers <<<"${BLOCK_WORKERS}"
