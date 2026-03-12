@@ -16,7 +16,7 @@ use crate::error::{FwError, FwResult};
 use crate::model::{BackendKind, RunEvent, TranscriptionResult, TranscriptionSegment};
 use crate::speculation::{
     CorrectionDecision, CorrectionTolerance, CorrectionTracker, PartialTranscript,
-    SpeculationStats, WindowManager,
+    SpeculationStats, SpeculationWindowController, WindowManager,
 };
 
 // ---------------------------------------------------------------------------
@@ -68,6 +68,7 @@ pub struct SpeculativeStreamingPipeline {
     config: SpeculativeConfig,
     window_manager: WindowManager,
     correction_tracker: CorrectionTracker,
+    adaptive_controller: Option<SpeculationWindowController>,
     next_seq: AtomicU64,
     events: Vec<RunEvent>,
     run_id: String,
@@ -79,10 +80,14 @@ impl SpeculativeStreamingPipeline {
     pub fn new(config: SpeculativeConfig, run_id: String) -> Self {
         let window_manager = WindowManager::new(&run_id, config.window_size_ms, config.overlap_ms);
         let correction_tracker = CorrectionTracker::new(config.tolerance.clone());
+        let adaptive_controller = config
+            .adaptive
+            .then(|| SpeculationWindowController::new(config.window_size_ms, 1000, 30_000, 500));
         Self {
             config,
             window_manager,
             correction_tracker,
+            adaptive_controller,
             next_seq: AtomicU64::new(0),
             events: Vec::new(),
             run_id,
@@ -102,6 +107,21 @@ impl SpeculativeStreamingPipeline {
             message: message.to_owned(),
             payload,
         });
+    }
+
+    fn apply_adaptive_window_update(&mut self, decision: &CorrectionDecision) {
+        let Some(controller) = self.adaptive_controller.as_mut() else {
+            return;
+        };
+
+        let drift = match decision {
+            CorrectionDecision::Confirm { drift, .. } => drift,
+            CorrectionDecision::Correct { correction } => &correction.drift,
+        };
+
+        controller.observe(decision, drift);
+        let new_window_size = controller.apply();
+        self.window_manager.set_window_size(new_window_size);
     }
 
     fn process_window_by_id<F, Q>(
@@ -248,6 +268,8 @@ impl SpeculativeStreamingPipeline {
                 }
             }
         }
+
+        self.apply_adaptive_window_update(&decision);
 
         Ok(decision)
     }
@@ -1684,6 +1706,44 @@ mod tests {
         assert!(
             pipeline.stats().windows_processed > 0,
             "should have processed windows"
+        );
+    }
+
+    #[test]
+    fn adaptive_pipeline_clamps_window_to_min_after_many_confirmations() {
+        let mut pipeline = SpeculativeStreamingPipeline::new(
+            SpeculativeConfig::default(),
+            "test-adapt".to_owned(),
+        );
+
+        let fast = vec![seg("steady", Some(0.0), Some(1.0), Some(0.9))];
+        let quality = fast.clone();
+
+        for i in 0..20 {
+            let decision = pipeline.process_window(
+                &format!("hash-{i}"),
+                i * 2500,
+                {
+                    let fast = fast.clone();
+                    move || fast
+                },
+                {
+                    let quality = quality.clone();
+                    move || quality
+                },
+            );
+            assert!(decision.is_ok(), "window {i} should process successfully");
+        }
+
+        assert_eq!(
+            pipeline.window_manager().current_window_size(),
+            1000,
+            "adaptive controller should keep shrinking until it reaches the configured minimum"
+        );
+        assert_eq!(
+            pipeline.stats().current_window_size_ms,
+            1000,
+            "reported stats should reflect the final adapted window size"
         );
     }
 
