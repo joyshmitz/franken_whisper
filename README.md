@@ -484,14 +484,14 @@ cargo run -- robot routing-history [--run-id <ID>] [--limit 20]
 | `stage` | Pipeline stage progress (sequenced, timestamped) |
 | `run_complete` | Transcription finished with full result |
 | `run_error` | Pipeline failed with structured error code |
-| `backends` | Backend discovery response with per-backend capabilities |
+| `backends.discovery` | Backend discovery response with per-backend capabilities |
 | `health.report` | System health diagnostics (backend/ffmpeg/DB/resource status) |
-| `routing.history` | Decision routing history entries with posterior snapshots |
+| `routing_decision` | `robot routing-history` entry with posterior snapshot fields from persisted routing events |
 | `transcript.partial` | Speculative fast-model partial transcript (immediate) |
 | `transcript.confirm` | Quality model confirms partial (drift within tolerance) |
 | `transcript.retract` | Quality model retracts partial (drift exceeds tolerance) |
 | `transcript.correct` | Quality model correction with corrected segments |
-| `speculation.stats` | Aggregate speculation pipeline statistics |
+| `transcript.speculation_stats` | Aggregate speculation pipeline statistics |
 
 **Stage Codes:**
 
@@ -504,9 +504,12 @@ Stages emit paired `*.start` / `*.ok` codes (or `*.error` on failure, `*.skip` w
 ```json
 {
   "event": "health.report",
-  "backends": [{"name": "whisper.cpp", "available": true, "version": "1.7.2"}],
-  "ffmpeg": {"available": true, "path": "/usr/bin/ffmpeg"},
-  "database": {"path": ".franken_whisper/storage.sqlite3", "size_bytes": 12345},
+  "schema_version": "1.0.0",
+  "ts": "2026-02-22T00:00:00Z",
+  "backends": [{"name": "whisper.cpp", "available": true, "path": null, "version": "1.7.2", "issues": []}],
+  "ffmpeg": {"name": "ffmpeg", "available": true, "path": "/usr/bin/ffmpeg", "version": null, "issues": []},
+  "database": {"name": "database", "available": true, "path": ".franken_whisper/storage.sqlite3", "version": null, "issues": []},
+  "resources": {"disk_free_bytes": 12345, "disk_total_bytes": 67890, "memory_available_bytes": 11111, "memory_total_bytes": 22222},
   "overall_status": "ok"
 }
 ```

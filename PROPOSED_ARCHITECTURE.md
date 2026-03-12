@@ -418,6 +418,13 @@ Robot mode output is versioned via `ROBOT_SCHEMA_VERSION` (currently `"1.0.0"`).
 | `stage`       | `event`, `schema_version`, `run_id`, `seq`, `ts`, `stage`, `code`, `message`, `payload`                     |
 | `run_complete`| `event`, `schema_version`, `run_id`, `trace_id`, `started_at`, `finished_at`, `backend`, `language`, `transcript`, `segments`, `acceleration`, `warnings`, `evidence` |
 | `run_error`   | `event`, `schema_version`, `code`, `message`                                                                |
+| `backends.discovery` | `event`, `schema_version`, `backends`                                                                 |
+| `routing_decision` | `event`, `schema_version`, `run_id`, `ts`, `code`                                                          |
+| `transcript.partial` | `event`, `schema_version`, `run_id`, `seq`, `ts`, `text`, `start_sec`, `end_sec`, `confidence`, `speaker` |
+| `transcript.confirm` | `event`, `schema_version`, `run_id`, `seq`, `window_id`, `quality_model_id`, `drift`, `latency_ms`, `ts` |
+| `transcript.retract` | `event`, `schema_version`, `run_id`, `retracted_seq`, `window_id`, `reason`, `quality_model_id`, `ts` |
+| `transcript.correct` | `event`, `schema_version`, `run_id`, `correction_id`, `replaces_seq`, `window_id`, `segments`, `drift`, `latency_ms`, `ts` |
+| `transcript.speculation_stats` | `event`, `schema_version`, `run_id`, `windows_processed`, `corrections_emitted`, `confirmations_emitted`, `correction_rate`, `mean_fast_latency_ms`, `mean_quality_latency_ms`, `current_window_size_ms`, `mean_drift_wer`, `ts` |
 | `health.report`| `event`, `schema_version`, `ts`, `backends`, `ffmpeg`, `database`, `resources`, `overall_status`            |
 
 ### Streaming Delivery
@@ -425,6 +432,8 @@ Robot mode output is versioned via `ROBOT_SCHEMA_VERSION` (currently `"1.0.0"`).
 Robot mode CLI (`robot run`) creates an `mpsc::channel`, passes the sender to `FrankenWhisperEngine::transcribe_with_stream`, and drains the receiver on the main thread. Stage events are emitted as they arrive via `emit_robot_stage`. After the pipeline worker completes, any remaining buffered events are flushed, then `emit_robot_complete` or `emit_robot_error` is emitted.
 
 The `robot schema` subcommand emits a self-describing JSON document with event type specifications, required fields, and examples for each event type.
+
+The `robot backends` and `robot health` subcommands emit standalone NDJSON diagnostic events (`backends.discovery` and `health.report`). The `robot routing-history` subcommand emits line-oriented `routing_decision` entries derived from persisted routing events for post-hoc analysis. That event is part of the documented robot schema surface, but it is emitted by `robot routing-history` rather than the live `robot run` stream.
 
 ## 10. Optional TTY/PTY Low-Bandwidth Audio Mode
 
