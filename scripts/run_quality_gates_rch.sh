@@ -11,7 +11,7 @@ PROJECT_TAG="${PROJECT_TAG:-franken_whisper}"
 DRAIN_WORKERS="${DRAIN_WORKERS:-}"
 BLOCK_WORKERS="${BLOCK_WORKERS:-${DRAIN_WORKERS}}"
 
-retryable_pattern='No space left on device|Dependency planner fail-open|Remote toolchain failure|toolchain missing|/data/projects/asupersync/src/runtime/scheduler/three_lane.rs|\[RCH\] local'
+retryable_pattern='No space left on device|Dependency planner fail-open|Remote toolchain failure|toolchain missing|Project sync failed: rsync failed|Permission denied \(13\)|Connection refused|no workers with Rust installed|/data/projects/asupersync/src/runtime/scheduler/three_lane.rs|\[RCH\] local'
 declare -a blocked_workers=()
 
 restore_workers() {
@@ -25,6 +25,25 @@ restore_workers() {
 
 trap restore_workers EXIT
 
+disable_worker_for_retry() {
+    local worker="$1"
+    if [[ -z "${worker}" ]]; then
+        return 0
+    fi
+
+    local existing
+    for existing in "${blocked_workers[@]}"; do
+        if [[ "${existing}" == "${worker}" ]]; then
+            return 0
+        fi
+    done
+
+    echo "[routing] disabling worker ${worker} after retryable failure"
+    if rch workers disable "${worker}" --reason "temporary quality-gate retry quarantine" -y >/dev/null; then
+        blocked_workers+=("${worker}")
+    fi
+}
+
 run_gate() {
     local gate="$1"
     shift
@@ -33,6 +52,7 @@ run_gate() {
     while (( attempt <= MAX_ATTEMPTS )); do
         local target_dir="/tmp/rch_target_${PROJECT_TAG}_${gate}_${attempt}_$$"
         local log_file
+        local selected_worker=""
         log_file="$(mktemp)"
 
         echo "[gate:${gate}] attempt ${attempt}/${MAX_ATTEMPTS}"
@@ -62,7 +82,10 @@ run_gate() {
             retryable=1
         fi
 
+        selected_worker="$(sed -n 's/.*Selected worker: \([^ ]*\) .*/\1/p' "${log_file}" | tail -n 1)"
+
         if (( attempt < MAX_ATTEMPTS && retryable == 1 )); then
+            disable_worker_for_retry "${selected_worker}"
             echo "[gate:${gate}] retrying after transient/worker issue"
             rm -f "${log_file}"
             sleep 2
@@ -78,7 +101,9 @@ run_gate() {
     return 1
 }
 
-rch check
+if ! rch check; then
+    echo "[routing] rch check reported degraded worker state; continuing with retry-based routing"
+fi
 
 if [[ -n "${BLOCK_WORKERS}" ]]; then
     IFS=',' read -r -a selected_workers <<<"${BLOCK_WORKERS}"
