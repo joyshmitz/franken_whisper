@@ -102,25 +102,37 @@ pub fn validate_segment_invariants_with_policy(
         if let Some(start) = segment.start_sec
             && !start.is_finite()
         {
-            return Err(conformance_err(index, format_args!("start_sec ({start}) is not finite")));
+            return Err(conformance_err(
+                index,
+                format_args!("start_sec ({start}) is not finite"),
+            ));
         }
 
         if let Some(end) = segment.end_sec
             && !end.is_finite()
         {
-            return Err(conformance_err(index, format_args!("end_sec ({end}) is not finite")));
+            return Err(conformance_err(
+                index,
+                format_args!("end_sec ({end}) is not finite"),
+            ));
         }
 
         if let Some(start) = segment.start_sec
             && start < 0.0
         {
-            return Err(conformance_err(index, format_args!("start_sec ({start}) is negative")));
+            return Err(conformance_err(
+                index,
+                format_args!("start_sec ({start}) is negative"),
+            ));
         }
 
         if let Some(end) = segment.end_sec
             && end < 0.0
         {
-            return Err(conformance_err(index, format_args!("end_sec ({end}) is negative")));
+            return Err(conformance_err(
+                index,
+                format_args!("end_sec ({end}) is negative"),
+            ));
         }
 
         if let (Some(start), Some(end)) = (segment.start_sec, segment.end_sec)

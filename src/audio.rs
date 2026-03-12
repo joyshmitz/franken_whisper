@@ -1858,7 +1858,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_tools_root_joins_expected_subpath() {
-        use super::{ffmpeg_tools_root, FFMPEG_TOOLS_DIR};
+        use super::{FFMPEG_TOOLS_DIR, ffmpeg_tools_root};
         // Whatever state root is selected, tools root should end with
         // the FFMPEG_TOOLS_DIR constant.
         let root = ffmpeg_tools_root(None);

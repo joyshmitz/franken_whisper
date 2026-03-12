@@ -7,8 +7,9 @@ use franken_whisper::cli::{
     SyncCommand, TtyAudioCommand, TtyAudioControlCommand,
 };
 use franken_whisper::robot::{
-    acceleration_context_from_evidence, build_health_report, emit_health_report,
-    emit_robot_complete, emit_robot_error, emit_robot_stage, emit_robot_start, robot_schema_value,
+    acceleration_context_from_evidence, backends_discovery_value, build_backends_report,
+    build_health_report, emit_health_report, emit_robot_complete, emit_robot_error,
+    emit_robot_stage, emit_robot_start, robot_schema_value, routing_decision_value,
 };
 use franken_whisper::storage::RunStore;
 use franken_whisper::tty_audio;
@@ -126,19 +127,12 @@ fn run() -> FwResult<()> {
                             || event.code == "backend.routing.safe_mode"
                             || event.code == "backend.routing.calibration_guardrail"
                         {
-                            let entry = serde_json::json!({
-                                "event": "routing_decision",
-                                "run_id": details.run_id,
-                                "ts": event.ts_rfc3339,
-                                "code": event.code,
-                                "decision_id": event.payload.get("decision_id"),
-                                "chosen_action": event.payload.get("chosen_action"),
-                                "calibration_score": event.payload.get("calibration_score"),
-                                "e_process": event.payload.get("e_process"),
-                                "fallback_active": event.payload.get("fallback_active"),
-                                "recommended_order": event.payload.get("recommended_order"),
-                                "mode": event.payload.get("mode"),
-                            });
+                            let entry = routing_decision_value(
+                                &details.run_id,
+                                &event.ts_rfc3339,
+                                &event.code,
+                                &event.payload,
+                            );
                             println!("{}", serde_json::to_string(&entry)?);
                         }
                     }
@@ -150,15 +144,7 @@ fn run() -> FwResult<()> {
                 emit_health_report(&report)
             }
             RobotCommand::Backends => {
-                let payload = serde_json::json!({
-                    "event": "backends",
-                    "backends": franken_whisper::backend::diagnostics(),
-                    "acceleration": {
-                        "frankentorch_feature": cfg!(feature = "gpu-frankentorch"),
-                        "frankenjax_feature": cfg!(feature = "gpu-frankenjax"),
-                    },
-                });
-                println!("{}", serde_json::to_string(&payload)?);
+                println!("{}", backends_command_output()?);
                 Ok(())
             }
         },
@@ -303,6 +289,30 @@ fn run() -> FwResult<()> {
             }
         },
         Command::Tui => franken_whisper::tui::run_tui(),
+    }
+}
+
+fn backends_command_output() -> FwResult<String> {
+    let report = build_backends_report();
+    Ok(serde_json::to_string(&backends_discovery_value(&report))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backends_command_output;
+
+    #[test]
+    fn backends_command_output_matches_robot_contract() {
+        let line = backends_command_output().expect("backends command should serialize");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("backends command output should be valid json");
+
+        assert_eq!(parsed["event"], "backends.discovery");
+        assert_eq!(
+            parsed["schema_version"],
+            franken_whisper::robot::ROBOT_SCHEMA_VERSION
+        );
+        assert!(parsed["backends"].is_array());
     }
 }
 

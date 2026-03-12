@@ -1352,8 +1352,7 @@ async fn run_pipeline_body(
             // the caller should use SpeculativeStreamingPipeline instead of this
             // single-backend execution path. See streaming::SpeculativeStreamingPipeline.
             PipelineStage::Backend => {
-                execute_backend(pcx, log, request, run_tmp_dir, stage_budgets, &mut inter)
-                    .await?;
+                execute_backend(pcx, log, request, run_tmp_dir, stage_budgets, &mut inter).await?;
             }
             PipelineStage::Accelerate => {
                 execute_accelerate(pcx, log, request, stage_budgets, trace_id_str, &mut inter)
@@ -3394,8 +3393,8 @@ fn diarize_segments(
         }
 
         if best_sim >= similarity_threshold {
-            let cid = best_cluster
-                .expect("best_cluster is always Some when centroids is non-empty");
+            let cid =
+                best_cluster.expect("best_cluster is always Some when centroids is non-empty");
             assignments.push(cid);
             cluster_members[cid].push(emb.clone());
             centroids[cid] = SpeakerEmbedding::centroid(&cluster_members[cid]);

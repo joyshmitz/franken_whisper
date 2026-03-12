@@ -39,6 +39,8 @@ pub const RUN_COMPLETE_REQUIRED_FIELDS: &[&str] = &[
     "evidence",
 ];
 pub const BACKENDS_DISCOVERY_REQUIRED_FIELDS: &[&str] = &["event", "schema_version", "backends"];
+pub const ROUTING_DECISION_REQUIRED_FIELDS: &[&str] =
+    &["event", "schema_version", "run_id", "ts", "code"];
 
 pub const TRANSCRIPT_PARTIAL_REQUIRED_FIELDS: &[&str] = &[
     "event",
@@ -178,6 +180,30 @@ pub fn backends_discovery_value(report: &BackendsReport) -> serde_json::Value {
 /// Emit a single `backends.discovery` NDJSON line to stdout.
 pub fn emit_robot_backends_discovery(report: &BackendsReport) -> FwResult<()> {
     emit_line(&backends_discovery_value(report))
+}
+
+/// Construct the `routing_decision` NDJSON event value for `robot routing-history`.
+#[must_use]
+pub fn routing_decision_value(
+    run_id: &str,
+    ts: &str,
+    code: &str,
+    payload: &Value,
+) -> serde_json::Value {
+    json!({
+        "event": "routing_decision",
+        "schema_version": ROBOT_SCHEMA_VERSION,
+        "run_id": run_id,
+        "ts": ts,
+        "code": code,
+        "decision_id": payload.get("decision_id"),
+        "chosen_action": payload.get("chosen_action"),
+        "calibration_score": payload.get("calibration_score"),
+        "e_process": payload.get("e_process"),
+        "fallback_active": payload.get("fallback_active"),
+        "recommended_order": payload.get("recommended_order"),
+        "mode": payload.get("mode"),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -644,7 +670,7 @@ fn dependency_check_json(check: &DependencyCheck) -> serde_json::Value {
 #[must_use]
 pub fn robot_schema_value() -> serde_json::Value {
     json!({
-        "version": "1.0",
+        "version": ROBOT_SCHEMA_VERSION,
         "schema_version": ROBOT_SCHEMA_VERSION,
         "line_oriented": "ndjson",
         "events": {
@@ -728,6 +754,23 @@ pub fn robot_schema_value() -> serde_json::Value {
                             }
                         }
                     ]
+                }),
+            },
+            "routing_decision": {
+                "required": ROUTING_DECISION_REQUIRED_FIELDS,
+                "example": json!({
+                    "event": "routing_decision",
+                    "schema_version": ROBOT_SCHEMA_VERSION,
+                    "run_id": "run-123",
+                    "ts": "2026-02-22T00:00:00Z",
+                    "code": "backend.routing.decision_contract",
+                    "decision_id": "dec-123",
+                    "chosen_action": "try_whisper_cpp",
+                    "calibration_score": 0.82,
+                    "e_process": 1.4,
+                    "fallback_active": false,
+                    "recommended_order": ["whisper_cpp", "insanely_fast", "whisper_diarization"],
+                    "mode": "adaptive",
                 }),
             },
             "transcript.partial": {
@@ -1175,7 +1218,7 @@ mod tests {
         for (event_type, spec) in events {
             let required = spec["required"]
                 .as_array()
-                .unwrap_or_else(|| panic!("{event_type} should have required array"));
+                .expect(&format!("{event_type} should have required array"));
             let example = &spec["example"];
 
             for field in required {
@@ -1427,6 +1470,17 @@ mod tests {
     fn schema_version_is_string() {
         let schema = robot_schema_value();
         assert!(schema["version"].is_string(), "version should be a string");
+        assert!(
+            schema["schema_version"].is_string(),
+            "schema_version should be a string"
+        );
+    }
+
+    #[test]
+    fn schema_document_version_matches_robot_schema_version() {
+        let schema = robot_schema_value();
+        assert_eq!(schema["version"], super::ROBOT_SCHEMA_VERSION);
+        assert_eq!(schema["schema_version"], super::ROBOT_SCHEMA_VERSION);
     }
 
     #[test]
@@ -1776,8 +1830,8 @@ mod tests {
             .expect("events should be object");
         assert_eq!(
             events.len(),
-            11,
-            "expected 11 event types including speculation events, got {}",
+            12,
+            "expected 12 event types including routing history and speculation events, got {}",
             events.len()
         );
         for expected in [
@@ -1786,6 +1840,7 @@ mod tests {
             "run_complete",
             "run_error",
             "backends.discovery",
+            "routing_decision",
             "transcript.partial",
             "transcript.confirm",
             "transcript.retract",
@@ -2800,6 +2855,60 @@ mod tests {
             assert!(
                 example.get(field_name).is_some(),
                 "schema example for backends.discovery missing required field `{field_name}`"
+            );
+        }
+    }
+
+    // ── routing_decision tests ──
+
+    #[test]
+    fn routing_decision_event_type_is_correct() {
+        let payload = json!({
+            "decision_id": "dec-1",
+            "chosen_action": "try_whisper_cpp",
+            "calibration_score": 0.91,
+            "e_process": 1.23,
+            "fallback_active": false,
+            "recommended_order": ["whisper_cpp", "insanely_fast"],
+            "mode": "adaptive",
+        });
+        let value = super::routing_decision_value(
+            "run-123",
+            "2026-02-22T00:00:00Z",
+            "backend.routing.decision_contract",
+            &payload,
+        );
+        assert_eq!(value["event"], "routing_decision");
+        assert_eq!(value["schema_version"], super::ROBOT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn routing_decision_contains_required_fields() {
+        let value = super::routing_decision_value(
+            "run-123",
+            "2026-02-22T00:00:00Z",
+            "backend.routing.decision_contract",
+            &json!({}),
+        );
+        for field in super::ROUTING_DECISION_REQUIRED_FIELDS {
+            assert!(
+                value.get(*field).is_some(),
+                "routing_decision missing required field `{field}`"
+            );
+        }
+    }
+
+    #[test]
+    fn routing_decision_schema_example_satisfies_required_fields() {
+        let schema = super::robot_schema_value();
+        let entry = &schema["events"]["routing_decision"];
+        let required = entry["required"].as_array().expect("required array");
+        let example = &entry["example"];
+        for field in required {
+            let field_name = field.as_str().expect("field string");
+            assert!(
+                example.get(field_name).is_some(),
+                "schema example for routing_decision missing required field `{field_name}`"
             );
         }
     }
