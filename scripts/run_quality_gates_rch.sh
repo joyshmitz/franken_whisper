@@ -11,7 +11,7 @@ PROJECT_TAG="${PROJECT_TAG:-franken_whisper}"
 DRAIN_WORKERS="${DRAIN_WORKERS:-}"
 BLOCK_WORKERS="${BLOCK_WORKERS:-${DRAIN_WORKERS}}"
 
-retryable_pattern='No space left on device|Dependency planner fail-open|Remote toolchain failure|toolchain missing|Project sync failed: rsync failed|Permission denied \(13\)|Connection refused|no workers with Rust installed|/data/projects/asupersync/src/runtime/scheduler/three_lane.rs|\[RCH\] local'
+retryable_pattern='No space left on device|Dependency planner fail-open|primary-root-only sync|Remote toolchain failure|toolchain missing|Project sync failed: rsync failed|Permission denied \(13\)|Connection refused|no workers with Rust installed|/data/projects/asupersync/src/runtime/scheduler/three_lane.rs|\[RCH\] local'
 declare -a blocked_workers=()
 
 restore_workers() {
@@ -71,7 +71,13 @@ run_gate() {
             echo "[gate:${gate}] detected local fallback; treating as failure"
         fi
 
-        if (( status == 0 && fell_back_local == 0 )); then
+        local dependency_sync_invalid=0
+        if grep -Eq 'Dependency planner fail-open|primary-root-only sync' "${log_file}"; then
+            dependency_sync_invalid=1
+            echo "[gate:${gate}] detected degraded dependency sync; refusing stale-sibling validation"
+        fi
+
+        if (( status == 0 && fell_back_local == 0 && dependency_sync_invalid == 0 )); then
             rm -f "${log_file}"
             echo "[gate:${gate}] success"
             return 0
