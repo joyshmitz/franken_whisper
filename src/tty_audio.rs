@@ -334,24 +334,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
     let mut expected_seq = 0u64;
 
     for frame in &frames {
-        if frame.protocol_version != SUPPORTED_PROTOCOL_VERSION {
-            return Err(FwError::InvalidRequest(format!(
-                "unsupported tty-audio protocol_version {} at seq {} (supported: {})",
-                frame.protocol_version, frame.seq, SUPPORTED_PROTOCOL_VERSION
-            )));
-        }
-        if frame.codec != CODEC_MULAW_ZLIB_B64 {
-            return Err(FwError::InvalidRequest(format!(
-                "unsupported tty-audio codec `{}` at seq {}",
-                frame.codec, frame.seq
-            )));
-        }
-        if frame.sample_rate_hz != 8_000 || frame.channels != 1 {
-            return Err(FwError::InvalidRequest(format!(
-                "unsupported tty-audio shape at seq {}: sample_rate_hz={}, channels={}",
-                frame.seq, frame.sample_rate_hz, frame.channels
-            )));
-        }
+        validate_audio_frame_metadata(frame)?;
 
         if seen.contains(&frame.seq) {
             duplicates.push(frame.seq);
@@ -470,6 +453,28 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
     };
 
     Ok((report, raw))
+}
+
+fn validate_audio_frame_metadata(frame: &TtyAudioFrame) -> FwResult<()> {
+    if frame.protocol_version != SUPPORTED_PROTOCOL_VERSION {
+        return Err(FwError::InvalidRequest(format!(
+            "unsupported tty-audio protocol_version {} at seq {} (supported: {})",
+            frame.protocol_version, frame.seq, SUPPORTED_PROTOCOL_VERSION
+        )));
+    }
+    if frame.codec != CODEC_MULAW_ZLIB_B64 {
+        return Err(FwError::InvalidRequest(format!(
+            "unsupported tty-audio codec `{}` at seq {}",
+            frame.codec, frame.seq
+        )));
+    }
+    if frame.sample_rate_hz != 8_000 || frame.channels != 1 {
+        return Err(FwError::InvalidRequest(format!(
+            "unsupported tty-audio shape at seq {}: sample_rate_hz={}, channels={}",
+            frame.seq, frame.sample_rate_hz, frame.channels
+        )));
+    }
+    Ok(())
 }
 
 pub fn retransmit_plan_from_stdin(policy: DecodeRecoveryPolicy) -> FwResult<RetransmitPlan> {
@@ -1099,6 +1104,8 @@ impl TtyAudioPipelineAdapter {
                 continue;
             }
 
+            validate_audio_frame_metadata(frame)?;
+
             let compressed = STANDARD_NO_PAD
                 .decode(&frame.payload_b64)
                 .map_err(|e| FwError::InvalidRequest(format!("invalid base64 payload: {e}")))?;
@@ -1149,6 +1156,21 @@ impl TtyAudioPipelineAdapter {
         }
 
         self.finalized = true;
+
+        let Some(highest_seq) = self.raw_pcm.keys().next_back().copied() else {
+            self.finalized = false;
+            return Err(FwError::InvalidRequest(
+                "no frames have been ingested".to_owned(),
+            ));
+        };
+        let expected_frame_count = highest_seq + 1;
+        if self.raw_pcm.len() as u64 != expected_frame_count {
+            self.finalized = false;
+            return Err(FwError::InvalidRequest(format!(
+                "cannot finalize tty-audio pipeline with missing frame sequences: have {}, expected contiguous 0..={highest_seq}",
+                self.raw_pcm.len()
+            )));
+        }
 
         let mut contiguous_pcm = Vec::new();
         // Since it's a BTreeMap, values are yielded in sequence number order.
@@ -4041,6 +4063,35 @@ mod tests {
         let count = adapter.ingest_frames(&[frame]).expect("ingest");
         assert_eq!(count, 1);
         assert_eq!(adapter.raw_pcm_len(), data.len());
+    }
+
+    #[test]
+    fn pipeline_adapter_ingest_rejects_unsupported_frame_metadata() {
+        let mut adapter = TtyAudioPipelineAdapter::new().expect("new adapter");
+        let mut frame = make_frame(0, b"data");
+        frame.sample_rate_hz = 16_000;
+
+        let err = adapter
+            .ingest_frames(&[frame])
+            .expect_err("unsupported frame metadata should fail");
+        assert!(err.to_string().contains("unsupported tty-audio shape"));
+    }
+
+    #[test]
+    fn pipeline_adapter_finalize_rejects_sequence_gaps() {
+        let mut adapter = TtyAudioPipelineAdapter::new().expect("new adapter");
+        adapter
+            .ingest_frames(&[make_frame(0, b"first"), make_frame(2, b"third")])
+            .expect("ingest gapped frames");
+
+        let err = adapter
+            .finalize_wav()
+            .expect_err("gapped frame set should fail finalize");
+        assert!(err.to_string().contains("missing frame sequences"));
+        assert!(
+            !adapter.is_finalized(),
+            "failed finalize should leave adapter open for retransmit repair"
+        );
     }
 
     // ---------------------------------------------------------------
