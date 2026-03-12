@@ -107,14 +107,18 @@ pub(crate) fn analyze_wav(
         .map(|rms| *rms >= activity_threshold)
         .collect::<Vec<_>>();
 
-    bridge_short_gaps(&mut active, GAP_BRIDGE_MAX_FRAMES);
-    let active_regions =
-        active_regions_from_frames(&frame_rms, &active, FRAME_MS, MIN_REGION_FRAMES);
-
     let computed_duration_ms = (((wav.samples.len() as f64) / (wav.sample_rate_hz as f64))
         * 1_000.0)
         .round()
         .max(0.0) as u64;
+    bridge_short_gaps(&mut active, GAP_BRIDGE_MAX_FRAMES);
+    let active_regions = active_regions_from_frames(
+        &frame_rms,
+        &active,
+        FRAME_MS,
+        MIN_REGION_FRAMES,
+        computed_duration_ms,
+    );
 
     Ok(NativeAudioAnalysis {
         duration_ms: duration_override_ms
@@ -263,6 +267,7 @@ fn active_regions_from_frames(
     active: &[bool],
     frame_ms: u32,
     min_region_frames: usize,
+    duration_ms: u64,
 ) -> Vec<AudioRegion> {
     let mut regions = Vec::new();
     let mut idx = 0usize;
@@ -289,9 +294,15 @@ fn active_regions_from_frames(
             0.0
         };
 
+        let start_ms = ((start as u64) * (frame_ms as u64)).min(duration_ms);
+        let end_ms = ((end as u64) * (frame_ms as u64)).min(duration_ms);
+        if end_ms <= start_ms {
+            continue;
+        }
+
         regions.push(AudioRegion {
-            start_ms: (start as u64) * (frame_ms as u64),
-            end_ms: (end as u64) * (frame_ms as u64),
+            start_ms,
+            end_ms,
             avg_rms,
         });
     }
@@ -502,7 +513,7 @@ mod tests {
         // Active run of 1 frame with min_region_frames=2 → filtered out.
         let rms = vec![0.1, 0.0, 0.1, 0.1, 0.0];
         let active = vec![true, false, true, true, false];
-        let regions = active_regions_from_frames(&rms, &active, 20, 2);
+        let regions = active_regions_from_frames(&rms, &active, 20, 2, 100);
         // Only the 2-frame run at index 2-3 should survive.
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].start_ms, 40);
@@ -756,7 +767,7 @@ mod tests {
         let rms = vec![0.2f32, 0.4f32, 0.0f32];
         let active = vec![true, true, false];
         // frame_ms=20, min_region_frames=1 (so 2-frame region qualifies)
-        let regions = active_regions_from_frames(&rms, &active, 20, 1);
+        let regions = active_regions_from_frames(&rms, &active, 20, 1, 60);
 
         assert_eq!(regions.len(), 1);
         // avg_rms = (0.2 + 0.4) / 2 = 0.3
@@ -889,7 +900,7 @@ mod tests {
         // With min_region_frames=0, even single-frame active runs should be kept.
         let rms = vec![0.1f32, 0.0, 0.2, 0.0, 0.3];
         let active = vec![true, false, true, false, true];
-        let regions = active_regions_from_frames(&rms, &active, 20, 0);
+        let regions = active_regions_from_frames(&rms, &active, 20, 0, 100);
         assert_eq!(
             regions.len(),
             3,
@@ -1042,7 +1053,7 @@ mod tests {
         // Existing tests always have mixed active/inactive; none test all-active.
         let rms = vec![0.1, 0.2, 0.3, 0.4, 0.5];
         let active = vec![true, true, true, true, true];
-        let regions = active_regions_from_frames(&rms, &active, 20, 1);
+        let regions = active_regions_from_frames(&rms, &active, 20, 1, 100);
         assert_eq!(regions.len(), 1, "all-active should produce single region");
         assert_eq!(regions[0].start_ms, 0);
         assert_eq!(regions[0].end_ms, 100); // 5 frames * 20ms
@@ -1117,6 +1128,19 @@ mod tests {
             "max amplitude RMS should be ~1.0, got {}",
             rms[3]
         );
+    }
+
+    #[test]
+    fn active_regions_clamp_partial_trailing_frame_to_audio_duration() {
+        use super::active_regions_from_frames;
+
+        let rms = vec![0.2f32];
+        let active = vec![true];
+        let regions = active_regions_from_frames(&rms, &active, 20, 1, 10);
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].start_ms, 0);
+        assert_eq!(regions[0].end_ms, 10);
     }
 
     #[test]
