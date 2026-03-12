@@ -21,6 +21,7 @@ const FFPROBE_BIN_ENV: &str = "FRANKEN_WHISPER_FFPROBE_BIN";
 const FORCE_FFMPEG_NORMALIZE_ENV: &str = "FRANKEN_WHISPER_FORCE_FFMPEG_NORMALIZE";
 const AUTO_PROVISION_FFMPEG_ENV: &str = "FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG";
 const DEFAULT_STATE_DIR: &str = ".franken_whisper";
+const DEFAULT_STATE_HOME_DIR: &str = ".local/state/franken_whisper";
 const FFMPEG_TOOLS_DIR: &str = "tools/ffmpeg";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -276,6 +277,14 @@ fn state_root_for_tools(work_dir: Option<&Path>) -> PathBuf {
         return state_root.to_path_buf();
     }
 
+    if let Ok(xdg_state_home) = std::env::var("XDG_STATE_HOME") {
+        return PathBuf::from(xdg_state_home).join("franken_whisper");
+    }
+
+    if let Ok(home_dir) = std::env::var("HOME") {
+        return PathBuf::from(home_dir).join(DEFAULT_STATE_HOME_DIR);
+    }
+
     PathBuf::from(DEFAULT_STATE_DIR)
 }
 
@@ -319,7 +328,7 @@ fn ensure_local_ffmpeg_bundle(work_dir: Option<&Path>) -> FwResult<()> {
         download_ffmpeg_bundle(bundle_url, &archive_path)?;
     }
 
-    let extract_dir = cache_dir.join(format!(
+    let extract_dir = std::env::temp_dir().join(format!(
         "extract_{}_{}",
         std::process::id(),
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
