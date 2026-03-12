@@ -134,20 +134,16 @@ pub fn normalize_insanely_fast(raw_json: &Value) -> FwResult<NormalizedOutput> {
 pub fn normalize_whisper_diarization(raw_json: &Value) -> FwResult<NormalizedOutput> {
     validate_is_object(raw_json, "whisper_diarization")?;
 
+    let segments = extract_segments_from_json(raw_json);
+
     // The diarization backend stores the transcript under `transcript_txt`.
     let transcript = raw_json
         .get("transcript_txt")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-
-    // The diarization JSON envelope does not embed parsed segments.
-    // Attempt to extract segments if they happen to be present (future
-    // extensibility), otherwise return an empty vec. Callers that need
-    // SRT-based segments should parse them before calling this function
-    // and merge them into the NormalizedOutput.
-    let segments = extract_segments_from_json(raw_json);
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| transcript_from_segments(&segments));
 
     // The diarization backend does not emit a language field in its JSON;
     // the caller typically supplies the language from the request.
@@ -227,10 +223,8 @@ mod tests {
 
     fn load_golden_json(name: &str) -> Value {
         let path = golden_path(name);
-        let content = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read golden file {}: {e}", path.display()));
-        serde_json::from_str(&content)
-            .unwrap_or_else(|e| panic!("failed to parse golden file {}: {e}", path.display()))
+        let content = std::fs::read_to_string(&path).expect("failed to read golden file");
+        serde_json::from_str(&content).expect("failed to parse golden file")
     }
 
     #[test]
@@ -476,6 +470,18 @@ mod tests {
         let raw = json!({"srt_path": "/tmp/test.srt"});
         let normalized = normalize_whisper_diarization(&raw).unwrap();
         assert!(normalized.transcript.is_empty());
+    }
+
+    #[test]
+    fn diarization_falls_back_to_segments_when_transcript_missing() {
+        let raw = json!({
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "hello"},
+                {"start": 1.0, "end": 2.0, "text": "world"},
+            ],
+        });
+        let normalized = normalize_whisper_diarization(&raw).unwrap();
+        assert_eq!(normalized.transcript, "hello world");
     }
 
     #[test]

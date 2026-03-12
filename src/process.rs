@@ -61,12 +61,8 @@ pub fn run_command_with_timeout(
 
         loop {
             if let Some(status) = child.try_wait()? {
-                let stdout = stdout_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .unwrap_or_default();
-                let stderr = stderr_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .unwrap_or_default();
+                let stdout = recv_pipe_output(stdout_rx);
+                let stderr = recv_pipe_output(stderr_rx);
                 return validate_command_output(
                     &rendered,
                     Output {
@@ -80,9 +76,7 @@ pub fn run_command_with_timeout(
             if started_at.elapsed() >= limit {
                 let _ = child.kill();
                 let _ = child.wait();
-                let stderr = stderr_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .unwrap_or_default();
+                let stderr = recv_pipe_output(stderr_rx);
                 let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
                 return Err(FwError::from_command_timeout(
                     rendered,
@@ -152,12 +146,8 @@ pub(crate) fn run_command_cancellable(
 
     loop {
         if let Some(status) = child.try_wait()? {
-            let stdout = stdout_rx
-                .recv_timeout(Duration::from_millis(100))
-                .unwrap_or_default();
-            let stderr = stderr_rx
-                .recv_timeout(Duration::from_millis(100))
-                .unwrap_or_default();
+            let stdout = recv_pipe_output(stdout_rx);
+            let stderr = recv_pipe_output(stderr_rx);
             return validate_command_output(
                 &rendered,
                 Output {
@@ -172,6 +162,8 @@ pub(crate) fn run_command_cancellable(
         if let Err(err) = token.checkpoint() {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = recv_pipe_output(stdout_rx);
+            let _ = recv_pipe_output(stderr_rx);
             return Err(err);
         }
 
@@ -181,9 +173,7 @@ pub(crate) fn run_command_cancellable(
         {
             let _ = child.kill();
             let _ = child.wait();
-            let stderr = stderr_rx
-                .recv_timeout(Duration::from_millis(100))
-                .unwrap_or_default();
+            let stderr = recv_pipe_output(stderr_rx);
             let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
             return Err(FwError::from_command_timeout(
                 rendered,
@@ -208,6 +198,10 @@ fn validate_command_output(rendered: &str, output: Output) -> FwResult<Output> {
         status,
         stderr,
     ))
+}
+
+fn recv_pipe_output(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+    rx.recv().unwrap_or_default()
 }
 
 fn saturating_duration_ms(duration: Duration) -> u64 {
@@ -553,6 +547,39 @@ mod tests {
             .expect("should succeed");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("ok"));
+    }
+
+    #[test]
+    fn run_command_preserves_large_stdout_payload() {
+        let output = run_command(
+            "sh",
+            &["-c".to_owned(), "yes x | head -c 200000".to_owned()],
+            None,
+        )
+        .expect("large stdout command should succeed");
+        assert_eq!(
+            output.stdout.len(),
+            200_000,
+            "stdout should be fully captured after process exit"
+        );
+    }
+
+    #[test]
+    fn run_command_preserves_large_stderr_payload_on_failure() {
+        let err = run_command(
+            "sh",
+            &[
+                "-c".to_owned(),
+                "yes e | head -c 200000 >&2; exit 7".to_owned(),
+            ],
+            None,
+        )
+        .expect_err("command should fail with large stderr output");
+        let text = err.to_string();
+        assert!(
+            text.contains(&"e".repeat(1024)),
+            "large stderr payload should not be truncated away"
+        );
     }
 
     #[test]
