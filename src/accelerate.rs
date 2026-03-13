@@ -529,6 +529,11 @@ pub(crate) fn layer_norm_cpu(
     // Compute variance.
     let variance = sanitized.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
 
+    let epsilon = if epsilon.is_finite() {
+        epsilon.max(f64::EPSILON)
+    } else {
+        f64::EPSILON
+    };
     let std_dev = (variance + epsilon).sqrt();
 
     let normalized: Vec<f64> = sanitized
@@ -4448,18 +4453,32 @@ mod tests {
     }
 
     #[test]
-    fn layer_norm_cpu_zero_epsilon_constant_input_produces_nan() {
-        // All values identical + epsilon=0 → variance=0, std_dev=0, division by zero → NaN.
+    fn layer_norm_cpu_zero_epsilon_constant_input_stays_finite() {
         let values = vec![5.0, 5.0, 5.0];
         let gamma = vec![1.0, 1.0, 1.0];
         let beta = vec![0.0, 0.0, 0.0];
         let result = super::layer_norm_cpu(&values, &gamma, &beta, 0.0);
         assert!(!result.gpu_accelerated);
-        // With zero epsilon and constant input, (v - mean) / 0.0 = NaN or 0/0 = NaN.
         for v in &result.normalized {
             assert!(
-                v.is_nan(),
-                "expected NaN from zero-epsilon constant input, got {v}"
+                v.is_finite() && v.abs() < 1e-9,
+                "expected finite near-zero output from zero-epsilon constant input, got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn layer_norm_cpu_negative_epsilon_is_clamped() {
+        let values = vec![2.0, 2.0, 2.0];
+        let gamma = vec![1.0, 1.0, 1.0];
+        let beta = vec![0.0, 0.0, 0.0];
+        let result = super::layer_norm_cpu(&values, &gamma, &beta, -1.0);
+
+        assert!(!result.gpu_accelerated);
+        for v in &result.normalized {
+            assert!(
+                v.is_finite() && v.abs() < 1e-9,
+                "negative epsilon should be clamped to a stable floor, got {v}"
             );
         }
     }
