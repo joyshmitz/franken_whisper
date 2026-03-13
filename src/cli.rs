@@ -836,7 +836,7 @@ impl TranscribeArgs {
             diarize: self.diarize,
             persist: !self.no_persist,
             db_path: self.db.clone(),
-            timeout_ms: self.timeout.map(|secs| secs * 1000),
+            timeout_ms: self.timeout.map(|secs| secs.saturating_mul(1000)),
             backend_params,
         })
     }
@@ -1823,6 +1823,15 @@ mod tests {
         args.timeout = Some(u64::MAX / 1000);
         let request = args.to_request().expect("should succeed");
         assert_eq!(request.timeout_ms, Some((u64::MAX / 1000) * 1000));
+    }
+
+    #[test]
+    fn timeout_u64_max_saturates_to_u64_max_millis() {
+        let mut args = minimal_args();
+        args.timeout = Some(u64::MAX);
+
+        let request = args.to_request().expect("should succeed");
+        assert_eq!(request.timeout_ms, Some(u64::MAX));
     }
 
     #[test]

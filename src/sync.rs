@@ -1655,10 +1655,7 @@ fn verify_schema_exists(connection: &Connection) -> FwResult<()> {
 // ---------------------------------------------------------------------------
 
 fn atomic_rename(from: &Path, to: &Path) -> FwResult<()> {
-    if to.exists() {
-        fs::remove_file(to)?;
-    }
-    fs::rename(from, to)?;
+    replace_file_atomically(from, to)?;
     sync_parent_dir(to)?;
     Ok(())
 }
@@ -1671,12 +1668,26 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> FwResult<()> {
         file.flush()?;
         file.sync_all()?;
     }
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(tmp, path)?;
+    replace_file_atomically(&tmp, path)?;
     sync_parent_dir(path)?;
     Ok(())
+}
+
+fn replace_file_atomically(from: &Path, to: &Path) -> FwResult<()> {
+    #[cfg(unix)]
+    {
+        fs::rename(from, to)?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        if to.exists() {
+            fs::remove_file(to)?;
+        }
+        fs::rename(from, to)?;
+        Ok(())
+    }
 }
 
 fn sync_parent_dir(path: &Path) -> FwResult<()> {

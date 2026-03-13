@@ -104,13 +104,15 @@ fn rollout_stage_from_report(report: &RunReport) -> String {
     report
         .events
         .iter()
-        .find(|event| event.code == "backend.routing.decision_contract")
+        .rev()
+        .find(|event| event.code == "backend.ok")
         .and_then(|event| event.payload.get("native_rollout_stage"))
         .or_else(|| {
             report
                 .events
                 .iter()
-                .find(|event| event.code == "backend.ok")
+                .rev()
+                .find(|event| event.code == "backend.routing.decision_contract")
                 .and_then(|event| event.payload.get("native_rollout_stage"))
         })
         .and_then(serde_json::Value::as_str)
@@ -781,6 +783,34 @@ mod tests {
 
         let tolerance = build_tolerance_manifest(&report);
         assert_eq!(tolerance.native_rollout_stage, "shadow");
+    }
+
+    #[test]
+    fn tolerance_manifest_prefers_backend_ok_rollout_stage_over_routing_decision() {
+        use crate::model::RunEvent;
+
+        let mut report = fixture_report();
+        report.events.extend([
+            RunEvent {
+                seq: 1,
+                ts_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+                stage: "backend_routing".to_owned(),
+                code: "backend.routing.decision_contract".to_owned(),
+                message: "routing decision".to_owned(),
+                payload: json!({"native_rollout_stage": "shadow"}),
+            },
+            RunEvent {
+                seq: 2,
+                ts_rfc3339: "2026-01-01T00:00:01Z".to_owned(),
+                stage: "backend".to_owned(),
+                code: "backend.ok".to_owned(),
+                message: "backend completed".to_owned(),
+                payload: json!({"native_rollout_stage": "primary"}),
+            },
+        ]);
+
+        let tolerance = build_tolerance_manifest(&report);
+        assert_eq!(tolerance.native_rollout_stage, "primary");
     }
 
     #[test]
