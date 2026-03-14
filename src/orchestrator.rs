@@ -2962,7 +2962,7 @@ fn punctuate_segments(
         let ends_with_punct = text
             .chars()
             .last()
-            .is_some_and(|c| c == '.' || c == '?' || c == '!' || c == ',' || c == ';');
+            .is_some_and(|c| c == '.' || c == '?' || c == '!');
         if !ends_with_punct {
             text.push('.');
         }
@@ -8270,6 +8270,24 @@ mod tests {
             "should preserve question mark: {}",
             segments[0].text
         );
+    }
+
+    #[test]
+    fn punctuate_terminal_comma_still_gets_period() {
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![make_segment(0.0, 1.0, "hello,")];
+        let report = punctuate_segments(&mut segments, &token).unwrap();
+        assert_eq!(report.segments_modified, 1);
+        assert_eq!(segments[0].text, "Hello,.");
+    }
+
+    #[test]
+    fn punctuate_terminal_semicolon_still_gets_period() {
+        let token = CancellationToken::no_deadline();
+        let mut segments = vec![make_segment(0.0, 1.0, "hello;")];
+        let report = punctuate_segments(&mut segments, &token).unwrap();
+        assert_eq!(report.segments_modified, 1);
+        assert_eq!(segments[0].text, "Hello;.");
     }
 
     #[test]
