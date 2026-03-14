@@ -4,29 +4,18 @@ This packet is the current execution source-of-truth after U1/U5 reconciliation.
 
 ## Remaining Open Work (Current Snapshot)
 
-### EP-01: Complete `bd-244` SSI Runtime Containment + Mandatory Gate Closure
-
-- Bead: `bd-244`
-- Status: `in_progress`
-- Owner: `TealCove`
-- Scope:
-  - finish CI-scale runtime/correctness containment path;
-  - publish mandatory gate matrix after containment/fix path converges.
-- Required command style:
-  - all cargo gates offloaded via `rch exec -- ...`.
-- Verification criteria:
-  - practical runtime evidence for `ci_scale` and `single_writer_smoke`;
-  - explicit pass/fail gate outcomes with blocker provenance.
+No repo-local open execution packet remained after `bd-244` was closed on 2026-02-27.
 
 ## Recently Completed
 
+- `bd-244` (`AzurePond`): SSI runtime containment and mandatory gate closure validated on 2026-02-27; `ci_scale`, `single_writer_smoke`, deterministic hot-row probe, and `franken_whisper` concurrent persist lanes all passed.
 - `bd-1a1` (`PearlAnchor`): corpus-path unblock + controlled golden refresh + checksum lane green + adjacent manifest/checksum tests green.
 - `bd-217` (`PearlAnchor`): tracker/doc reconciliation packet closed.
 
 ## Suggested Execution Order
 
-1. Finish EP-01 (`bd-244`) and publish evidence.
-2. Re-run `bv --robot-triage` and open only truly remaining work.
+1. Re-run `bv --robot-triage`.
+2. Open only truly remaining work that still has concrete artifact evidence.
 
 ## Done/Blocked Decision Rule
 

@@ -1320,7 +1320,7 @@
 - [x] U4.6 `franken_whisper`: run mandatory gates after U3 edits (`fmt`, `check`, `clippy -D warnings`, `test`).
 
 ### U5. Final reconciliation and handoff quality
-- [x] U5.1 Mark all completed packet rows (`T`, `U`) with final statuses and evidence references. *(updated in this tracker + bead state: `bd-1a1=blocked`, `bd-244=in_progress`, `bd-217=in_progress`)*
+- [x] U5.1 Mark all completed packet rows (`T`, `U`) with final statuses and evidence references. *(final bead state after closeout: `bd-1a1=closed`, `bd-244=closed`, `bd-217=closed`)*
 - [x] U5.2 Summarize exact changed files in both repos. *(updated `docs/cross_repo_change_summary_2026-02-25.md` with current-session file list and command evidence)*
 - [x] U5.3 Summarize exact pass/fail quality-gate matrix by command. *(updated `docs/cross_repo_change_summary_2026-02-25.md` gate matrix)*
 - [x] U5.4 List residual risks and what remains blocked vs completed. *(updated `docs/closeout_residual_risks_2026-02-25.md`)*

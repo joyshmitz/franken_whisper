@@ -8,7 +8,7 @@ for open cross-repo beads.
 - Primary repo: `/data/projects/franken_whisper`
 - Cross-repo workstream: `/data/projects/frankensqlite`
 - Active beads in scope:
-  - `bd-244` (`in_progress`)
+  - `bd-244` (`closed`)
   - `bd-1a1` (`closed`)
   - `bd-217` (`closed`)
 
@@ -17,8 +17,8 @@ for open cross-repo beads.
 | Repo | Status | Files | Notes |
 |---|---|---|---|
 | `franken_whisper` | updated | `TODO_IMPLEMENTATION_TRACKER.md` | Reconciled U1 completion evidence and U5 packet statuses against current bead state. |
-| `franken_whisper` | updated | `docs/next_execution_packet_2026-02-25.md` | Reduced remaining work to the active lane (`bd-244`) and captured completed lanes. |
-| `franken_whisper` | updated | `docs/closeout_residual_risks_2026-02-25.md` | Refreshed risk register to remove resolved corpus-path blocker and reflect current open risks. |
+| `franken_whisper` | updated | `docs/next_execution_packet_2026-02-25.md` | Reconciled the packet after `bd-244` closure so it no longer advertises stale active work. |
+| `franken_whisper` | updated | `docs/closeout_residual_risks_2026-02-25.md` | Removed stale `bd-244` open-risk language and left only current residual risks. |
 | `franken_whisper` | updated | `docs/cross_repo_change_summary_2026-02-25.md` | This refreshed packet. |
 | `frankensqlite` | local-only artifact update | `fuzz/corpus/fuzz_sql_parser/*.sql` | Restored deterministic local fuzz corpus path required by `bd_1lsfu_2` (ignored by git; not tracked). |
 
@@ -40,8 +40,8 @@ for open cross-repo beads.
 
 - Completed in this session:
   - `bd-1a1` lane closure (restore corpus path, controlled refresh, green checksum + adjacent tests);
+  - `bd-244` runtime containment + mandatory-gate closure;
   - `bd-217` reconciliation packet closure;
   - explicit ownership/coordinator updates via Agent Mail threads.
-- In progress:
-  - `bd-244` runtime containment + mandatory-gate closure (owner: `TealCove`).
+- In progress: none in this packet snapshot.
 - Blocked: none in this repo-level bead snapshot.

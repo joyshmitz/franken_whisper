@@ -8,7 +8,7 @@ This packet documents current residual risk after U1 closure and packet reconcil
   `frankensqlite`.
 - Active status inputs:
   - `bd-1a1`: closed
-  - `bd-244`: in progress
+  - `bd-244`: closed
   - `bd-217`: closed
 
 ## Risk Register
@@ -28,19 +28,7 @@ This packet documents current residual risk after U1 closure and packet reconcil
 - Exit criteria:
   - placeholder stage notes removed and replacement tests pass (happy/error/cancel paths).
 
-### RR-02: SSI runtime containment remains open
-
-- Severity: medium-high
-- Evidence:
-  - `bd-244` remains `in_progress` for CI-scale runtime containment and gate closure.
-- Impact:
-  - practical CI runtime envelope and correctness closure are not yet finalized.
-- Mitigation:
-  - finish runtime validation + guardrails and rerun mandatory gates via `rch`.
-- Exit criteria:
-  - both `ci_scale` and `single_writer_smoke` outcomes documented with practical runtime evidence.
-
-### RR-03: Cross-repo local-only artifact dependence can regress reproducibility
+### RR-02: Cross-repo local-only artifact dependence can regress reproducibility
 
 - Severity: medium
 - Evidence:
@@ -55,12 +43,12 @@ This packet documents current residual risk after U1 closure and packet reconcil
 
 ## Remaining Work Boundary
 
-- Completed: `bd-1a1` checksum lane closure and `bd-217` tracker/doc synchronization.
+- Completed: `bd-1a1` checksum lane closure, `bd-244` SSI runtime containment + gate closure, and `bd-217` tracker/doc synchronization.
 - Blocked: none in the current repo-level bead snapshot.
-- Active: `bd-244` runtime containment + mandatory-gate completion.
+- Active: none in the current repo-level bead snapshot.
 
 ## Next Steps (Concrete)
 
-1. Complete `bd-244` and publish runtime + gate evidence.
-2. Document/automate corpus bootstrap for worker/offload reproducibility.
-3. Re-run `bv --robot-triage` for next strictly remaining work.
+1. Document/automate corpus bootstrap for worker/offload reproducibility.
+2. Re-run `bv --robot-triage` for next strictly remaining work.
+3. Open only new beads backed by current evidence rather than stale packet notes.
