@@ -1598,10 +1598,7 @@ mod tests {
             vec![seg("hello", Some(0.9))],
             100,
         );
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!("expected error for unregistered window_id"),
-        };
+        let err = result.expect_err("expected error for unregistered window_id");
         let msg = err.to_string();
         assert!(
             msg.contains("no partial registered"),
@@ -1658,10 +1655,7 @@ mod tests {
 
         let second =
             tracker.submit_quality_result(11, "quality", vec![seg("hello", Some(0.9))], 70);
-        let err = match second {
-            Err(e) => e,
-            Ok(_) => panic!("window 11 should be resolved and no longer accepted"),
-        };
+        let err = second.expect_err("window 11 should be resolved and no longer accepted");
         assert!(
             err.to_string()
                 .contains("no partial registered for window_id 11"),
