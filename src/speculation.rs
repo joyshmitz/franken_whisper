@@ -658,6 +658,7 @@ pub struct CorrectionStats {
 }
 
 /// The decision produced after comparing a fast partial against quality output.
+#[derive(Debug)]
 pub enum CorrectionDecision {
     /// The quality model agreed with the fast partial.
     Confirm { seq: u64, drift: CorrectionDrift },

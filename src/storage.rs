@@ -1420,7 +1420,7 @@ mod tests {
         RunReport, TranscribeRequest, TranscriptionResult, TranscriptionSegment,
     };
 
-    use super::RunStore;
+    use super::{RunStore, value_to_string};
 
     #[test]
     fn persists_and_lists_runs() {

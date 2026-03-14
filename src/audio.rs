@@ -267,15 +267,7 @@ fn state_root_for_tools(work_dir: Option<&Path>) -> PathBuf {
         return PathBuf::from(state_root);
     }
 
-    if let Some(dir) = work_dir
-        && let Some(tmp_dir) = dir.parent()
-        && tmp_dir
-            .file_name()
-            .is_some_and(|name| name == std::ffi::OsStr::new("tmp"))
-        && let Some(state_root) = tmp_dir.parent()
-    {
-        return state_root.to_path_buf();
-    }
+    let _ = work_dir;
 
     if let Ok(xdg_state_home) = std::env::var("XDG_STATE_HOME") {
         return PathBuf::from(xdg_state_home).join("franken_whisper");
@@ -1849,20 +1841,22 @@ mod tests {
     }
 
     #[test]
-    fn state_root_for_tools_tmp_heuristic_uses_parent() {
+    fn state_root_for_tools_ignores_tmp_work_dir_without_env_override() {
         use super::state_root_for_tools;
-        // When work_dir ends in .../tmp/child, state_root should be the
-        // grandparent of the tmp segment.  We create a real temp tree to
-        // satisfy `file_name()` checks without touching env vars.
+        if std::env::var_os("FRANKEN_WHISPER_STATE_DIR").is_some() {
+            return;
+        }
+
         let base = tempfile::tempdir().expect("tempdir");
         let tmp_child = base.path().join("tmp").join("work");
         std::fs::create_dir_all(&tmp_child).expect("mkdir");
 
-        // Only meaningful when the env var is NOT set.  If it is set in
-        // the environment the env path wins — but either way, no panic.
         let result = state_root_for_tools(Some(&tmp_child));
-        // If env var is set externally, we just verify no panic.
-        let _ = result;
+        assert_ne!(
+            result,
+            base.path(),
+            "tmp work dirs should not force tool state into repo-adjacent state roots"
+        );
     }
 
     #[test]
