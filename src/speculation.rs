@@ -575,35 +575,39 @@ impl WindowManager {
             }
         }
 
-        // Sort by start_sec (None sorts before Some).
-        all_segments.sort_by(|a, b| {
-            a.start_sec
-                .unwrap_or(0.0)
-                .partial_cmp(&b.start_sec.unwrap_or(0.0))
-                .unwrap_or(std::cmp::Ordering::Equal)
+        // Sort by known start time; timestamp-less segments retain relative order
+        // after all timestamped segments rather than being coerced to t=0.
+        all_segments.sort_by(|a, b| match (a.start_sec, b.start_sec) {
+            (Some(left), Some(right)) => left
+                .partial_cmp(&right)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
         });
 
         // Deduplicate overlapping segments (within 0.1 sec tolerance).
         let mut deduped: Vec<TranscriptionSegment> = Vec::new();
         for seg in all_segments {
             let dominated = if let Some(last) = deduped.last() {
-                let last_start = last.start_sec.unwrap_or(0.0);
-                let seg_start = seg.start_sec.unwrap_or(0.0);
-                let last_end = last.end_sec.unwrap_or(0.0);
-                let seg_end = seg.end_sec.unwrap_or(0.0);
-                (seg_start - last_start).abs() < 0.1 && (seg_end - last_end).abs() < 0.1
+                match (last.start_sec, seg.start_sec, last.end_sec, seg.end_sec) {
+                    (Some(last_start), Some(seg_start), Some(last_end), Some(seg_end)) => {
+                        (seg_start - last_start).abs() < 0.1 && (seg_end - last_end).abs() < 0.1
+                    }
+                    _ => false,
+                }
             } else {
                 false
             };
 
             if dominated {
                 // Keep the one with higher confidence.
-                let last = deduped.last().expect("checked above");
-                let last_conf = last.confidence.unwrap_or(0.0);
                 let seg_conf = seg.confidence.unwrap_or(0.0);
-                if seg_conf > last_conf {
-                    let len = deduped.len();
-                    deduped[len - 1] = seg;
+                if let Some(last) = deduped.last_mut() {
+                    let last_conf = last.confidence.unwrap_or(0.0);
+                    if seg_conf > last_conf {
+                        *last = seg;
+                    }
                 }
             } else {
                 deduped.push(seg);
@@ -3475,9 +3479,9 @@ mod tests {
     }
 
     #[test]
-    fn merge_segments_deduplicates_none_timestamp_segments_by_confidence() {
-        // Two windows produce segments with None start/end. unwrap_or(0.0) makes
-        // them identical, so dedup keeps the higher-confidence one.
+    fn merge_segments_preserves_none_timestamp_segments() {
+        // Segments without timing information should not be coerced to t=0 and
+        // deduplicated away; they represent unknown timing, not identical timing.
         let mut wm = WindowManager::new("run-none-ts", 5000, 0);
 
         let w0 = wm.next_window(0, "h0");
@@ -3489,10 +3493,13 @@ mod tests {
         wm.resolve_window(w1.window_id);
 
         let merged = wm.merge_segments();
-        // Both have start=None→0.0, end=None→0.0 → within 0.1s → dedup.
-        assert_eq!(merged.len(), 1, "None-timestamp segments should dedup to 1");
-        assert_eq!(merged[0].text, "high", "higher confidence should win");
-        assert!((merged[0].confidence.unwrap() - 0.9).abs() < f64::EPSILON);
+        assert_eq!(
+            merged.len(),
+            2,
+            "None-timestamp segments should both survive merge"
+        );
+        assert_eq!(merged[0].text, "low");
+        assert_eq!(merged[1].text, "high");
     }
 
     #[test]

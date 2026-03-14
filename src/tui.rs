@@ -175,14 +175,22 @@ mod enabled {
             }
 
             let selected_id = self.runs[self.selected_run].run_id.clone();
-            self.details = store.load_run_details(&selected_id).unwrap_or(None);
-
-            self.status_line = format!(
-                "Loaded {} runs from {} @ {}",
-                self.runs.len(),
-                self.db_path.display(),
-                Utc::now().format("%H:%M:%S")
-            );
+            match store.load_run_details(&selected_id) {
+                Ok(details) => {
+                    self.details = details;
+                    self.status_line = format!(
+                        "Loaded {} runs from {} @ {}",
+                        self.runs.len(),
+                        self.db_path.display(),
+                        Utc::now().format("%H:%M:%S")
+                    );
+                }
+                Err(error) => {
+                    self.details = None;
+                    self.status_line =
+                        format!("failed to load selected run details for {selected_id}: {error}");
+                }
+            }
         }
 
         fn timeline_lines(&self) -> Vec<String> {
@@ -1574,6 +1582,7 @@ mod enabled {
     mod tests {
         use std::path::PathBuf;
 
+        use fsqlite_types::value::SqliteValue;
         use serde_json::json;
         use tempfile::tempdir;
 
@@ -2729,6 +2738,37 @@ mod enabled {
             assert!(
                 app.status_line.contains(&db_path.display().to_string()),
                 "should contain db path: {}",
+                app.status_line
+            );
+        }
+
+        #[test]
+        fn reload_data_reports_corrupt_selected_run_details() {
+            let dir = tempdir().expect("tempdir");
+            let db_path = dir.path().join("status_corrupt.sqlite3");
+            seed_runs(&db_path, 2, 1);
+
+            let store = RunStore::open(&db_path).expect("store");
+            store
+                .connection
+                .execute_with_params(
+                    "UPDATE runs SET warnings_json = ?1 WHERE id = ?2",
+                    &[
+                        SqliteValue::Text("{bad json".to_owned()),
+                        SqliteValue::Text("run-001".to_owned()),
+                    ],
+                )
+                .expect("corrupt selected run");
+
+            let app = WhisperTuiApp::new(db_path);
+            assert!(
+                app.details.is_none(),
+                "corrupt selected run should not load"
+            );
+            assert!(
+                app.status_line
+                    .contains("failed to load selected run details for run-001"),
+                "status line should surface selected-run load failure: {}",
                 app.status_line
             );
         }
