@@ -1541,6 +1541,25 @@ fn bridge_error_recoverable(error: &FwError) -> bool {
     )
 }
 
+fn record_backend_execution_outcome(
+    kind: BackendKind,
+    started: Instant,
+    result: FwResult<BackendExecution>,
+) -> FwResult<BackendExecution> {
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(execution) => {
+            update_router_state(kind, true, latency_ms, None);
+            Ok(execution)
+        }
+        Err(error) => {
+            let error_message = error.to_string();
+            update_router_state(kind, false, latency_ms, Some(error_message));
+            Err(error)
+        }
+    }
+}
+
 fn run_backend(
     kind: BackendKind,
     request: &TranscribeRequest,
@@ -1551,86 +1570,130 @@ fn run_backend(
 ) -> FwResult<BackendExecution> {
     let rollout_stage = native_rollout_stage();
     let execution_mode = native_execution_mode(rollout_stage);
+    let bridge_native_recovery = bridge_native_recovery_enabled();
+    let bridge_is_available = bridge_available(kind);
+    let native_is_available = native_available(kind);
 
-    type RunnerFn = fn(
-        &TranscribeRequest,
-        &Path,
-        &Path,
-        Duration,
-        Option<&crate::orchestrator::CancellationToken>,
-    ) -> FwResult<TranscriptionResult>;
-
-    let (bridge_runner, native_runner): (RunnerFn, RunnerFn) = match kind {
+    match kind {
         BackendKind::Auto => {
             return Err(FwError::InvalidRequest(
                 "internal error: auto backend cannot be run directly".to_owned(),
             ));
         }
-        BackendKind::WhisperCpp => (whisper_cpp::run, whisper_cpp_native::run),
-        BackendKind::InsanelyFast => (insanely_fast::run, insanely_fast_native::run),
-        BackendKind::WhisperDiarization => {
-            (whisper_diarization::run, whisper_diarization_native::run)
-        }
-    };
+        BackendKind::WhisperCpp => run_backend_with_mode_and_runners(
+            kind,
+            request,
+            normalized_wav,
+            work_dir,
+            command_timeout,
+            token,
+            execution_mode,
+            rollout_stage,
+            bridge_native_recovery,
+            bridge_is_available,
+            native_is_available,
+            whisper_cpp::run,
+            whisper_cpp_native::run,
+        ),
+        BackendKind::InsanelyFast => run_backend_with_mode_and_runners(
+            kind,
+            request,
+            normalized_wav,
+            work_dir,
+            command_timeout,
+            token,
+            execution_mode,
+            rollout_stage,
+            bridge_native_recovery,
+            bridge_is_available,
+            native_is_available,
+            insanely_fast::run,
+            insanely_fast_native::run,
+        ),
+        BackendKind::WhisperDiarization => run_backend_with_mode_and_runners(
+            kind,
+            request,
+            normalized_wav,
+            work_dir,
+            command_timeout,
+            token,
+            execution_mode,
+            rollout_stage,
+            bridge_native_recovery,
+            bridge_is_available,
+            native_is_available,
+            whisper_diarization::run,
+            whisper_diarization_native::run,
+        ),
+    }
+}
 
+fn run_backend_with_mode_and_runners<BridgeRunner, NativeRunner>(
+    kind: BackendKind,
+    request: &TranscribeRequest,
+    normalized_wav: &Path,
+    work_dir: &Path,
+    command_timeout: Duration,
+    token: Option<&crate::orchestrator::CancellationToken>,
+    execution_mode: NativeExecutionMode,
+    rollout_stage: NativeEngineRolloutStage,
+    bridge_native_recovery: bool,
+    bridge_is_available: bool,
+    native_is_available: bool,
+    bridge_runner: BridgeRunner,
+    native_runner: NativeRunner,
+) -> FwResult<BackendExecution>
+where
+    BridgeRunner: Fn(
+        &TranscribeRequest,
+        &Path,
+        &Path,
+        Duration,
+        Option<&crate::orchestrator::CancellationToken>,
+    ) -> FwResult<TranscriptionResult>,
+    NativeRunner: Fn(
+        &TranscribeRequest,
+        &Path,
+        &Path,
+        Duration,
+        Option<&crate::orchestrator::CancellationToken>,
+    ) -> FwResult<TranscriptionResult>,
+{
+    let started = Instant::now();
     let run_bridge = || -> FwResult<BackendExecution> {
-        let started = Instant::now();
         match bridge_runner(request, normalized_wav, work_dir, command_timeout, token) {
-            Ok(result) => {
-                let latency_ms = started.elapsed().as_millis() as u64;
-                update_router_state(kind, true, latency_ms, None);
-                Ok(BackendExecution {
-                    result,
-                    runtime: runtime_metadata_with_implementation(
-                        kind,
-                        BackendImplementation::Bridge,
-                    ),
-                    implementation: BackendImplementation::Bridge,
-                    execution_mode: execution_mode.as_str().to_owned(),
-                    rollout_stage: rollout_stage.as_str().to_owned(),
-                    native_fallback_error: None,
-                })
-            }
-            Err(error) => {
-                let latency_ms = started.elapsed().as_millis() as u64;
-                update_router_state(kind, false, latency_ms, Some(error.to_string()));
-                Err(error)
-            }
+            Ok(result) => Ok(BackendExecution {
+                result,
+                runtime: runtime_metadata_with_implementation(kind, BackendImplementation::Bridge),
+                implementation: BackendImplementation::Bridge,
+                execution_mode: execution_mode.as_str().to_owned(),
+                rollout_stage: rollout_stage.as_str().to_owned(),
+                native_fallback_error: None,
+            }),
+            Err(error) => Err(error),
         }
     };
 
     let run_native = || -> FwResult<BackendExecution> {
-        let started = Instant::now();
         match native_runner(request, normalized_wav, work_dir, command_timeout, token) {
-            Ok(result) => {
-                let latency_ms = started.elapsed().as_millis() as u64;
-                update_router_state(kind, true, latency_ms, None);
-                Ok(BackendExecution {
-                    result,
-                    runtime: runtime_metadata_with_implementation(
-                        kind,
-                        BackendImplementation::Native,
-                    ),
-                    implementation: BackendImplementation::Native,
-                    execution_mode: execution_mode.as_str().to_owned(),
-                    rollout_stage: rollout_stage.as_str().to_owned(),
-                    native_fallback_error: None,
-                })
-            }
-            Err(error) => {
-                let latency_ms = started.elapsed().as_millis() as u64;
-                update_router_state(kind, false, latency_ms, Some(error.to_string()));
-                Err(error)
-            }
+            Ok(result) => Ok(BackendExecution {
+                result,
+                runtime: runtime_metadata_with_implementation(kind, BackendImplementation::Native),
+                implementation: BackendImplementation::Native,
+                execution_mode: execution_mode.as_str().to_owned(),
+                rollout_stage: rollout_stage.as_str().to_owned(),
+                native_fallback_error: None,
+            }),
+            Err(error) => Err(error),
         }
     };
 
-    match execution_mode {
+    let result = match execution_mode {
         NativeExecutionMode::BridgeOnly => match run_bridge() {
             Ok(result) => Ok(result),
             Err(bridge_error)
-                if bridge_native_recovery_enabled()
-                    && native_available(kind)
+                if bridge_native_recovery
+                    && native_is_available
                     && bridge_error_recoverable(&bridge_error) =>
             {
                 let bridge_error_msg = bridge_error.to_string();
@@ -1655,49 +1718,54 @@ fn run_backend(
             Err(error) => Err(error),
         },
         NativeExecutionMode::NativeOnly => {
-            if !native_available(kind) {
-                return Err(FwError::BackendUnavailable(format!(
+            if !native_is_available {
+                Err(FwError::BackendUnavailable(format!(
                     "native engine unavailable for `{}` (set `{NATIVE_EXECUTION_ENV_VAR}=1` with rollout stage `primary|sole` only when native runtime is present)",
                     kind.as_str()
-                )));
+                )))
+            } else {
+                run_native()
             }
-            run_native()
         }
         NativeExecutionMode::NativePreferred => {
-            if !native_available(kind) {
-                return run_bridge();
-            }
-            match run_native() {
-                Ok(result) => Ok(result),
-                Err(native_error) => {
-                    let native_error_msg = native_error.to_string();
-                    if !bridge_available(kind) {
-                        return Err(FwError::BackendUnavailable(format!(
-                            "native `{}` failed and bridge unavailable: {}",
-                            kind.as_str(),
-                            native_error_msg
-                        )));
+            if !native_is_available {
+                run_bridge()
+            } else {
+                match run_native() {
+                    Ok(result) => Ok(result),
+                    Err(native_error) => {
+                        let native_error_msg = native_error.to_string();
+                        if !bridge_is_available {
+                            Err(FwError::BackendUnavailable(format!(
+                                "native `{}` failed and bridge unavailable: {}",
+                                kind.as_str(),
+                                native_error_msg
+                            )))
+                        } else {
+                            tracing::warn!(
+                                backend = kind.as_str(),
+                                rollout_stage = rollout_stage.as_str(),
+                                native_error = %native_error_msg,
+                                "native backend failed; falling back to bridge adapter"
+                            );
+                            let mut bridge_execution = run_bridge().map_err(|bridge_error| {
+                                FwError::BackendUnavailable(format!(
+                                    "native `{}` failed: {}; bridge fallback failed: {}",
+                                    kind.as_str(),
+                                    native_error_msg,
+                                    bridge_error
+                                ))
+                            })?;
+                            bridge_execution.native_fallback_error = Some(native_error_msg);
+                            Ok(bridge_execution)
+                        }
                     }
-                    tracing::warn!(
-                        backend = kind.as_str(),
-                        rollout_stage = rollout_stage.as_str(),
-                        native_error = %native_error_msg,
-                        "native backend failed; falling back to bridge adapter"
-                    );
-                    let mut bridge_execution = run_bridge().map_err(|bridge_error| {
-                        FwError::BackendUnavailable(format!(
-                            "native `{}` failed: {}; bridge fallback failed: {}",
-                            kind.as_str(),
-                            native_error_msg,
-                            bridge_error
-                        ))
-                    })?;
-                    bridge_execution.native_fallback_error = Some(native_error_msg);
-                    Ok(bridge_execution)
                 }
             }
         }
-    }
+    };
+
+    record_backend_execution_outcome(kind, started, result)
 }
 
 fn probe_command_version(program: &str) -> Option<String> {
@@ -1802,6 +1870,21 @@ fn routing_mode(adaptive_mode_active: bool, rollout_forced_static: bool) -> &'st
         "adaptive"
     } else {
         "static"
+    }
+}
+
+fn effective_fallback_reason(
+    router_state_reason: Option<String>,
+    rollout_forced_static: bool,
+    rollout_stage: NativeEngineRolloutStage,
+) -> Option<String> {
+    if rollout_forced_static {
+        Some(format!(
+            "native_rollout_forced_static_order({})",
+            rollout_stage.as_str()
+        ))
+    } else {
+        router_state_reason
     }
 }
 
@@ -2305,7 +2388,13 @@ pub fn evaluate_backend_selection(
 
     // bd-efr.2: Include Brier score from calibration state.
     let brier_score = rs_snapshot.as_ref().and_then(|rs| rs.brier_score());
-    let fallback_reason = rs_snapshot.as_ref().and_then(|rs| rs.fallback_reason());
+    let router_state_fallback_reason = rs_snapshot.as_ref().and_then(|rs| rs.fallback_reason());
+    let fallback_active = outcome.fallback_active || rollout_forced_static;
+    let fallback_reason = effective_fallback_reason(
+        router_state_fallback_reason,
+        rollout_forced_static,
+        rollout_stage,
+    );
 
     let mode = routing_mode(contract.adaptive_mode_active, rollout_forced_static);
 
@@ -2321,7 +2410,7 @@ pub fn evaluate_backend_selection(
         "observed_state": contract.state_space()[observed_state],
         "action_set": contract.action_set(),
         "chosen_action": outcome.action_name,
-        "fallback_active": outcome.fallback_active,
+        "fallback_active": fallback_active,
         "fallback_reason": fallback_reason,
         "expected_losses": outcome.expected_losses,
         "posterior_snapshot": outcome.audit_entry.posterior_snapshot,
@@ -2363,7 +2452,7 @@ pub fn evaluate_backend_selection(
             evidence_type = "routing_decision",
             mode = mode,
             chosen_action = outcome.action_name.as_str(),
-            fallback_active = outcome.fallback_active,
+            fallback_active = fallback_active,
             calibration_score = calibration_score,
             brier_score = brier_score.unwrap_or(-1.0),
             routing_log = log_str.as_str(),
@@ -2382,8 +2471,8 @@ pub fn evaluate_backend_selection(
             .iter()
             .map(|k| k.as_str().to_owned())
             .collect(),
-        fallback_active: outcome.fallback_active || rollout_forced_static,
-        fallback_reason: rs_snapshot.as_ref().and_then(|rs| rs.fallback_reason()),
+        fallback_active,
+        fallback_reason: fallback_reason.clone(),
         posterior_snapshot: outcome.audit_entry.posterior_snapshot.clone(),
         calibration_score,
         brier_score,
@@ -2410,7 +2499,7 @@ pub fn evaluate_backend_selection(
         routing_log,
         recommended_order,
         evidence_entries,
-        fallback_triggered: outcome.fallback_active || rollout_forced_static,
+        fallback_triggered: fallback_active,
         calibration_score,
         e_process,
         ci_width,
@@ -3773,6 +3862,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
+
+    static ROUTER_STATE_TEST_MUTEX: StdMutex<()> = StdMutex::new(());
 
     fn test_request(diarize: bool) -> TranscribeRequest {
         TranscribeRequest {
@@ -8951,6 +9042,33 @@ mod tests {
     }
 
     #[test]
+    fn effective_fallback_reason_prefers_rollout_forced_static_reason() {
+        use crate::conformance::NativeEngineRolloutStage;
+
+        let reason = super::effective_fallback_reason(
+            Some("insufficient_data".to_owned()),
+            true,
+            NativeEngineRolloutStage::Validated,
+        );
+        assert_eq!(
+            reason.as_deref(),
+            Some("native_rollout_forced_static_order(validated)")
+        );
+    }
+
+    #[test]
+    fn effective_fallback_reason_preserves_router_reason_when_not_forced_static() {
+        use crate::conformance::NativeEngineRolloutStage;
+
+        let reason = super::effective_fallback_reason(
+            Some("insufficient_data".to_owned()),
+            false,
+            NativeEngineRolloutStage::Primary,
+        );
+        assert_eq!(reason.as_deref(), Some("insufficient_data"));
+    }
+
+    #[test]
     fn routing_evidence_ledger_empty_diagnostics_zero_division_safe() {
         let ledger = RoutingEvidenceLedger::new(10);
         let diag = ledger.diagnostics();
@@ -9661,6 +9779,130 @@ mod tests {
                 bridge_native_recovery_from_raw(Some(value)),
                 "value `{value}` should enable recovery"
             );
+        }
+    }
+
+    #[test]
+    fn recovered_bridge_only_execution_records_single_success_outcome() {
+        let _guard = ROUTER_STATE_TEST_MUTEX
+            .lock()
+            .expect("router state test lock");
+        if let Ok(mut guard) = super::ROUTER_STATE.lock() {
+            *guard = None;
+        }
+
+        let request = test_request(false);
+        let work_dir = tempfile::tempdir().expect("tempdir");
+        let result = super::run_backend_with_mode_and_runners(
+            BackendKind::WhisperCpp,
+            &request,
+            Path::new("dummy.wav"),
+            work_dir.path(),
+            Duration::from_secs(1),
+            None,
+            super::NativeExecutionMode::BridgeOnly,
+            NativeEngineRolloutStage::Fallback,
+            true,
+            true,
+            true,
+            |_, _, _, _, _| {
+                Err(crate::error::FwError::CommandMissing {
+                    command: "whisper-cli".to_owned(),
+                })
+            },
+            |_, _, _, _, _| {
+                Ok(make_transcription_result(
+                    BackendKind::WhisperCpp,
+                    Vec::new(),
+                ))
+            },
+        )
+        .expect("native recovery should succeed");
+
+        assert_eq!(result.implementation, BackendImplementation::Native);
+        assert_eq!(result.execution_mode, "bridge_only_native_recovery");
+        assert_eq!(
+            result.native_fallback_error.as_deref(),
+            Some("missing command `whisper-cli` on PATH")
+        );
+
+        let state = super::router_state_snapshot().expect("router state should exist");
+        let metrics = state.metrics_for(BackendKind::WhisperCpp);
+        assert_eq!(metrics.sample_count, 1, "should record one final outcome");
+        assert_eq!(metrics.success_count, 1, "final recovered run succeeded");
+        assert!(
+            (metrics.success_rate - 1.0).abs() < 1e-9,
+            "recovered run should count as success"
+        );
+        assert!(
+            metrics.last_error.is_none(),
+            "recovered run should not leave a failure in last_error"
+        );
+
+        if let Ok(mut guard) = super::ROUTER_STATE.lock() {
+            *guard = None;
+        }
+    }
+
+    #[test]
+    fn native_preferred_bridge_fallback_records_single_success_outcome() {
+        let _guard = ROUTER_STATE_TEST_MUTEX
+            .lock()
+            .expect("router state test lock");
+        if let Ok(mut guard) = super::ROUTER_STATE.lock() {
+            *guard = None;
+        }
+
+        let request = test_request(false);
+        let work_dir = tempfile::tempdir().expect("tempdir");
+        let result = super::run_backend_with_mode_and_runners(
+            BackendKind::WhisperCpp,
+            &request,
+            Path::new("dummy.wav"),
+            work_dir.path(),
+            Duration::from_secs(1),
+            None,
+            super::NativeExecutionMode::NativePreferred,
+            NativeEngineRolloutStage::Primary,
+            true,
+            true,
+            true,
+            |_, _, _, _, _| {
+                Ok(make_transcription_result(
+                    BackendKind::WhisperCpp,
+                    Vec::new(),
+                ))
+            },
+            |_, _, _, _, _| {
+                Err(crate::error::FwError::BackendUnavailable(
+                    "native runtime unavailable".to_owned(),
+                ))
+            },
+        )
+        .expect("bridge fallback should succeed");
+
+        assert_eq!(result.implementation, BackendImplementation::Bridge);
+        assert_eq!(result.execution_mode, "native_preferred");
+        assert_eq!(
+            result.native_fallback_error.as_deref(),
+            Some("backend unavailable: native runtime unavailable")
+        );
+
+        let state = super::router_state_snapshot().expect("router state should exist");
+        let metrics = state.metrics_for(BackendKind::WhisperCpp);
+        assert_eq!(metrics.sample_count, 1, "should record one final outcome");
+        assert_eq!(metrics.success_count, 1, "bridge fallback still succeeded");
+        assert!(
+            (metrics.success_rate - 1.0).abs() < 1e-9,
+            "fallback success should count as success"
+        );
+        assert!(
+            metrics.last_error.is_none(),
+            "fallback success should not poison last_error"
+        );
+
+        if let Ok(mut guard) = super::ROUTER_STATE.lock() {
+            *guard = None;
         }
     }
 }
