@@ -468,7 +468,7 @@ fn export_incremental_inner(
         },
         checksums,
         cursor_used: cursor_used.clone(),
-        cursor_after,
+        cursor_after: cursor_after.clone(),
     };
 
     let manifest_path = output_dir.join("manifest.json");
