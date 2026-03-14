@@ -455,9 +455,6 @@ fn export_incremental_inner(
         last_run_count: runs_count,
     };
 
-    // Persist the updated cursor.
-    save_cursor(&cursor_path, &cursor_after)?;
-
     let manifest = IncrementalExportManifest {
         schema_version: SCHEMA_VERSION.to_owned(),
         export_format_version: EXPORT_FORMAT_VERSION.to_owned(),
@@ -477,6 +474,11 @@ fn export_incremental_inner(
     let manifest_path = output_dir.join("manifest.json");
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     atomic_write_bytes(&manifest_path, manifest_json.as_bytes())?;
+
+    // Advance the incremental cursor only after the export snapshot is fully
+    // published. If manifest publication fails, retaining the old cursor is
+    // safer than skipping runs that were never durably exported.
+    save_cursor(&cursor_path, &cursor_after)?;
 
     Ok(manifest)
 }
@@ -7377,6 +7379,34 @@ mod tests {
         assert!(manifest.cursor_used.is_none());
         // Cursor file should exist after export.
         assert!(state_root.join(CURSOR_FILENAME).exists());
+    }
+
+    #[test]
+    fn incremental_export_does_not_advance_cursor_when_manifest_publish_fails() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("incr_manifest_fail.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("store open");
+        let mut report = fixture_report("incr-manifest-fail", &db_path);
+        report.finished_at_rfc3339 = "2026-07-01T12:00:05Z".to_owned();
+        store.persist_report(&report).expect("persist");
+
+        fs::create_dir_all(&export_dir).expect("create export dir");
+        fs::create_dir(export_dir.join("manifest.json")).expect("block manifest path with dir");
+
+        let error =
+            export_incremental(&db_path, &export_dir, &state_root).expect_err("export should fail");
+        assert!(
+            error.to_string().contains("Is a directory")
+                || error.to_string().contains("is a directory"),
+            "expected manifest publication failure, got: {error}"
+        );
+        assert!(
+            !state_root.join(CURSOR_FILENAME).exists(),
+            "cursor must not advance when manifest publication fails"
+        );
     }
 
     #[test]
