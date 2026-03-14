@@ -1111,6 +1111,7 @@ fn checkpoint_or_emit(
             }
 
             let code = stage_failure_code(stage, &error);
+            log.clear_stage_start();
             log.push(
                 stage,
                 &code,
@@ -3626,6 +3627,10 @@ impl EventLog {
         self.stage_start = Some(std::time::Instant::now());
     }
 
+    fn clear_stage_start(&mut self) {
+        self.stage_start = None;
+    }
+
     /// Elapsed milliseconds since the last `mark_stage_start()`, if any.
     fn stage_elapsed_ms(&self) -> Option<u64> {
         self.stage_start
@@ -5292,6 +5297,28 @@ mod tests {
         assert!(
             log.events[0].payload["evidence_count"].is_number(),
             "should include evidence_count"
+        );
+    }
+
+    #[test]
+    fn checkpoint_or_emit_does_not_reuse_previous_stage_elapsed_ms() {
+        let mut pcx = PipelineCx::new(Some(0));
+        std::thread::sleep(Duration::from_millis(5));
+        let mut log = EventLog::new(
+            "run-fail-elapsed".to_owned(),
+            "00000000000000000000000000000000".to_owned(),
+            None,
+        );
+        log.mark_stage_start();
+        std::thread::sleep(Duration::from_millis(5));
+
+        let result = checkpoint_or_emit("backend", &mut pcx, &mut log);
+        assert!(result.is_err());
+
+        let payload = &log.events[0].payload;
+        assert!(
+            payload.get("elapsed_ms").is_none(),
+            "stage-boundary checkpoint failure should not inherit previous stage elapsed"
         );
     }
 
