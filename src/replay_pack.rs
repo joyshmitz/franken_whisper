@@ -100,20 +100,27 @@ pub fn build_repro_lock(report: &RunReport) -> ReproLock {
     }
 }
 
-fn rollout_stage_from_report(report: &RunReport) -> String {
+fn latest_event_payload_value<'a>(
+    report: &'a RunReport,
+    code: &str,
+    key: &str,
+) -> Option<&'a Value> {
     report
         .events
         .iter()
-        .rev()
-        .find(|event| event.code == "backend.ok")
-        .and_then(|event| event.payload.get("native_rollout_stage"))
+        .filter(|event| event.code == code)
+        .max_by_key(|event| event.seq)
+        .and_then(|event| event.payload.get(key))
+}
+
+fn rollout_stage_from_report(report: &RunReport) -> String {
+    latest_event_payload_value(report, "backend.ok", "native_rollout_stage")
         .or_else(|| {
-            report
-                .events
-                .iter()
-                .rev()
-                .find(|event| event.code == "backend.routing.decision_contract")
-                .and_then(|event| event.payload.get("native_rollout_stage"))
+            latest_event_payload_value(
+                report,
+                "backend.routing.decision_contract",
+                "native_rollout_stage",
+            )
         })
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
@@ -811,6 +818,38 @@ mod tests {
 
         let tolerance = build_tolerance_manifest(&report);
         assert_eq!(tolerance.native_rollout_stage, "primary");
+    }
+
+    #[test]
+    fn tolerance_manifest_uses_highest_seq_backend_ok_when_events_out_of_order() {
+        use crate::model::RunEvent;
+
+        let mut report = fixture_report();
+        report.events.extend([
+            RunEvent {
+                seq: 9,
+                ts_rfc3339: "2026-01-01T00:00:09Z".to_owned(),
+                stage: "backend".to_owned(),
+                code: "backend.ok".to_owned(),
+                message: "older inserted later".to_owned(),
+                payload: json!({"native_rollout_stage": "validated"}),
+            },
+            RunEvent {
+                seq: 3,
+                ts_rfc3339: "2026-01-01T00:00:03Z".to_owned(),
+                stage: "backend".to_owned(),
+                code: "backend.ok".to_owned(),
+                message: "newer inserted earlier in vec order".to_owned(),
+                payload: json!({"native_rollout_stage": "shadow"}),
+            },
+        ]);
+        report.events.swap(0, 1);
+
+        let tolerance = build_tolerance_manifest(&report);
+        assert_eq!(
+            tolerance.native_rollout_stage, "validated",
+            "latest backend.ok by seq should win even when vec order is scrambled"
+        );
     }
 
     #[test]

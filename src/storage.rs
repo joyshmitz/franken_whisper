@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fsqlite::Connection;
@@ -34,6 +35,7 @@ struct RunsMigrationSnapshotRow {
 
 const PERSIST_BUSY_RETRY_ATTEMPTS: usize = 8;
 const PERSIST_BUSY_BASE_BACKOFF_MS: u64 = 5;
+static PERSIST_SAVEPOINT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 impl std::fmt::Debug for RunStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,10 +119,10 @@ impl RunStore {
         token: Option<&crate::orchestrator::CancellationToken>,
     ) -> FwResult<()> {
         tracing::debug!(run_id = %report.run_id, stage = "persist", "Entering persist_report");
-        // Best-effort cleanup of any stuck transaction from a prior failed attempt.
-        let _ = self.connection.execute("ROLLBACK;");
+        let savepoint_name = next_persist_savepoint_name();
+        let begin_sql = format!("SAVEPOINT {savepoint_name};");
         self.connection
-            .execute("BEGIN;")
+            .execute(&begin_sql)
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
         let result = self.persist_report_inner(report, token);
@@ -130,16 +132,17 @@ impl RunStore {
                 if let Some(tok) = token
                     && let Err(err) = tok.checkpoint()
                 {
-                    let _ = self.connection.execute("ROLLBACK;");
+                    let _ = rollback_savepoint(&self.connection, &savepoint_name);
                     return Err(err);
                 }
+                let release_sql = format!("RELEASE SAVEPOINT {savepoint_name};");
                 self.connection
-                    .execute("COMMIT;")
+                    .execute(&release_sql)
                     .map_err(|error| FwError::Storage(error.to_string()))?;
                 Ok(())
             }
             Err(error) => {
-                let _ = self.connection.execute("ROLLBACK;");
+                let _ = rollback_savepoint(&self.connection, &savepoint_name);
                 Err(error)
             }
         }
@@ -1348,6 +1351,23 @@ fn parse_optional_acceleration_json(
     }
 
     parse_required_json_field("acceleration_json", run_id, raw_json).map(Some)
+}
+
+fn next_persist_savepoint_name() -> String {
+    let id = PERSIST_SAVEPOINT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("fw_persist_{id}")
+}
+
+fn rollback_savepoint(connection: &Connection, savepoint_name: &str) -> FwResult<()> {
+    let rollback_sql = format!("ROLLBACK TO SAVEPOINT {savepoint_name};");
+    connection
+        .execute(&rollback_sql)
+        .map_err(|error| FwError::Storage(error.to_string()))?;
+    let release_sql = format!("RELEASE SAVEPOINT {savepoint_name};");
+    connection
+        .execute(&release_sql)
+        .map_err(|error| FwError::Storage(error.to_string()))?;
+    Ok(())
 }
 
 fn reconstruct_column_definition(row: &fsqlite::Row) -> FwResult<String> {
@@ -5074,6 +5094,47 @@ mod tests {
             .query("SELECT value FROM _meta WHERE key = 'nested_inner';")
             .expect("query inner");
         assert!(inner.is_empty(), "inner session data should be rolled back");
+    }
+
+    #[test]
+    fn persist_report_inside_concurrent_session_preserves_outer_savepoint() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("session_persist_nested.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let session = store
+            .begin_concurrent_session("outerpersist")
+            .expect("begin session");
+        session
+            .execute_with_params(
+                "INSERT INTO _meta (key, value) VALUES (?1, ?2);",
+                &[
+                    SqliteValue::Text("outerpersist_key".to_owned()),
+                    SqliteValue::Text("outerpersist_value".to_owned()),
+                ],
+            )
+            .expect("insert via outer session");
+
+        store
+            .persist_report(&minimal_report("nested-persist", &db_path))
+            .expect("persist within active outer savepoint");
+
+        session
+            .commit()
+            .expect("outer savepoint should remain valid");
+
+        let meta_rows = store
+            .connection
+            .query("SELECT value FROM _meta WHERE key = 'outerpersist_key';")
+            .expect("query meta");
+        assert_eq!(meta_rows.len(), 1, "outer session data should survive");
+        assert_eq!(value_to_string(meta_rows[0].get(0)), "outerpersist_value");
+
+        let details = store
+            .load_run_details("nested-persist")
+            .expect("load")
+            .expect("persisted run should exist");
+        assert_eq!(details.run_id, "nested-persist");
     }
 
     #[test]
