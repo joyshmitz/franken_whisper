@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use fsqlite::Connection;
 use fsqlite_types::value::SqliteValue;
+use serde::de::DeserializeOwned;
 
 use crate::error::{FwError, FwResult};
 use crate::model::{
@@ -269,10 +270,11 @@ impl RunStore {
             FwError::Storage(format!("invalid result_json for run {run_id}: {error}"))
         })?;
 
-        let warnings = serde_json::from_str::<Vec<String>>(&warnings_json).unwrap_or_default();
-        let replay = serde_json::from_str::<ReplayEnvelope>(&replay_json).unwrap_or_default();
-        let acceleration_override =
-            serde_json::from_str::<crate::model::AccelerationReport>(&acceleration_json).ok();
+        let warnings =
+            parse_required_json_field::<Vec<String>>("warnings_json", &run_id, &warnings_json)?;
+        let replay =
+            parse_required_json_field::<ReplayEnvelope>("replay_json", &run_id, &replay_json)?;
+        let acceleration_override = parse_optional_acceleration_json(&run_id, &acceleration_json)?;
         let transcript = if result.transcript.trim().is_empty() {
             transcript_fallback
         } else {
@@ -1324,6 +1326,28 @@ fn value_to_string(value: Option<&SqliteValue>) -> String {
         Some(SqliteValue::Blob(blob)) => format!("<blob:{}>", blob.len()),
         Some(SqliteValue::Null) | None => String::new(),
     }
+}
+
+fn parse_required_json_field<T: DeserializeOwned>(
+    field_name: &str,
+    run_id: &str,
+    raw_json: &str,
+) -> FwResult<T> {
+    serde_json::from_str(raw_json).map_err(|error| {
+        FwError::Storage(format!("invalid {field_name} for run {run_id}: {error}"))
+    })
+}
+
+fn parse_optional_acceleration_json(
+    run_id: &str,
+    raw_json: &str,
+) -> FwResult<Option<crate::model::AccelerationReport>> {
+    let trimmed = raw_json.trim();
+    if trimmed.is_empty() || trimmed == "{}" || trimmed == "null" {
+        return Ok(None);
+    }
+
+    parse_required_json_field("acceleration_json", run_id, raw_json).map(Some)
 }
 
 fn reconstruct_column_definition(row: &fsqlite::Row) -> FwResult<String> {
@@ -2706,7 +2730,7 @@ mod tests {
     }
 
     #[test]
-    fn load_run_details_corrupt_warnings_json_silently_defaults_to_empty() {
+    fn load_run_details_corrupt_warnings_json_returns_storage_error() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("corrupt_warnings.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
@@ -2725,19 +2749,14 @@ mod tests {
         )
         .expect("corrupt");
 
-        // unwrap_or_default() silently returns empty vec — NOT an error.
-        let details = store
+        let error = store
             .load_run_details("run-bad-warns")
-            .expect("should NOT error despite corrupt warnings_json")
-            .expect("should exist");
-        assert!(
-            details.warnings.is_empty(),
-            "corrupt warnings_json should yield empty vec via unwrap_or_default"
-        );
+            .expect_err("corrupt warnings_json should fail loudly");
+        assert!(error.to_string().contains("invalid warnings_json"));
     }
 
     #[test]
-    fn load_run_details_corrupt_replay_json_silently_defaults() {
+    fn load_run_details_corrupt_replay_json_returns_storage_error() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("corrupt_replay.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
@@ -2755,15 +2774,10 @@ mod tests {
         )
         .expect("corrupt");
 
-        // unwrap_or_default() silently returns default ReplayEnvelope — NOT an error.
-        let details = store
+        let error = store
             .load_run_details("run-bad-replay")
-            .expect("should succeed despite corrupt replay_json")
-            .expect("should exist");
-        assert!(
-            details.replay.input_content_hash.is_none(),
-            "corrupt replay_json defaults to empty ReplayEnvelope"
-        );
+            .expect_err("corrupt replay_json should fail loudly");
+        assert!(error.to_string().contains("invalid replay_json"));
     }
 
     #[test]
@@ -5737,8 +5751,7 @@ mod tests {
     }
 
     #[test]
-    fn load_run_details_malformed_warnings_json_falls_back_to_empty() {
-        // Line 209: serde_json::from_str::<Vec<String>>(&warnings_json).unwrap_or_default()
+    fn load_run_details_malformed_warnings_json_returns_storage_error() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("bad_warnings.sqlite3");
         let store = RunStore::open(&db_path).expect("open");
@@ -5758,20 +5771,14 @@ mod tests {
             )
             .expect("corrupt warnings");
 
-        let details = store
+        let error = store
             .load_run_details("run-bad-warn")
-            .expect("load")
-            .expect("exists");
-        assert!(
-            details.warnings.is_empty(),
-            "malformed warnings_json should fall back to empty vec, got {:?}",
-            details.warnings
-        );
+            .expect_err("malformed warnings_json should fail loudly");
+        assert!(error.to_string().contains("invalid warnings_json"));
     }
 
     #[test]
-    fn load_run_details_malformed_replay_json_falls_back_to_default() {
-        // Line 210: serde_json::from_str::<ReplayEnvelope>(&replay_json).unwrap_or_default()
+    fn load_run_details_malformed_replay_json_returns_storage_error() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("bad_replay.sqlite3");
         let store = RunStore::open(&db_path).expect("open");
@@ -5791,19 +5798,10 @@ mod tests {
             )
             .expect("corrupt replay");
 
-        let details = store
+        let error = store
             .load_run_details("run-bad-replay")
-            .expect("load")
-            .expect("exists");
-        let default_replay = crate::model::ReplayEnvelope::default();
-        assert_eq!(
-            details.replay.input_content_hash, default_replay.input_content_hash,
-            "malformed replay_json should fall back to default"
-        );
-        assert_eq!(
-            details.replay.backend_identity, default_replay.backend_identity,
-            "malformed replay_json backend_identity should be default"
-        );
+            .expect_err("malformed replay_json should fail loudly");
+        assert!(error.to_string().contains("invalid replay_json"));
     }
 
     #[test]
@@ -6120,9 +6118,7 @@ mod tests {
     // ── Task #257 — storage edge-case tests ─────────────────────────
 
     #[test]
-    fn corrupt_acceleration_json_falls_back_to_result_acceleration() {
-        // When acceleration_json column is corrupt, `.ok()` returns None,
-        // and `.or(result.acceleration)` recovers from result_json.
+    fn corrupt_acceleration_json_returns_storage_error() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("corrupt_accel.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
@@ -6150,15 +6146,10 @@ mod tests {
             )
             .expect("corrupt");
 
-        let details = store
+        let error = store
             .load_run_details("run-accel-corrupt")
-            .expect("load")
-            .expect("exists");
-        let accel = details
-            .acceleration
-            .expect("should fall back to result.acceleration");
-        assert_eq!(accel.backend, AccelerationBackend::Frankentorch);
-        assert_eq!(accel.input_values, 42);
+            .expect_err("corrupt acceleration_json should fail loudly");
+        assert!(error.to_string().contains("invalid acceleration_json"));
     }
 
     #[test]

@@ -1330,6 +1330,9 @@ dependencies = [
 [[package]]
 name = "ft-core"
 version = "0.1.0"
+dependencies = [
+ "half",
+]
 
 [[package]]
 name = "ft-dispatch"
