@@ -570,24 +570,31 @@ CREATE TABLE IF NOT EXISTS _meta (
                 .map_err(|error| FwError::Storage(error.to_string()))?;
         }
 
+        let add_sql = format!(
+            "ALTER TABLE {} ADD COLUMN {} {};",
+            sql_ident(table),
+            sql_ident(column),
+            column_def
+        );
         let add_result = {
             let mut result = Ok(());
             for attempt in 0..=PERSIST_BUSY_RETRY_ATTEMPTS {
-                match self.recreate_table_with_added_column(table, &columns, column, column_def) {
-                    Ok(()) => {
+                match self.connection.execute(&add_sql) {
+                    Ok(_) => {
                         result = Ok(());
                         break;
                     }
-                    Err(error)
-                        if is_busy_storage_error(&error)
-                            && attempt < PERSIST_BUSY_RETRY_ATTEMPTS =>
-                    {
-                        let delay_ms = PERSIST_BUSY_BASE_BACKOFF_MS * (attempt as u64 + 1);
-                        std::thread::sleep(Duration::from_millis(delay_ms));
-                    }
                     Err(error) => {
+                        let wrapped = FwError::Storage(error.to_string());
+                        if is_busy_storage_error(&wrapped) && attempt < PERSIST_BUSY_RETRY_ATTEMPTS
+                        {
+                            let delay_ms = PERSIST_BUSY_BASE_BACKOFF_MS * (attempt as u64 + 1);
+                            std::thread::sleep(Duration::from_millis(delay_ms));
+                            continue;
+                        }
+
                         result = Err(FwError::Storage(format!(
-                            "failed to add column `{column}` on table `{table}` via table rebuild: {error}"
+                            "failed to add column `{column}` on table `{table}` via ALTER TABLE: {wrapped}"
                         )));
                         break;
                     }
