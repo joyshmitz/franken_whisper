@@ -312,6 +312,12 @@ fn ensure_local_ffmpeg_bundle(work_dir: Option<&Path>) -> FwResult<()> {
     let tools_root = ffmpeg_tools_root(work_dir);
     let cache_dir = tools_root.join("cache");
     let bin_dir = tools_root.join("bin");
+    tracing::info!(
+        tools_root = %tools_root.display(),
+        cache_dir = %cache_dir.display(),
+        bin_dir = %bin_dir.display(),
+        "auto-provisioning local ffmpeg bundle"
+    );
     fs::create_dir_all(&cache_dir)?;
     fs::create_dir_all(&bin_dir)?;
 
@@ -325,6 +331,7 @@ fn ensure_local_ffmpeg_bundle(work_dir: Option<&Path>) -> FwResult<()> {
         std::process::id(),
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
+    tracing::debug!(extract_dir = %extract_dir.display(), "extracting ffmpeg bundle");
     fs::create_dir_all(&extract_dir)?;
     extract_ffmpeg_bundle(&archive_path, &extract_dir)?;
 
@@ -337,6 +344,11 @@ fn ensure_local_ffmpeg_bundle(work_dir: Option<&Path>) -> FwResult<()> {
     fs::copy(&extracted_ffprobe, &ffprobe_path)?;
     mark_executable_if_unix(&ffmpeg_path)?;
     mark_executable_if_unix(&ffprobe_path)?;
+    tracing::info!(
+        ffmpeg = %ffmpeg_path.display(),
+        ffprobe = %ffprobe_path.display(),
+        "ffmpeg bundle provisioned successfully"
+    );
 
     Ok(())
 }
@@ -1842,7 +1854,7 @@ mod tests {
 
     #[test]
     fn state_root_for_tools_ignores_tmp_work_dir_without_env_override() {
-        use super::state_root_for_tools;
+        use super::{ffmpeg_tools_root, provisioned_tool_path, state_root_for_tools};
         if std::env::var_os("FRANKEN_WHISPER_STATE_DIR").is_some() {
             return;
         }
@@ -1852,10 +1864,22 @@ mod tests {
         std::fs::create_dir_all(&tmp_child).expect("mkdir");
 
         let result = state_root_for_tools(Some(&tmp_child));
+        let tools_root = ffmpeg_tools_root(Some(&tmp_child));
+        let ffmpeg_path = provisioned_tool_path("ffmpeg", Some(&tmp_child));
         assert_ne!(
             result,
             base.path(),
             "tmp work dirs should not force tool state into repo-adjacent state roots"
+        );
+        assert!(
+            !tools_root.starts_with(base.path()),
+            "tools root should not live under the repo-adjacent temp tree: {}",
+            tools_root.display()
+        );
+        assert!(
+            !ffmpeg_path.starts_with(base.path()),
+            "provisioned ffmpeg path should not live under the repo-adjacent temp tree: {}",
+            ffmpeg_path.display()
         );
     }
 
