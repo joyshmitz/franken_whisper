@@ -33,6 +33,15 @@ struct RunsMigrationSnapshotRow {
     acceleration_json: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TableColumn {
+    name: String,
+    declared_type: String,
+    not_null: bool,
+    default_value: Option<String>,
+    is_primary_key: bool,
+}
+
 const PERSIST_BUSY_RETRY_ATTEMPTS: usize = 8;
 const PERSIST_BUSY_BASE_BACKOFF_MS: u64 = 5;
 static PERSIST_SAVEPOINT_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -414,19 +423,22 @@ CREATE TABLE IF NOT EXISTS _meta (
 
     /// Read the current schema version from _meta, or 0 if not set.
     fn current_schema_version(&self) -> FwResult<u32> {
-        // Check if _meta table exists first
-        let tables = self
-            .connection
-            .query("SELECT name FROM sqlite_master WHERE type='table' AND name='_meta';")
-            .map_err(|error| FwError::Storage(error.to_string()))?;
-        if tables.is_empty() {
-            return Ok(0);
-        }
-
         let rows = self
             .connection
             .query("SELECT value FROM _meta WHERE key = 'schema_version';")
-            .map_err(|error| FwError::Storage(error.to_string()))?;
+            .map_err(|error| {
+                let text = error.to_string();
+                if text.contains("no such table: _meta") {
+                    FwError::Storage("__missing_meta__".to_owned())
+                } else {
+                    FwError::Storage(text)
+                }
+            });
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(FwError::Storage(marker)) if marker == "__missing_meta__" => return Ok(0),
+            Err(error) => return Err(error),
+        };
         match rows.first() {
             Some(row) => {
                 let v = value_to_string(row.get(0));
@@ -438,21 +450,12 @@ CREATE TABLE IF NOT EXISTS _meta (
     }
 
     fn set_schema_version(&self, version: u32) -> FwResult<()> {
-        let updated = self
-            .connection
+        self.connection
             .execute_with_params(
-                "UPDATE _meta SET value = ?1 WHERE key = 'schema_version';",
+                "INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?1);",
                 &[text_value(version.to_string())],
             )
             .map_err(|error| FwError::Storage(error.to_string()))?;
-        if updated == 0 {
-            self.connection
-                .execute_with_params(
-                    "INSERT INTO _meta (key, value) VALUES ('schema_version', ?1);",
-                    &[text_value(version.to_string())],
-                )
-                .map_err(|error| FwError::Storage(error.to_string()))?;
-        }
         Ok(())
     }
 
@@ -546,9 +549,7 @@ CREATE TABLE IF NOT EXISTS _meta (
     /// Add a column to a table if it doesn't already exist.
     fn ensure_column_exists(&self, table: &str, column: &str, column_def: &str) -> FwResult<()> {
         let columns = self.table_columns(table)?;
-        let exists = columns
-            .iter()
-            .any(|row| value_to_string(row.get(1)) == column);
+        let exists = columns.iter().any(|entry| entry.name == column);
         if exists {
             return Ok(());
         }
@@ -569,13 +570,31 @@ CREATE TABLE IF NOT EXISTS _meta (
                 .map_err(|error| FwError::Storage(error.to_string()))?;
         }
 
-        let add_result = self
-            .recreate_table_with_added_column(table, &columns, column, column_def)
-            .map_err(|rebuild_error| {
-                FwError::Storage(format!(
-                    "failed to add column `{column}` on table `{table}` via table rebuild: {rebuild_error}"
-                ))
-            });
+        let add_result = {
+            let mut result = Ok(());
+            for attempt in 0..=PERSIST_BUSY_RETRY_ATTEMPTS {
+                match self.recreate_table_with_added_column(table, &columns, column, column_def) {
+                    Ok(()) => {
+                        result = Ok(());
+                        break;
+                    }
+                    Err(error)
+                        if is_busy_storage_error(&error)
+                            && attempt < PERSIST_BUSY_RETRY_ATTEMPTS =>
+                    {
+                        let delay_ms = PERSIST_BUSY_BASE_BACKOFF_MS * (attempt as u64 + 1);
+                        std::thread::sleep(Duration::from_millis(delay_ms));
+                    }
+                    Err(error) => {
+                        result = Err(FwError::Storage(format!(
+                            "failed to add column `{column}` on table `{table}` via table rebuild: {error}"
+                        )));
+                        break;
+                    }
+                }
+            }
+            result
+        };
 
         if switched_from_wal {
             let restore = self
@@ -603,17 +622,34 @@ CREATE TABLE IF NOT EXISTS _meta (
         Ok(())
     }
 
-    fn table_columns(&self, table: &str) -> FwResult<Vec<fsqlite::Row>> {
-        self.connection
+    fn table_columns(&self, table: &str) -> FwResult<Vec<TableColumn>> {
+        let rows = self
+            .connection
             .query(&format!("PRAGMA table_info({});", sql_ident(table)))
-            .map_err(|error| FwError::Storage(error.to_string()))
+            .map_err(|error| FwError::Storage(error.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| TableColumn {
+                name: value_to_string(row.get(1)),
+                declared_type: value_to_string(row.get(2)),
+                not_null: value_to_i64(row.get(3)) != 0,
+                default_value: match row.get(4) {
+                    Some(SqliteValue::Text(value)) if !value.is_empty() => Some(value.clone()),
+                    Some(value) => {
+                        let text = value_to_string(Some(value));
+                        (!text.is_empty()).then_some(text)
+                    }
+                    None => None,
+                },
+                is_primary_key: value_to_i64(row.get(5)) != 0,
+            })
+            .collect())
     }
 
     fn table_has_column(&self, table: &str, column: &str) -> FwResult<bool> {
         let columns = self.table_columns(table)?;
-        Ok(columns
-            .iter()
-            .any(|row| value_to_string(row.get(1)) == column))
+        Ok(columns.iter().any(|entry| entry.name == column))
     }
 
     fn table_index_definitions(&self, table: &str) -> FwResult<Vec<(String, String)>> {
@@ -859,7 +895,7 @@ CREATE TABLE IF NOT EXISTS _meta (
     fn recreate_table_with_added_column(
         &self,
         table: &str,
-        existing_columns: &[fsqlite::Row],
+        existing_columns: &[TableColumn],
         new_column: &str,
         new_column_def: &str,
     ) -> FwResult<()> {
@@ -885,7 +921,7 @@ CREATE TABLE IF NOT EXISTS _meta (
         let existing_names = existing_columns
             .iter()
             .map(|row| {
-                let name = value_to_string(row.get(1));
+                let name = row.name.clone();
                 if name.is_empty() {
                     return Err(FwError::Storage(
                         "invalid PRAGMA table_info row: empty column name".to_owned(),
@@ -904,66 +940,87 @@ CREATE TABLE IF NOT EXISTS _meta (
             .collect::<FwResult<Vec<_>>>()?;
         column_defs.push(format!("{} {}", sql_ident(new_column), new_column_def));
 
-        self.connection
-            .execute(&format!("DROP TABLE IF EXISTS {temp_table_ident};"))
-            .map_err(|error| {
-                FwError::Storage(format!(
-                    "drop temporary table `{temp_table_name}` failed: {error}"
-                ))
-            })?;
-        self.connection
-            .execute(&format!(
-                "CREATE TABLE {temp_table_ident} ({});",
-                column_defs.join(", ")
-            ))
-            .map_err(|error| {
-                FwError::Storage(format!(
-                    "create temporary table `{temp_table_name}` failed: {error}"
-                ))
-            })?;
-        self.connection
-            .execute(&format!(
-                "INSERT INTO {temp_table_ident} ({existing_cols_csv}) \
-                 SELECT {existing_cols_csv} FROM {table_ident};"
-            ))
-            .map_err(|error| {
-                FwError::Storage(format!(
-                    "copy data from `{table}` to `{temp_table_name}` failed: {error}"
-                ))
-            })?;
-        for (index_name, _) in &index_defs {
+        let mut transaction_open = false;
+        let rebuild_result = (|| -> FwResult<()> {
             self.connection
-                .execute(&format!("DROP INDEX IF EXISTS {};", sql_ident(index_name)))
+                .execute("BEGIN IMMEDIATE;")
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+            transaction_open = true;
+
+            self.connection
+                .execute(&format!("DROP TABLE IF EXISTS {temp_table_ident};"))
                 .map_err(|error| {
                     FwError::Storage(format!(
-                        "drop index `{index_name}` before table rebuild failed: {error}"
+                        "drop temporary table `{temp_table_name}` failed: {error}"
                     ))
                 })?;
-        }
-        self.connection
-            .execute(&format!("DROP TABLE IF EXISTS {table_ident};"))
-            .map_err(|error| {
-                FwError::Storage(format!("drop original table `{table}` failed: {error}"))
-            })?;
-        self.connection
-            .execute(&format!(
-                "ALTER TABLE {temp_table_ident} RENAME TO {table_ident};"
-            ))
-            .map_err(|error| {
-                FwError::Storage(format!(
-                    "rename temporary table `{temp_table_name}` to `{table}` failed: {error}"
+            self.connection
+                .execute(&format!(
+                    "CREATE TABLE {temp_table_ident} ({});",
+                    column_defs.join(", ")
                 ))
-            })?;
-
-        for (_, sql) in index_defs {
-            self.connection.execute(&sql).map_err(|error| {
-                FwError::Storage(format!(
-                    "recreate index for rebuilt table `{table}` failed: {error}"
+                .map_err(|error| {
+                    FwError::Storage(format!(
+                        "create temporary table `{temp_table_name}` failed: {error}"
+                    ))
+                })?;
+            self.connection
+                .execute(&format!(
+                    "INSERT INTO {temp_table_ident} ({existing_cols_csv}) \
+                     SELECT {existing_cols_csv} FROM {table_ident};"
                 ))
-            })?;
+                .map_err(|error| {
+                    FwError::Storage(format!(
+                        "copy data from `{table}` to `{temp_table_name}` failed: {error}"
+                    ))
+                })?;
+            for (index_name, _) in &index_defs {
+                self.connection
+                    .execute(&format!("DROP INDEX IF EXISTS {};", sql_ident(index_name)))
+                    .map_err(|error| {
+                        FwError::Storage(format!(
+                            "drop index `{index_name}` before table rebuild failed: {error}"
+                        ))
+                    })?;
+            }
+            self.connection
+                .execute(&format!("DROP TABLE IF EXISTS {table_ident};"))
+                .map_err(|error| {
+                    FwError::Storage(format!("drop original table `{table}` failed: {error}"))
+                })?;
+            self.connection
+                .execute(&format!(
+                    "ALTER TABLE {temp_table_ident} RENAME TO {table_ident};"
+                ))
+                .map_err(|error| {
+                    FwError::Storage(format!(
+                        "rename temporary table `{temp_table_name}` to `{table}` failed: {error}"
+                    ))
+                })?;
+
+            for (_, sql) in &index_defs {
+                self.connection.execute(sql).map_err(|error| {
+                    FwError::Storage(format!(
+                        "recreate index for rebuilt table `{table}` failed: {error}"
+                    ))
+                })?;
+            }
+
+            self.connection
+                .execute("COMMIT;")
+                .map_err(|error| FwError::Storage(error.to_string()))?;
+            transaction_open = false;
+            Ok(())
+        })();
+
+        if rebuild_result.is_err() && transaction_open {
+            let _ = self.connection.execute("ROLLBACK;");
+            let _ = self
+                .connection
+                .execute(&format!("DROP TABLE IF EXISTS {temp_table_ident};"));
         }
 
-        Ok(())
+        rebuild_result
     }
 
     fn persist_report_inner(
@@ -1377,18 +1434,18 @@ fn rollback_savepoint(connection: &Connection, savepoint_name: &str) -> FwResult
     Ok(())
 }
 
-fn reconstruct_column_definition(row: &fsqlite::Row) -> FwResult<String> {
-    let name = value_to_string(row.get(1));
+fn reconstruct_column_definition(column: &TableColumn) -> FwResult<String> {
+    let name = column.name.clone();
     if name.is_empty() {
         return Err(FwError::Storage(
             "invalid PRAGMA table_info row: empty column name".to_owned(),
         ));
     }
 
-    let typ = value_to_string(row.get(2));
-    let not_null = value_to_i64(row.get(3)) != 0;
-    let default_value = value_to_string(row.get(4));
-    let is_primary_key = value_to_i64(row.get(5)) != 0;
+    let typ = column.declared_type.clone();
+    let not_null = column.not_null;
+    let default_value = column.default_value.clone().unwrap_or_default();
+    let is_primary_key = column.is_primary_key;
 
     let mut def = if typ.is_empty() {
         sql_ident(&name)
@@ -2897,22 +2954,29 @@ mod tests {
 
     #[test]
     fn persist_duplicate_id_succeeds_and_both_rows_loadable() {
-        // fsqlite does not enforce PRIMARY KEY uniqueness on INSERT,
-        // so duplicate IDs create additional rows. Document this behavior.
+        // Duplicate run IDs should be rejected by the storage backend.
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("dup.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
 
         let report = minimal_report("run-dup", &db_path);
         store.persist_report(&report).expect("first persist");
-        store
+        let error = store
             .persist_report(&report)
-            .expect("second persist also succeeds");
+            .expect_err("second persist should fail on duplicate run id");
+        assert!(
+            error
+                .to_string()
+                .contains("UNIQUE constraint failed: runs.id"),
+            "duplicate persist should surface unique constraint error: {error}",
+        );
 
-        // list_recent_runs reflects the duplicate.
         let runs = store.list_recent_runs(10).expect("list");
-        assert!(runs.len() >= 2, "fsqlite allows duplicate PRIMARY KEY rows");
-        // load_run_details still returns a valid result for the ID.
+        assert_eq!(
+            runs.len(),
+            1,
+            "duplicate persist should not add a second row"
+        );
         let details = store
             .load_run_details("run-dup")
             .expect("query")
@@ -6484,16 +6548,16 @@ mod tests {
         assert!(!columns.is_empty(), "runs table should have columns");
 
         let mut names = Vec::new();
-        for row in &columns {
-            let def = super::reconstruct_column_definition(row).expect("reconstruct");
-            let name = super::value_to_string(row.get(1));
+        for column in &columns {
+            let def = super::reconstruct_column_definition(column).expect("reconstruct");
+            let name = column.name.clone();
             // Each definition must contain the quoted column name.
             assert!(
                 def.contains(&name),
                 "definition should contain column name `{name}`: {def}"
             );
             // Each definition must include the type (TEXT or REAL).
-            let typ = super::value_to_string(row.get(2));
+            let typ = column.declared_type.clone();
             if !typ.is_empty() {
                 assert!(
                     def.contains(&typ),
@@ -7068,7 +7132,7 @@ mod tests {
         let db_path = dir.path().join("empty_cols.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
 
-        let empty_cols: Vec<fsqlite::Row> = vec![];
+        let empty_cols: Vec<super::TableColumn> = vec![];
         let err = store
             .recreate_table_with_added_column("runs", &empty_cols, "new_col", "TEXT DEFAULT ''")
             .expect_err("should fail with empty columns");

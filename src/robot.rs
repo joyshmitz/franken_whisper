@@ -1218,7 +1218,7 @@ mod tests {
         for (event_type, spec) in events {
             let required = spec["required"]
                 .as_array()
-                .expect(&format!("{event_type} should have required array"));
+                .unwrap_or_else(|| panic!("{event_type} should have required array"));
             let example = &spec["example"];
 
             for field in required {

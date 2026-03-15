@@ -2352,6 +2352,7 @@ mod tests {
         let config = SpeculativeConfig {
             window_size_ms: 1,
             overlap_ms: 0,
+            adaptive: false,
             ..SpeculativeConfig::default()
         };
         let mut pipeline = SpeculativeStreamingPipeline::new(config, "test-1ms-window".to_owned());

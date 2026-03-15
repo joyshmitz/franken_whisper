@@ -297,25 +297,6 @@ fn backends_command_output() -> FwResult<String> {
     Ok(serde_json::to_string(&backends_discovery_value(&report))?)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::backends_command_output;
-
-    #[test]
-    fn backends_command_output_matches_robot_contract() {
-        let line = backends_command_output().expect("backends command should serialize");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&line).expect("backends command output should be valid json");
-
-        assert_eq!(parsed["event"], "backends.discovery");
-        assert_eq!(
-            parsed["schema_version"],
-            franken_whisper::robot::ROBOT_SCHEMA_VERSION
-        );
-        assert!(parsed["backends"].is_array());
-    }
-}
-
 // ---------------------------------------------------------------------------
 // bd-2xe.4: send-control helper
 // ---------------------------------------------------------------------------
@@ -345,5 +326,24 @@ fn send_control_frame(kind: ControlFrameKind) -> FwResult<()> {
             tty_audio::SessionCloseReason::Error,
             None,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backends_command_output;
+
+    #[test]
+    fn backends_command_output_matches_robot_contract() {
+        let line = backends_command_output().expect("backends command should serialize");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("backends command output should be valid json");
+
+        assert_eq!(parsed["event"], "backends.discovery");
+        assert_eq!(
+            parsed["schema_version"],
+            franken_whisper::robot::ROBOT_SCHEMA_VERSION
+        );
+        assert!(parsed["backends"].is_array());
     }
 }

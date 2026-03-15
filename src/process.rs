@@ -580,7 +580,10 @@ mod tests {
             text.len() > 100_000,
             "large stderr payload should remain materially intact"
         );
-        assert!(text.contains("status: 7"), "exit status should be preserved");
+        assert!(
+            text.contains("status: 7"),
+            "exit status should be preserved"
+        );
     }
 
     #[test]

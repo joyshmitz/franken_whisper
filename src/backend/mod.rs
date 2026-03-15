@@ -1575,11 +1575,9 @@ fn run_backend(
     let native_is_available = native_available(kind);
 
     match kind {
-        BackendKind::Auto => {
-            return Err(FwError::InvalidRequest(
-                "internal error: auto backend cannot be run directly".to_owned(),
-            ));
-        }
+        BackendKind::Auto => Err(FwError::InvalidRequest(
+            "internal error: auto backend cannot be run directly".to_owned(),
+        )),
         BackendKind::WhisperCpp => run_backend_with_mode_and_runners(
             kind,
             request,
@@ -1628,6 +1626,7 @@ fn run_backend(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_backend_with_mode_and_runners<BridgeRunner, NativeRunner>(
     kind: BackendKind,
     request: &TranscribeRequest,
