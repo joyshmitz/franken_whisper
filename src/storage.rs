@@ -161,13 +161,12 @@ impl RunStore {
             tok.checkpoint()?;
         }
 
-        // Use ASC ordering + reverse in Rust to work around fsqlite
-        // ORDER BY DESC returning insertion order (bd-2oe).
+        // Do not trust fsqlite row ordering for recency queries. Pull the rows
+        // and sort deterministically in Rust instead.
         let rows = self
             .connection
             .query(
-                "SELECT id, started_at, finished_at, backend, transcript \
-                 FROM runs ORDER BY started_at ASC, id ASC",
+                "SELECT id, started_at, finished_at, backend, transcript FROM runs",
             )
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
@@ -191,7 +190,12 @@ impl RunStore {
             })
             .collect::<FwResult<Vec<_>>>()?;
 
-        summaries.reverse();
+        summaries.sort_by(|left, right| {
+            right
+                .started_at_rfc3339
+                .cmp(&left.started_at_rfc3339)
+                .then_with(|| right.run_id.cmp(&left.run_id))
+        });
         if limit > 0 && summaries.len() > limit {
             summaries.truncate(limit);
         }
@@ -210,13 +214,18 @@ impl RunStore {
             tok.checkpoint()?;
         }
 
-        // ASC + last() to work around fsqlite ORDER BY DESC bug (bd-2oe).
+        // Do not trust fsqlite ORDER BY semantics here; determine the latest
+        // row in Rust from the raw results.
         let rows = self
             .connection
-            .query("SELECT id FROM runs ORDER BY started_at ASC, id ASC")
+            .query("SELECT id, started_at FROM runs")
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
-        let Some(row) = rows.last() else {
+        let Some(row) = rows.into_iter().max_by(|left, right| {
+            value_to_string(left.get(1))
+                .cmp(&value_to_string(right.get(1)))
+                .then_with(|| value_to_string(left.get(0)).cmp(&value_to_string(right.get(0))))
+        }) else {
             return Ok(None);
         };
         let run_id = value_to_string(row.get(0));

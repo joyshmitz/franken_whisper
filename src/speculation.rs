@@ -575,14 +575,14 @@ impl WindowManager {
             }
         }
 
-        // Sort by known start time; timestamp-less segments retain relative order
-        // after all timestamped segments rather than being coerced to t=0.
+        // Treat timestamp-less segments as the earliest items so speculative
+        // partials without timing metadata surface before later timed segments.
         all_segments.sort_by(|a, b| match (a.start_sec, b.start_sec) {
             (Some(left), Some(right)) => left
                 .partial_cmp(&right)
                 .unwrap_or(std::cmp::Ordering::Equal),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, Some(_)) => std::cmp::Ordering::Less,
             (None, None) => std::cmp::Ordering::Equal,
         });
 

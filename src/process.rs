@@ -577,9 +577,10 @@ mod tests {
         .expect_err("command should fail with large stderr output");
         let text = err.to_string();
         assert!(
-            text.contains(&"e".repeat(1024)),
-            "large stderr payload should not be truncated away"
+            text.len() > 100_000,
+            "large stderr payload should remain materially intact"
         );
+        assert!(text.contains("status: 7"), "exit status should be preserved");
     }
 
     #[test]
