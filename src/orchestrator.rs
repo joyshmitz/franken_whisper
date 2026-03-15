@@ -1301,6 +1301,102 @@ impl PipelineIntermediate {
     }
 }
 
+fn stage_skip_payload(reason: &str, details: Value) -> Value {
+    json!({
+        "reason": reason,
+        "details": details,
+    })
+}
+
+fn optional_stage_skip(
+    stage: PipelineStage,
+    request: &TranscribeRequest,
+) -> Option<(String, Value)> {
+    match stage {
+        PipelineStage::Vad => {
+            if request.backend_params.vad.is_none() {
+                Some((
+                    "no_vad_requested".to_owned(),
+                    stage_skip_payload("no_vad_requested", json!({"requested": false})),
+                ))
+            } else {
+                None
+            }
+        }
+        PipelineStage::Separate => {
+            let no_stem = request
+                .backend_params
+                .diarization_config
+                .as_ref()
+                .is_some_and(|config| config.no_stem);
+            if !request.diarize {
+                Some((
+                    "diarization_not_requested".to_owned(),
+                    stage_skip_payload(
+                        "diarization_not_requested",
+                        json!({"diarize": request.diarize}),
+                    ),
+                ))
+            } else if no_stem {
+                Some((
+                    "source_separation_disabled".to_owned(),
+                    stage_skip_payload("source_separation_disabled", json!({"no_stem": true})),
+                ))
+            } else {
+                None
+            }
+        }
+        PipelineStage::Align => {
+            if !request.diarize {
+                Some((
+                    "alignment_not_requested".to_owned(),
+                    stage_skip_payload(
+                        "alignment_not_requested",
+                        json!({"diarize": request.diarize}),
+                    ),
+                ))
+            } else {
+                None
+            }
+        }
+        PipelineStage::Punctuate => {
+            let punctuation_enabled = request
+                .backend_params
+                .punctuation
+                .as_ref()
+                .is_some_and(|config| config.enabled);
+            if !request.diarize && !punctuation_enabled {
+                Some((
+                    "punctuation_not_requested".to_owned(),
+                    stage_skip_payload(
+                        "punctuation_not_requested",
+                        json!({
+                            "diarize": request.diarize,
+                            "punctuation_enabled": punctuation_enabled,
+                        }),
+                    ),
+                ))
+            } else {
+                None
+            }
+        }
+        PipelineStage::Diarize => {
+            if !request.diarize {
+                Some((
+                    "diarization_not_requested".to_owned(),
+                    stage_skip_payload(
+                        "diarization_not_requested",
+                        json!({"diarize": request.diarize}),
+                    ),
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Inner body of [`run_pipeline`], factored out so that [`run_pipeline`] can
 /// unconditionally call `pcx.run_finalizers()` after this returns regardless
 /// of success or failure.
@@ -1322,6 +1418,16 @@ async fn run_pipeline_body(
     let mut inter = PipelineIntermediate::new();
 
     for stage in pipeline_config.stages() {
+        if let Some((_reason, payload)) = optional_stage_skip(*stage, request) {
+            log.push(
+                stage.label(),
+                &format!("{}.skip", stage.label()),
+                &format!("skipping {} stage", stage.label()),
+                payload,
+            );
+            continue;
+        }
+
         if inter.vad_silence_only
             && matches!(
                 stage,
@@ -1333,6 +1439,15 @@ async fn run_pipeline_body(
                     | PipelineStage::Diarize
             )
         {
+            log.push(
+                stage.label(),
+                &format!("{}.skip", stage.label()),
+                &format!(
+                    "skipping {} stage after silence-only VAD result",
+                    stage.label()
+                ),
+                stage_skip_payload("silence_only_vad", json!({"vad_silence_only": true})),
+            );
             continue;
         }
 
@@ -1387,7 +1502,7 @@ async fn run_pipeline_body(
 
     // If persist is in the config, checkpoint before it.
     let has_persist = pipeline_config.has_stage(PipelineStage::Persist);
-    if has_persist {
+    if has_persist && request.persist {
         checkpoint_or_emit("persist", pcx, log)?;
     }
 
@@ -1475,6 +1590,14 @@ async fn run_pipeline_body(
             "persist.ok",
             "run report persisted",
             json!({"db_path": request.db_path.display().to_string()}),
+        );
+        report.events = log.events.clone();
+    } else if has_persist {
+        log.push(
+            "persist",
+            "persist.skip",
+            "skipping persistence stage",
+            stage_skip_payload("persist_disabled", json!({"persist": request.persist})),
         );
         report.events = log.events.clone();
     }
@@ -3678,8 +3801,8 @@ mod tests {
 
     use crate::error::FwError;
     use crate::model::{
-        BackendKind, BackendParams, InputSource, RunEvent, RunReport, StreamedRunEvent,
-        TranscribeRequest, TranscriptionResult, TranscriptionSegment,
+        BackendKind, BackendParams, DiarizationConfig, InputSource, RunEvent, RunReport,
+        StreamedRunEvent, TranscribeRequest, TranscriptionResult, TranscriptionSegment, VadParams,
     };
     use crate::storage::RunStore;
 
@@ -3691,12 +3814,12 @@ mod tests {
         acceleration_cancellation_fence_payload, acceleration_context_payload,
         acceleration_stream_owner_id, apply_padding, budget_duration, checkpoint_or_emit,
         ctc_forced_align, diarize_segments, event_elapsed_ms, is_abbreviation_period,
-        is_decimal_period, is_ellipsis_period, merge_regions_by_gap, ms_to_frames, parse_budget_ms,
-        parse_event_ts_ms, punctuate_segments, recommended_budget, resolve_speaker_target,
-        run_pipeline, run_stage_with_budget, sanitize_process_pid, sha256_bytes_hex, sha256_file,
-        sha256_json_value, silhouette_score, source_separate, split_long_regions, stage_budget_ms,
-        stage_failure_code, stage_failure_message, stage_latency_profile, state_root,
-        vad_energy_detect,
+        is_decimal_period, is_ellipsis_period, merge_regions_by_gap, ms_to_frames,
+        optional_stage_skip, parse_budget_ms, parse_event_ts_ms, punctuate_segments,
+        recommended_budget, resolve_speaker_target, run_pipeline, run_stage_with_budget,
+        sanitize_process_pid, sha256_bytes_hex, sha256_file, sha256_json_value, silhouette_score,
+        source_separate, split_long_regions, stage_budget_ms, stage_failure_code,
+        stage_failure_message, stage_latency_profile, state_root, vad_energy_detect,
     };
 
     #[test]
@@ -6939,6 +7062,53 @@ mod tests {
         assert_eq!(streamed.len(), 2);
         assert_eq!(streamed[0].event.code, "orchestration.budgets");
         assert_eq!(streamed[1].event.code, "orchestration.cancelled");
+    }
+
+    #[test]
+    fn optional_stage_skip_respects_request_flags() {
+        let mut request = TranscribeRequest {
+            input: InputSource::File {
+                path: PathBuf::from("input.wav"),
+            },
+            backend: BackendKind::WhisperCpp,
+            model: None,
+            language: None,
+            translate: false,
+            diarize: false,
+            persist: false,
+            db_path: PathBuf::from("db.sqlite3"),
+            timeout_ms: None,
+            backend_params: BackendParams::default(),
+        };
+
+        assert!(optional_stage_skip(PipelineStage::Vad, &request).is_some());
+        assert!(optional_stage_skip(PipelineStage::Separate, &request).is_some());
+        assert!(optional_stage_skip(PipelineStage::Align, &request).is_some());
+        assert!(optional_stage_skip(PipelineStage::Punctuate, &request).is_some());
+        assert!(optional_stage_skip(PipelineStage::Diarize, &request).is_some());
+
+        request.backend_params.vad = Some(VadParams::default());
+        request.diarize = true;
+        request.backend_params.diarization_config = Some(DiarizationConfig::default());
+
+        assert!(optional_stage_skip(PipelineStage::Vad, &request).is_none());
+        assert!(optional_stage_skip(PipelineStage::Separate, &request).is_none());
+        assert!(optional_stage_skip(PipelineStage::Align, &request).is_none());
+        assert!(optional_stage_skip(PipelineStage::Diarize, &request).is_none());
+
+        let punctuate_skip = optional_stage_skip(PipelineStage::Punctuate, &request);
+        assert!(
+            punctuate_skip.is_none(),
+            "diarize=true should enable punctuation stage through the diarization packet"
+        );
+
+        request.backend_params.diarization_config = Some(DiarizationConfig {
+            no_stem: true,
+            ..DiarizationConfig::default()
+        });
+        let separate_skip = optional_stage_skip(PipelineStage::Separate, &request)
+            .expect("no_stem should skip source separation");
+        assert_eq!(separate_skip.0, "source_separation_disabled");
     }
 
     #[test]

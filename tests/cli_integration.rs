@@ -135,6 +135,39 @@ printf '%s\n' '{"text":"stub transcript","language":"en","segments":[{"start":0.
 }
 
 #[cfg(unix)]
+fn write_whisper_cpp_stub_binary_without_speaker(dir: &std::path::Path) -> PathBuf {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let stub_path = dir.join("whisper_cpp_stub_no_speaker.sh");
+    let script = r#"#!/bin/bash
+set -euo pipefail
+out_prefix=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -of)
+      out_prefix="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [[ -z "${out_prefix}" ]]; then
+  echo "missing -of output prefix" >&2
+  exit 2
+fi
+printf '%s\n' '{"text":"stub transcript","language":"en","segments":[{"start":0.0,"end":0.5,"text":"stub transcript","confidence":0.9}]}' > "${out_prefix}.json"
+"#;
+    fs::write(&stub_path, script).expect("write stub");
+    let mut perms = fs::metadata(&stub_path).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&stub_path, perms).expect("chmod");
+    stub_path
+}
+
+#[cfg(unix)]
 fn generate_silent_wav(path: &std::path::Path) {
     let status = ProcessCommand::new("ffmpeg")
         .args([
@@ -1877,6 +1910,61 @@ fn transcribe_file_input_crosses_ingest_normalize_backend_with_stub_whisper_cpp(
     assert_eq!(report["result"]["backend"], "whisper_cpp");
     assert_eq!(report["result"]["transcript"], "stub transcript");
     assert_eq!(report["result"]["segments"][0]["speaker"], "SPEAKER_00");
+}
+
+#[cfg(unix)]
+#[test]
+fn transcribe_without_optional_flags_emits_skip_events_and_preserves_backend_segments() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let state_root = dir.path().join("state");
+    let stub_bin = write_whisper_cpp_stub_binary_without_speaker(dir.path());
+    let input_wav = dir.path().join("file_input_no_optional.wav");
+    generate_voiced_wav(&input_wav);
+
+    let report = run_transcribe_json_with_stub(
+        &[
+            "--input",
+            input_wav.to_str().expect("utf8"),
+            "--backend",
+            "whisper-cpp",
+            "--no-persist",
+            "--json",
+        ],
+        None,
+        &stub_bin,
+        &state_root,
+    );
+
+    assert_eq!(report["result"]["backend"], "whisper_cpp");
+    assert_eq!(report["result"]["transcript"], "stub transcript");
+    assert_eq!(report["result"]["segments"][0]["text"], "stub transcript");
+    assert!(
+        report["result"]["segments"][0]["speaker"].is_null(),
+        "speaker should remain null when --diarize was not requested"
+    );
+
+    let events = report["events"].as_array().expect("events");
+    let codes = events
+        .iter()
+        .filter_map(|event| event["code"].as_str())
+        .collect::<Vec<_>>();
+    for code in [
+        "vad.skip",
+        "separate.skip",
+        "align.skip",
+        "punctuate.skip",
+        "diarize.skip",
+        "persist.skip",
+    ] {
+        assert!(
+            codes.contains(&code),
+            "expected skip event `{code}` in {codes:?}"
+        );
+    }
 }
 
 #[cfg(unix)]
