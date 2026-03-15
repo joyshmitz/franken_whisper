@@ -162,54 +162,20 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
 name = "asupersync"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08c7d8c72c8d8a870a9e5a85a57b04d4e8d15d4be238a0a5818e8c87be2a89da"
-dependencies = [
- "base64",
- "bincode-next",
- "crossbeam-queue",
- "franken-decision 0.2.5",
- "franken-evidence 0.2.5",
- "franken-kernel 0.2.5",
- "getrandom 0.4.1",
- "hmac",
- "io-uring",
- "libc",
- "nix 0.31.1",
- "parking_lot",
- "pin-project",
- "polling",
- "rmp-serde",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "slab",
- "smallvec",
- "socket2",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
- "tracing-subscriber",
- "visibility",
-]
-
-[[package]]
-name = "asupersync"
 version = "0.2.8"
 dependencies = [
  "base64",
  "bincode-next",
  "crossbeam-deque",
  "crossbeam-queue",
- "franken-decision 0.2.8",
- "franken-evidence 0.2.8",
- "franken-kernel 0.2.8",
+ "franken-decision",
+ "franken-evidence",
+ "franken-kernel",
  "futures-lite",
  "getrandom 0.4.1",
  "hashbrown 0.15.5",
  "hmac",
+ "io-uring",
  "js-sys",
  "libc",
  "memchr",
@@ -228,6 +194,9 @@ dependencies = [
  "socket2",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "visibility",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -946,32 +915,11 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aca82b4b7cfc99b74981d45a26975d9fe4ea7d7b3e3aaba8777178e3d8ea81b0"
-dependencies = [
- "franken-evidence 0.2.5",
- "franken-kernel 0.2.5",
- "serde",
-]
-
-[[package]]
-name = "franken-decision"
 version = "0.2.8"
 dependencies = [
- "franken-evidence 0.2.8",
- "franken-kernel 0.2.8",
+ "franken-evidence",
+ "franken-kernel",
  "serde",
-]
-
-[[package]]
-name = "franken-evidence"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1be55a45f3e094e73e50b34b9823bab5ee06090dfcf19e773504d6b52b4e3bb7"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -980,15 +928,6 @@ version = "0.2.8"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "franken-kernel"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7f7c6164bd2a2499e1e2c50080f370af3529ca00f18e477a49e255e890bad6c"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -1002,7 +941,7 @@ dependencies = [
 name = "franken_whisper"
 version = "0.1.0"
 dependencies = [
- "asupersync 0.2.8",
+ "asupersync",
  "base64",
  "chrono",
  "clap",
@@ -1012,9 +951,9 @@ dependencies = [
  "fj-api",
  "fj-core",
  "flate2",
- "franken-decision 0.2.8",
- "franken-evidence 0.2.8",
- "franken-kernel 0.2.8",
+ "franken-decision",
+ "franken-evidence",
+ "franken-kernel",
  "fsqlite",
  "fsqlite-types",
  "ft-api",
@@ -1069,7 +1008,7 @@ dependencies = [
 name = "fsqlite-core"
 version = "0.1.1"
 dependencies = [
- "asupersync 0.2.5",
+ "asupersync",
  "blake3",
  "foldhash 0.1.5",
  "fsqlite-ast",
@@ -1245,7 +1184,7 @@ dependencies = [
 name = "fsqlite-types"
 version = "0.1.1"
 dependencies = [
- "asupersync 0.2.5",
+ "asupersync",
  "bitflags 2.11.0",
  "blake3",
  "fsqlite-error",
@@ -1281,7 +1220,7 @@ name = "fsqlite-vfs"
 version = "0.1.2"
 dependencies = [
  "advisory-lock",
- "asupersync 0.2.5",
+ "asupersync",
  "fsqlite-error",
  "fsqlite-observability",
  "fsqlite-types",
@@ -1295,7 +1234,7 @@ dependencies = [
 name = "fsqlite-wal"
 version = "0.1.1"
 dependencies = [
- "asupersync 0.2.5",
+ "asupersync",
  "blake3",
  "crc32c",
  "fsqlite-error",

@@ -165,9 +165,7 @@ impl RunStore {
         // and sort deterministically in Rust instead.
         let rows = self
             .connection
-            .query(
-                "SELECT id, started_at, finished_at, backend, transcript FROM runs",
-            )
+            .query("SELECT id, started_at, finished_at, backend, transcript FROM runs")
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
         let mut summaries: Vec<RunSummary> = rows
