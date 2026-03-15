@@ -197,15 +197,15 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "base64",
  "bincode-next",
  "crossbeam-deque",
  "crossbeam-queue",
- "franken-decision 0.2.7",
- "franken-evidence 0.2.7",
- "franken-kernel 0.2.7",
+ "franken-decision 0.2.8",
+ "franken-evidence 0.2.8",
+ "franken-kernel 0.2.8",
  "futures-lite",
  "getrandom 0.4.1",
  "hashbrown 0.15.5",
@@ -957,10 +957,10 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
- "franken-evidence 0.2.7",
- "franken-kernel 0.2.7",
+ "franken-evidence 0.2.8",
+ "franken-kernel 0.2.8",
  "serde",
 ]
 
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "serde",
 ]
@@ -1002,7 +1002,7 @@ dependencies = [
 name = "franken_whisper"
 version = "0.1.0"
 dependencies = [
- "asupersync 0.2.7",
+ "asupersync 0.2.8",
  "base64",
  "chrono",
  "clap",
@@ -1012,9 +1012,9 @@ dependencies = [
  "fj-api",
  "fj-core",
  "flate2",
- "franken-decision 0.2.7",
- "franken-evidence 0.2.7",
- "franken-kernel 0.2.7",
+ "franken-decision 0.2.8",
+ "franken-evidence 0.2.8",
+ "franken-kernel 0.2.8",
  "fsqlite",
  "fsqlite-types",
  "ft-api",
