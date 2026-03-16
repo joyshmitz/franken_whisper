@@ -1174,6 +1174,7 @@ dependencies = [
  "blake3",
  "fsqlite-ast",
  "fsqlite-error",
+ "fsqlite-parser",
  "fsqlite-types",
  "serde",
  "serde_json",

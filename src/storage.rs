@@ -564,6 +564,7 @@ CREATE TABLE IF NOT EXISTS _meta (
             .map(|row| value_to_string(row.get(0)))
             .unwrap_or_default();
         let switched_from_wal = current_mode.eq_ignore_ascii_case("wal");
+        let mut journal_mode_restored = !switched_from_wal;
         if switched_from_wal {
             self.connection
                 .query("PRAGMA journal_mode='delete';")
@@ -576,6 +577,7 @@ CREATE TABLE IF NOT EXISTS _meta (
             sql_ident(column),
             column_def
         );
+        let mut fallback_rebuild_columns: Option<Vec<TableColumn>> = None;
         let add_result = {
             let mut result = Ok(());
             for attempt in 0..=PERSIST_BUSY_RETRY_ATTEMPTS {
@@ -593,6 +595,15 @@ CREATE TABLE IF NOT EXISTS _meta (
                             continue;
                         }
 
+                        let error_text = wrapped.to_string();
+                        if error_text.contains("sqlite_master entry not found")
+                            && fallback_rebuild_columns.is_none()
+                        {
+                            fallback_rebuild_columns = Some(columns.clone());
+                            result = Ok(());
+                            break;
+                        }
+
                         result = Err(FwError::Storage(format!(
                             "failed to add column `{column}` on table `{table}` via ALTER TABLE: {wrapped}"
                         )));
@@ -602,8 +613,20 @@ CREATE TABLE IF NOT EXISTS _meta (
             }
             result
         };
+        let add_result = match (add_result, fallback_rebuild_columns) {
+            (Ok(()), Some(existing_columns)) => {
+                if switched_from_wal {
+                    self.connection
+                        .query("PRAGMA journal_mode='wal';")
+                        .map_err(|error| FwError::Storage(error.to_string()))?;
+                    journal_mode_restored = true;
+                }
+                self.recreate_table_with_added_column(table, &existing_columns, column, column_def)
+            }
+            (result, _) => result,
+        };
 
-        if switched_from_wal {
+        if switched_from_wal && !journal_mode_restored {
             let restore = self
                 .connection
                 .query("PRAGMA journal_mode='wal';")
@@ -618,6 +641,7 @@ CREATE TABLE IF NOT EXISTS _meta (
                     ))),
                 };
             }
+            journal_mode_restored = true;
         }
 
         add_result?;
@@ -1473,7 +1497,14 @@ fn reconstruct_column_definition(column: &TableColumn) -> FwResult<String> {
 }
 
 fn sql_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
+    let needs_quoting = name.is_empty()
+        || name.as_bytes()[0].is_ascii_digit()
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if needs_quoting {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    } else {
+        name.to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -6183,9 +6214,9 @@ mod tests {
     }
 
     #[test]
-    fn sql_ident_wraps_plain_name_in_double_quotes() {
+    fn sql_ident_leaves_plain_name_unquoted() {
         use super::sql_ident;
-        assert_eq!(sql_ident("runs"), "\"runs\"");
+        assert_eq!(sql_ident("runs"), "runs");
         assert_eq!(sql_ident(""), "\"\"", "empty name still wraps in quotes");
     }
 
