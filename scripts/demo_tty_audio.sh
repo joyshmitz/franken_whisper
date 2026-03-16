@@ -28,18 +28,10 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 TMP_DIR="$(mktemp -d)"
-cleanup() {
-    rm -rf "$TMP_DIR"
-}
-trap cleanup EXIT
 
 HAS_GUM=0
-HAS_BAT=0
 if command -v gum >/dev/null 2>&1; then
     HAS_GUM=1
-fi
-if command -v bat >/dev/null 2>&1; then
-    HAS_BAT=1
 fi
 
 if [[ -t 1 ]]; then
@@ -47,7 +39,6 @@ if [[ -t 1 ]]; then
     DIM=$'\033[2m'
     GREEN=$'\033[38;5;42m'
     YELLOW=$'\033[38;5;220m'
-    RED=$'\033[38;5;196m'
     CYAN=$'\033[38;5;45m'
     RESET=$'\033[0m'
 else
@@ -55,7 +46,6 @@ else
     DIM=""
     GREEN=""
     YELLOW=""
-    RED=""
     CYAN=""
     RESET=""
 fi
@@ -120,15 +110,6 @@ warn() {
     fi
 }
 
-error_text() {
-    local text="$1"
-    if (( HAS_GUM == 1 )); then
-        gum style --foreground 196 --bold "$text"
-    else
-        printf '%s%s%s\n' "$RED" "$text" "$RESET"
-    fi
-}
-
 pause_demo() {
     if [[ "$DEMO_MODE" == "auto" ]]; then
         return 0
@@ -149,16 +130,6 @@ show_command() {
         gum style --foreground 51 --border normal --padding "0 1" "$cmd"
     else
         printf '%s$ %s%s\n' "$CYAN" "$cmd" "$RESET"
-    fi
-}
-
-show_file_excerpt() {
-    local file="$1"
-    local lines="${2:-20}"
-    if (( HAS_BAT == 1 )); then
-        bat --style=plain --paging=never --color=always "$file" | sed -n "1,${lines}p"
-    else
-        sed -n "1,${lines}p" "$file"
     fi
 }
 
@@ -220,6 +191,7 @@ note "Workspace: $ROOT_DIR"
 note "Binary:    $FW_BIN"
 note "ffmpeg:    $(command -v ffmpeg)"
 note "Temp dir:  $TMP_DIR"
+note "Artifacts are preserved after exit for inspection."
 
 if (( HAS_GUM == 1 )); then
     printf '\n'
@@ -259,10 +231,17 @@ good "Clean round-trip succeeded."
 pause_demo
 
 step 4 "Simulate packet loss on a terminal link"
-show_command "awk 'drop seq=3' $TMP_DIR/frames.ndjson > $TMP_DIR/lossy.ndjson"
-awk 'NR==1 || $0 !~ /"seq":3,/' "$TMP_DIR/frames.ndjson" >"$TMP_DIR/lossy.ndjson"
-printf 'original_lines=%s\n' "$(wc -l <"$TMP_DIR/frames.ndjson")"
-printf 'lossy_lines=%s\n' "$(wc -l <"$TMP_DIR/lossy.ndjson")"
+show_command "jq 'drop the data frame where seq == 3' $TMP_DIR/frames.ndjson > $TMP_DIR/lossy.ndjson"
+jq -c 'select((has("seq") | not) or .seq != 3)' \
+    "$TMP_DIR/frames.ndjson" >"$TMP_DIR/lossy.ndjson"
+ORIGINAL_LINES="$(wc -l <"$TMP_DIR/frames.ndjson")"
+LOSSY_LINES="$(wc -l <"$TMP_DIR/lossy.ndjson")"
+printf 'original_lines=%s\n' "$ORIGINAL_LINES"
+printf 'lossy_lines=%s\n' "$LOSSY_LINES"
+if [[ $((ORIGINAL_LINES - LOSSY_LINES)) -ne 1 ]]; then
+    echo "error: expected lossy stream to remove exactly one frame" >&2
+    exit 1
+fi
 note "We removed exactly one audio frame but kept the handshake intact."
 
 pause_demo
@@ -276,6 +255,10 @@ FAIL_CLOSED_RC=$?
 set -e
 printf 'exit_code=%s\n' "$FAIL_CLOSED_RC"
 cat "$TMP_DIR/fail_closed.err"
+if [[ "$FAIL_CLOSED_RC" -eq 0 ]]; then
+    echo "error: fail_closed unexpectedly accepted a damaged stream" >&2
+    exit 1
+fi
 warn "Any missing or corrupt frame aborts decode in fail_closed mode."
 
 pause_demo
@@ -342,4 +325,4 @@ printf '%s\n' \
     "$TMP_DIR/lossy.ndjson" \
     "$TMP_DIR/restored.wav" \
     "$TMP_DIR/skip_missing.wav"
-note "The temp directory stays alive until the script exits."
+note "It is preserved after exit for inspection; no cleanup is performed."

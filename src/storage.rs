@@ -6409,9 +6409,8 @@ mod tests {
 
     #[test]
     fn migration_v2_preserves_custom_index_during_column_addition() {
-        // The recreate_table_with_added_column function captures and
-        // recreates indexes during table rebuild. This verifies that
-        // a pre-existing custom index survives the v2 migration.
+        // v2 adds the missing columns to a legacy runs table. This verifies
+        // that a pre-existing custom index survives that migration path.
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("idx_preserve.sqlite3");
 
@@ -6460,14 +6459,13 @@ mod tests {
         drop(conn);
 
         // Open with RunStore → triggers migration v1→v2→v3.
-        // v2 calls ensure_column_exists which rebuilds the table twice.
         let store = RunStore::open(&db_path).expect("open should migrate");
         assert_eq!(
             store.current_schema_version().expect("version"),
             RunStore::SCHEMA_VERSION
         );
 
-        // Verify custom index survived the table rebuilds.
+        // Verify the custom index survived the column-add migration.
         let rows = store
             .connection
             .query(
@@ -6478,7 +6476,7 @@ mod tests {
         assert_eq!(
             rows.len(),
             1,
-            "custom index should survive table rebuild during migration"
+            "custom index should survive column-add migration"
         );
 
         // Also verify the new columns exist.
@@ -7038,10 +7036,10 @@ mod tests {
 
     #[test]
     fn set_schema_version_inserts_when_key_missing() {
-        // set_schema_version has an INSERT fallback when UPDATE affects 0 rows
-        // (i.e., when the schema_version key doesn't yet exist in _meta).
-        // The existing test (set_schema_version_overwrites_existing_value) only
-        // tests the UPDATE path; this tests the INSERT fallback.
+        // set_schema_version uses INSERT OR REPLACE, so it must create the
+        // schema_version row when it does not yet exist.
+        // The existing test (set_schema_version_overwrites_existing_value)
+        // covers replacement; this one covers initial insertion.
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("ver_insert.sqlite3");
 
@@ -7083,8 +7081,8 @@ mod tests {
         assert!(rows.is_empty(), "should have no schema_version row yet");
         drop(conn);
 
-        // Open with RunStore — this triggers set_schema_version via run_migrations,
-        // hitting the INSERT fallback since the key doesn't exist.
+        // Open with RunStore — this triggers set_schema_version via run_migrations
+        // and should materialize the missing schema_version row.
         let store = RunStore::open(&db_path).expect("open");
         let version = store.current_schema_version().expect("version");
         assert_eq!(
@@ -7131,7 +7129,7 @@ mod tests {
 
     #[test]
     fn recreate_table_with_added_column_empty_columns_returns_error() {
-        // Exercises the guard at lines 593-597:
+        // Exercises the guard in recreate_table_with_added_column:
         //   if existing_columns.is_empty() {
         //       return Err(FwError::Storage("cannot rebuild table ... no discovered columns"));
         //   }
@@ -7197,11 +7195,10 @@ mod tests {
 
     #[test]
     fn ensure_column_exists_on_nonexistent_table_returns_error() {
-        // When called with a table that doesn't exist, table_columns returns
-        // empty, the column is not found, and recreate_table_with_added_column
-        // is called with empty columns — hitting the "no discovered columns"
-        // error guard at lines 593-597, wrapped by the rebuild error format
-        // at line 542-544.
+        // When called with a table that doesn't exist, ensure_column_exists now
+        // reaches ALTER TABLE and should surface a clear add-column failure.
+        // The exact storage message can vary by backend, so keep the assertion
+        // broad but ensure it still explains the add-column failure.
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("no_table.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
@@ -7212,7 +7209,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("no discovered columns") || msg.contains("failed to add column"),
-            "error should mention rebuild failure: {msg}"
+            "error should mention add-column failure: {msg}"
         );
     }
 }
