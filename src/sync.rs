@@ -382,6 +382,7 @@ pub struct IncrementalExportManifest {
 }
 
 const CURSOR_FILENAME: &str = "sync_cursor.json";
+const EMPTY_INCREMENTAL_CURSOR_TS: &str = "";
 
 /// Perform an incremental export: only records whose `(finished_at, id)` tuple
 /// is strictly greater than the cursor position are emitted. When no cursor
@@ -446,7 +447,7 @@ fn export_incremental_inner(
             None => cursor_used
                 .as_ref()
                 .map(|c| (c.last_export_rfc3339.clone(), c.last_export_run_id.clone()))
-                .unwrap_or_else(|| (Utc::now().to_rfc3339(), None)),
+                .unwrap_or_else(|| (EMPTY_INCREMENTAL_CURSOR_TS.to_owned(), None)),
         };
 
     let cursor_after = SyncCursor {
@@ -7377,8 +7378,49 @@ mod tests {
         assert_eq!(manifest.row_counts.segments, 0);
         assert_eq!(manifest.row_counts.events, 0);
         assert!(manifest.cursor_used.is_none());
+        assert_eq!(
+            manifest.cursor_after.last_export_rfc3339,
+            EMPTY_INCREMENTAL_CURSOR_TS
+        );
+        assert!(manifest.cursor_after.last_export_run_id.is_none());
         // Cursor file should exist after export.
         assert!(state_root.join(CURSOR_FILENAME).exists());
+    }
+
+    #[test]
+    fn incremental_export_empty_db_does_not_skip_later_backfilled_run() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("incr_empty_then_backfill.sqlite3");
+        let state_root = dir.path().join("state");
+        let export_dir_1 = dir.path().join("export1");
+        let export_dir_2 = dir.path().join("export2");
+
+        let store = RunStore::open(&db_path).expect("store open");
+
+        let first_manifest =
+            export_incremental(&db_path, &export_dir_1, &state_root).expect("first export");
+        assert_eq!(first_manifest.row_counts.runs, 0);
+        assert_eq!(
+            first_manifest.cursor_after.last_export_rfc3339,
+            EMPTY_INCREMENTAL_CURSOR_TS
+        );
+
+        let mut report = fixture_report("backfilled-run", &db_path);
+        report.finished_at_rfc3339 = "2024-01-01T00:00:05Z".to_owned();
+        store.persist_report(&report).expect("persist backfilled run");
+
+        let second_manifest =
+            export_incremental(&db_path, &export_dir_2, &state_root).expect("second export");
+        assert_eq!(
+            second_manifest.row_counts.runs, 1,
+            "a later run with an older finished_at must still be exported after an empty initial export"
+        );
+
+        let runs = fs::read_to_string(export_dir_2.join("runs.jsonl")).expect("read runs");
+        let lines: Vec<&str> = runs.lines().filter(|line| !line.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1);
+        let run_obj: serde_json::Value = serde_json::from_str(lines[0]).expect("parse run");
+        assert_eq!(run_obj["id"].as_str().unwrap(), "backfilled-run");
     }
 
     #[test]
