@@ -204,6 +204,9 @@ pub struct DecodeReport {
     pub duplicates: Vec<u64>,
     pub integrity_failures: Vec<u64>,
     pub dropped_frames: Vec<u64>,
+    /// Highest contiguous successfully decoded data-frame sequence starting
+    /// from seq 0. This is the correct value to surface in ACK frames.
+    pub highest_contiguous_seq: Option<u64>,
     pub recovery_policy: DecodeRecoveryPolicy,
 }
 
@@ -330,6 +333,8 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
     let mut dropped_frames = Vec::new();
     let mut raw = Vec::new();
     let mut seen = HashSet::new();
+    let mut highest_contiguous_seq = None;
+    let mut contiguous_prefix_intact = true;
 
     let mut expected_seq = 0u64;
 
@@ -360,6 +365,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
                     expected_seq, frame.seq
                 )));
             }
+            contiguous_prefix_intact = false;
             expected_seq = frame.seq;
         }
         if frame.seq < expected_seq {
@@ -385,6 +391,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
                 if policy == DecodeRecoveryPolicy::FailClosed {
                     return Err(error);
                 }
+                contiguous_prefix_intact = false;
                 expected_seq = frame.seq + 1;
                 seen.insert(frame.seq);
                 continue;
@@ -398,6 +405,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
                 if policy == DecodeRecoveryPolicy::FailClosed {
                     return Err(error);
                 }
+                contiguous_prefix_intact = false;
                 expected_seq = frame.seq + 1;
                 seen.insert(frame.seq);
                 continue;
@@ -416,6 +424,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
                         frame.seq, expected_crc, actual_crc
                     )));
                 }
+                contiguous_prefix_intact = false;
                 expected_seq = frame.seq + 1;
                 seen.insert(frame.seq);
                 continue;
@@ -432,6 +441,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
                         frame.seq, expected_sha, actual_sha
                     )));
                 }
+                contiguous_prefix_intact = false;
                 expected_seq = frame.seq + 1;
                 seen.insert(frame.seq);
                 continue;
@@ -440,6 +450,9 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
 
         raw.extend_from_slice(&decoded);
         seen.insert(frame.seq);
+        if contiguous_prefix_intact {
+            highest_contiguous_seq = Some(frame.seq);
+        }
         expected_seq = frame.seq + 1;
     }
 
@@ -449,6 +462,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
         duplicates,
         integrity_failures,
         dropped_frames,
+        highest_contiguous_seq,
         recovery_policy: policy,
     };
 
@@ -496,9 +510,15 @@ pub fn emit_retransmit_loop_from_reader<R: Read, W: Write>(
     rounds: u32,
     writer: &mut W,
 ) -> FwResult<()> {
-    let plan = retransmit_plan_from_reader(reader, policy)?;
+    let (report, _raw) = decode_frames_to_raw_with_policy(reader, policy)?;
+    let plan = retransmit_plan_from_report(&report);
     if plan.requested_sequences.is_empty() {
-        return emit_control_frame_to_writer(writer, &TtyControlFrame::Ack { up_to_seq: 0 });
+        return emit_control_frame_to_writer(
+            writer,
+            &TtyControlFrame::Ack {
+                up_to_seq: report.highest_contiguous_seq.unwrap_or(0),
+            },
+        );
     }
 
     let bounded_rounds = rounds.max(1);
@@ -2113,6 +2133,7 @@ mod tests {
             duplicates: vec![],
             integrity_failures: vec![],
             dropped_frames: vec![],
+            highest_contiguous_seq: None,
             recovery_policy: DecodeRecoveryPolicy::SkipMissing,
         };
 
@@ -2128,6 +2149,7 @@ mod tests {
             duplicates: vec![],
             integrity_failures: vec![],
             dropped_frames: vec![],
+            highest_contiguous_seq: Some(2),
             recovery_policy: DecodeRecoveryPolicy::FailClosed,
         };
 
@@ -2299,7 +2321,7 @@ mod tests {
 
         let lines = String::from_utf8(out).expect("utf8");
         let parsed: TtyControlFrame = serde_json::from_str(lines.trim()).expect("control frame");
-        assert!(matches!(parsed, TtyControlFrame::Ack { up_to_seq: 0 }));
+        assert!(matches!(parsed, TtyControlFrame::Ack { up_to_seq: 1 }));
     }
 
     #[test]
@@ -2319,6 +2341,7 @@ mod tests {
             duplicates: vec![2],
             integrity_failures: vec![6, 7],
             dropped_frames: vec![2, 6, 7],
+            highest_contiguous_seq: Some(0),
             recovery_policy: DecodeRecoveryPolicy::SkipMissing,
         };
 
@@ -2385,6 +2408,7 @@ mod tests {
             duplicates: vec![5, 5],
             integrity_failures: vec![7],
             dropped_frames: vec![5, 7],
+            highest_contiguous_seq: Some(1),
             recovery_policy: DecodeRecoveryPolicy::SkipMissing,
         };
         assert_eq!(report.frames_decoded, 10);

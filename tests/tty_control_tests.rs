@@ -528,6 +528,7 @@ fn retransmit_candidates_from_gaps() {
         duplicates: vec![],
         integrity_failures: vec![],
         dropped_frames: vec![],
+        highest_contiguous_seq: None,
         recovery_policy: DecodeRecoveryPolicy::SkipMissing,
     };
     let candidates = retransmit_candidates(&report);
@@ -542,6 +543,7 @@ fn retransmit_candidates_empty_when_no_gaps() {
         duplicates: vec![],
         integrity_failures: vec![],
         dropped_frames: vec![],
+        highest_contiguous_seq: Some(4),
         recovery_policy: DecodeRecoveryPolicy::FailClosed,
     };
     assert!(retransmit_candidates(&report).is_empty());
@@ -558,6 +560,7 @@ fn retransmit_plan_merges_gaps_and_integrity_failures() {
         duplicates: vec![],
         integrity_failures: vec![7, 8],
         dropped_frames: vec![7, 8],
+        highest_contiguous_seq: Some(1),
         recovery_policy: DecodeRecoveryPolicy::SkipMissing,
     };
     let plan = retransmit_plan_from_report(&report);
@@ -590,6 +593,7 @@ fn retransmit_plan_empty_when_no_issues() {
         duplicates: vec![],
         integrity_failures: vec![],
         dropped_frames: vec![],
+        highest_contiguous_seq: Some(2),
         recovery_policy: DecodeRecoveryPolicy::SkipMissing,
     };
     let plan = retransmit_plan_from_report(&report);
@@ -666,7 +670,7 @@ fn emit_retransmit_loop_emits_ack_when_no_missing() {
     let text = String::from_utf8(out).expect("utf8");
     let parsed: TtyControlFrame = serde_json::from_str(text.trim()).expect("json");
     match parsed {
-        TtyControlFrame::Ack { up_to_seq } => assert_eq!(up_to_seq, 0),
+        TtyControlFrame::Ack { up_to_seq } => assert_eq!(up_to_seq, 1),
         other => panic!("expected Ack, got {other:?}"),
     }
 }

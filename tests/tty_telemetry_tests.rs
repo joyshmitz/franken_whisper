@@ -329,6 +329,7 @@ fn missing_frame_detection_generates_retransmit_candidates() {
         duplicates: vec![],
         integrity_failures: vec![],
         dropped_frames: vec![],
+        highest_contiguous_seq: Some(1),
         recovery_policy: DecodeRecoveryPolicy::SkipMissing,
     };
     let candidates = retransmit_candidates(&report);
@@ -648,6 +649,7 @@ fn retransmit_plan_telemetry_counters_match_report() {
         duplicates: vec![5],
         integrity_failures: vec![6],
         dropped_frames: vec![5, 6],
+        highest_contiguous_seq: Some(1),
         recovery_policy: DecodeRecoveryPolicy::SkipMissing,
     };
 
@@ -767,7 +769,7 @@ fn emit_retransmit_loop_ack_when_no_issues() {
     let text = String::from_utf8(out).expect("utf8");
     let parsed: TtyControlFrame = serde_json::from_str(text.trim()).expect("json");
     match parsed {
-        TtyControlFrame::Ack { up_to_seq } => assert_eq!(up_to_seq, 0),
+        TtyControlFrame::Ack { up_to_seq } => assert_eq!(up_to_seq, 2),
         other => panic!("expected Ack, got {other:?}"),
     }
 }
@@ -783,6 +785,7 @@ fn retransmit_plan_ranges_are_collapsed_correctly() {
         duplicates: vec![],
         integrity_failures: vec![8],
         dropped_frames: vec![8],
+        highest_contiguous_seq: Some(0),
         recovery_policy: DecodeRecoveryPolicy::SkipMissing,
     };
 
