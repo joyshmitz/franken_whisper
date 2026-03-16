@@ -641,7 +641,6 @@ CREATE TABLE IF NOT EXISTS _meta (
                     ))),
                 };
             }
-            journal_mode_restored = true;
         }
 
         add_result?;
