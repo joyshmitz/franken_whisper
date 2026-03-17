@@ -491,25 +491,54 @@ pub fn check_ffmpeg() -> DependencyCheck {
 #[must_use]
 pub fn check_database(db_path: &Path) -> DependencyCheck {
     let mut issues = Vec::new();
-    let parent_exists = db_path
-        .parent()
-        .map(|p| p.exists() || p == Path::new(""))
-        .unwrap_or(false);
+    let parent_path = db_path.parent().unwrap_or_else(|| Path::new(""));
+    let parent_exists = parent_path.exists() || parent_path == Path::new("");
     if !parent_exists {
         issues.push(format!(
             "database parent directory does not exist: {}",
-            db_path
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default()
+            parent_path.display()
         ));
     }
-    let db_exists = db_path.exists();
-    if !db_exists && parent_exists {
-        // Database file does not exist yet, but parent is accessible --
-        // this is fine, it will be created on first use.
+    if parent_exists && parent_path != Path::new("") {
+        match std::fs::metadata(parent_path) {
+            Ok(metadata) if metadata.permissions().readonly() => {
+                issues.push(format!(
+                    "database parent directory is not writable: {}",
+                    parent_path.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                issues.push(format!(
+                    "failed to inspect database parent directory {}: {error}",
+                    parent_path.display()
+                ));
+            }
+        }
     }
-    let available = parent_exists;
+
+    if db_path.exists() {
+        match std::fs::metadata(db_path) {
+            Ok(metadata) if metadata.is_dir() => {
+                issues.push(format!(
+                    "database path is a directory, not a file: {}",
+                    db_path.display()
+                ));
+            }
+            Ok(metadata) if metadata.permissions().readonly() => {
+                issues.push(format!("database file is not writable: {}", db_path.display()));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                issues.push(format!(
+                    "failed to inspect database path {}: {error}",
+                    db_path.display()
+                ));
+            }
+        }
+    }
+
+    let available = issues.is_empty();
     DependencyCheck {
         name: "database".to_owned(),
         available,
@@ -1216,9 +1245,11 @@ mod tests {
             .expect("events should be object");
 
         for (event_type, spec) in events {
-            let required = spec["required"]
-                .as_array()
-                .unwrap_or_else(|| panic!("{event_type} should have required array"));
+            assert!(
+                spec["required"].is_array(),
+                "{event_type} should have required array"
+            );
+            let required = spec["required"].as_array().expect("required array");
             let example = &spec["example"];
 
             for field in required {
@@ -3535,6 +3566,49 @@ mod tests {
         assert!(
             check.available,
             "relative path with empty parent should be ok"
+        );
+    }
+
+    #[test]
+    fn check_database_existing_directory_is_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let check = super::check_database(dir.path());
+        assert!(
+            !check.available,
+            "directory path should not be treated as a writable database file"
+        );
+        assert!(
+            check.issues
+                .iter()
+                .any(|issue| issue.contains("directory, not a file")),
+            "issue should mention directory path: {:?}",
+            check.issues
+        );
+    }
+
+    #[test]
+    fn check_database_read_only_file_is_unavailable() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("readonly.sqlite3");
+        fs::write(&db_path, "").expect("create db placeholder");
+
+        let mut perms = fs::metadata(&db_path).expect("metadata").permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&db_path, perms).expect("set readonly");
+
+        let check = super::check_database(&db_path);
+        assert!(
+            !check.available,
+            "read-only database file should not be reported as writable"
+        );
+        assert!(
+            check.issues
+                .iter()
+                .any(|issue| issue.contains("database file is not writable")),
+            "issue should mention unwritable file: {:?}",
+            check.issues
         );
     }
 
