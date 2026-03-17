@@ -11,7 +11,7 @@ use franken_whisper::robot::{
     build_health_report, emit_health_report, emit_robot_complete, emit_robot_error,
     emit_robot_stage, emit_robot_start, robot_schema_value, routing_decision_value,
 };
-use franken_whisper::storage::RunStore;
+use franken_whisper::storage::{RunStore, StoredRunDetails};
 use franken_whisper::tty_audio;
 use franken_whisper::{FrankenWhisperEngine, FwError, FwResult};
 
@@ -108,18 +108,8 @@ fn run() -> FwResult<()> {
             }
             RobotCommand::RoutingHistory(args) => {
                 let store = RunStore::open(&args.db)?;
-                let details_list = if let Some(run_id) = &args.run_id {
-                    store
-                        .load_run_details(run_id)?
-                        .into_iter()
-                        .collect::<Vec<_>>()
-                } else {
-                    let summaries = store.list_recent_runs(args.limit)?;
-                    summaries
-                        .iter()
-                        .filter_map(|s| store.load_run_details(&s.run_id).ok().flatten())
-                        .collect()
-                };
+                let details_list =
+                    load_routing_history_details(&store, args.run_id.as_deref(), args.limit)?;
 
                 for details in details_list {
                     for event in &details.events {
@@ -292,6 +282,29 @@ fn run() -> FwResult<()> {
     }
 }
 
+fn load_routing_history_details(
+    store: &RunStore,
+    run_id: Option<&str>,
+    limit: usize,
+) -> FwResult<Vec<StoredRunDetails>> {
+    if let Some(run_id) = run_id {
+        return Ok(store.load_run_details(run_id)?.into_iter().collect());
+    }
+
+    let summaries = store.list_recent_runs(limit)?;
+    summaries
+        .iter()
+        .map(|summary| {
+            store.load_run_details(&summary.run_id)?.ok_or_else(|| {
+                FwError::Storage(format!(
+                    "run `{}` disappeared while loading routing history",
+                    summary.run_id
+                ))
+            })
+        })
+        .collect()
+}
+
 fn backends_command_output() -> FwResult<String> {
     let report = build_backends_report();
     Ok(serde_json::to_string(&backends_discovery_value(&report))?)
@@ -331,7 +344,55 @@ fn send_control_frame(kind: ControlFrameKind) -> FwResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::backends_command_output;
+    use std::path::{Path, PathBuf};
+
+    use serde_json::json;
+
+    use super::{backends_command_output, load_routing_history_details};
+    use franken_whisper::model::{
+        BackendKind, BackendParams, InputSource, RunReport, TranscribeRequest,
+        TranscriptionResult,
+    };
+    use franken_whisper::storage::RunStore;
+    use tempfile::tempdir;
+
+    fn fixture_report(run_id: &str, db_path: &Path) -> RunReport {
+        RunReport {
+            run_id: run_id.to_owned(),
+            trace_id: format!("trace-{run_id}"),
+            started_at_rfc3339: "2026-02-22T00:00:00Z".to_owned(),
+            finished_at_rfc3339: "2026-02-22T00:00:01Z".to_owned(),
+            input_path: "input.wav".to_owned(),
+            normalized_wav_path: "normalized.wav".to_owned(),
+            request: TranscribeRequest {
+                input: InputSource::File {
+                    path: PathBuf::from("input.wav"),
+                },
+                backend: BackendKind::Auto,
+                model: None,
+                language: Some("en".to_owned()),
+                translate: false,
+                diarize: false,
+                persist: true,
+                db_path: db_path.to_path_buf(),
+                timeout_ms: None,
+                backend_params: BackendParams::default(),
+            },
+            result: TranscriptionResult {
+                backend: BackendKind::WhisperCpp,
+                transcript: "test transcript".to_owned(),
+                language: Some("en".to_owned()),
+                segments: vec![],
+                acceleration: None,
+                raw_output: json!({}),
+                artifact_paths: vec![],
+            },
+            events: vec![],
+            warnings: vec![],
+            evidence: vec![],
+            replay: franken_whisper::model::ReplayEnvelope::default(),
+        }
+    }
 
     #[test]
     fn backends_command_output_matches_robot_contract() {
@@ -345,5 +406,52 @@ mod tests {
             franken_whisper::robot::ROBOT_SCHEMA_VERSION
         );
         assert!(parsed["backends"].is_array());
+    }
+
+    #[test]
+    fn load_routing_history_details_returns_specific_run_when_present() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("routing_history_specific.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+        let report = fixture_report("routing-run", &db_path);
+        store.persist_report(&report).expect("persist");
+
+        let details =
+            load_routing_history_details(&store, Some("routing-run"), 10).expect("load details");
+        assert_eq!(details.len(), 1, "specific run should yield one record");
+        assert_eq!(details[0].run_id, "routing-run");
+    }
+
+    #[test]
+    fn load_routing_history_details_propagates_corrupt_run_errors() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("routing_history_corrupt.sqlite3");
+        let store = RunStore::open(&db_path).expect("store");
+
+        let older = fixture_report("routing-good", &db_path);
+        let mut newer = fixture_report("routing-bad", &db_path);
+        newer.started_at_rfc3339 = "2026-02-22T00:00:02Z".to_owned();
+        newer.finished_at_rfc3339 = "2026-02-22T00:00:03Z".to_owned();
+
+        store.persist_report(&older).expect("persist good");
+        store.persist_report(&newer).expect("persist bad");
+
+        let connection = fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
+        connection
+            .execute_with_params(
+                "UPDATE runs SET result_json = ?1 WHERE id = ?2",
+                &[
+                    fsqlite_types::value::SqliteValue::Text("not valid json".to_owned()),
+                    fsqlite_types::value::SqliteValue::Text("routing-bad".to_owned()),
+                ],
+            )
+            .expect("corrupt result_json");
+
+        let error = load_routing_history_details(&store, None, 10)
+            .expect_err("corrupt run should surface an error");
+        assert!(
+            error.to_string().contains("invalid result_json"),
+            "error should expose the corrupt run details: {error}"
+        );
     }
 }
