@@ -610,8 +610,8 @@ fn telemetry_counters_combined_gap_integrity_duplicate() {
         decode_frames_to_raw_with_policy(&mut reader, DecodeRecoveryPolicy::SkipMissing)
             .expect("should recover");
 
-    // Telemetry verification
-    assert_eq!(report.frames_decoded, 6);
+    // Telemetry verification: 6 input frames, but 2 dropped (integrity + dup) = 4 decoded.
+    assert_eq!(report.frames_decoded, 4);
     assert_eq!(report.gaps.len(), 1, "one gap (seq 2)");
     assert_eq!(report.gaps[0].expected, 2);
     assert_eq!(report.gaps[0].got, 3);
