@@ -333,6 +333,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
     let mut dropped_frames = Vec::new();
     let mut raw = Vec::new();
     let mut seen = HashSet::new();
+    let mut frames_decoded = 0u64;
     let mut highest_contiguous_seq = None;
     let mut contiguous_prefix_intact = true;
 
@@ -450,6 +451,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
 
         raw.extend_from_slice(&decoded);
         seen.insert(frame.seq);
+        frames_decoded += 1;
         if contiguous_prefix_intact {
             highest_contiguous_seq = Some(frame.seq);
         }
@@ -457,7 +459,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
     }
 
     let report = DecodeReport {
-        frames_decoded: frames.len() as u64,
+        frames_decoded,
         gaps,
         duplicates,
         integrity_failures,
@@ -1904,6 +1906,7 @@ mod tests {
         let (report, raw) =
             decode_frames_to_raw_with_policy(&mut reader, DecodeRecoveryPolicy::SkipMissing)
                 .expect("skip missing should recover");
+        assert_eq!(report.frames_decoded, 2);
         assert_eq!(report.integrity_failures, vec![1]);
         assert_eq!(report.dropped_frames, vec![1]);
         assert_eq!(raw, b"ok0ok2");
@@ -2576,6 +2579,7 @@ mod tests {
         let (report, raw) =
             decode_frames_to_raw_with_policy(&mut reader, DecodeRecoveryPolicy::SkipMissing)
                 .expect("skip-missing should recover from duplicates");
+        assert_eq!(report.frames_decoded, 3);
         assert_eq!(report.duplicates, vec![1]);
         assert_eq!(report.dropped_frames, vec![1]);
         assert_eq!(raw, b"firstsecondthird");
@@ -2619,6 +2623,7 @@ mod tests {
         let (report, raw) =
             decode_frames_to_raw_with_policy(&mut reader, DecodeRecoveryPolicy::SkipMissing)
                 .expect("skip-missing should recover from bad base64");
+        assert_eq!(report.frames_decoded, 2);
         assert_eq!(report.integrity_failures, vec![1]);
         assert_eq!(report.dropped_frames, vec![1]);
         assert_eq!(raw, b"okalso-ok");

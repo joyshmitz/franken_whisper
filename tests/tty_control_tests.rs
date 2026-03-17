@@ -408,6 +408,7 @@ fn decode_skip_missing_drops_corrupt_frame() {
     let (report, raw) =
         decode_frames_to_raw_with_policy(&mut reader, DecodeRecoveryPolicy::SkipMissing)
             .expect("skip missing should recover");
+    assert_eq!(report.frames_decoded, 2);
     assert_eq!(report.integrity_failures, vec![1]);
     assert_eq!(report.dropped_frames, vec![1]);
     assert_eq!(raw, b"ok0ok2");

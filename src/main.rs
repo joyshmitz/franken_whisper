@@ -6,12 +6,12 @@ use franken_whisper::cli::{
     Cli, Command, ControlFrameKind, RobotCommand, RunsOutputFormat, ShutdownController,
     SyncCommand, TtyAudioCommand, TtyAudioControlCommand,
 };
+use franken_whisper::model::StoredRunDetails;
 use franken_whisper::robot::{
     acceleration_context_from_evidence, backends_discovery_value, build_backends_report,
     build_health_report, emit_health_report, emit_robot_complete, emit_robot_error,
     emit_robot_stage, emit_robot_start, robot_schema_value, routing_decision_value,
 };
-use franken_whisper::model::StoredRunDetails;
 use franken_whisper::storage::RunStore;
 use franken_whisper::tty_audio;
 use franken_whisper::{FrankenWhisperEngine, FwError, FwResult};
@@ -351,8 +351,7 @@ mod tests {
 
     use super::{backends_command_output, load_routing_history_details};
     use franken_whisper::model::{
-        BackendKind, BackendParams, InputSource, RunReport, TranscribeRequest,
-        TranscriptionResult,
+        BackendKind, BackendParams, InputSource, RunReport, TranscribeRequest, TranscriptionResult,
     };
     use franken_whisper::storage::RunStore;
     use tempfile::tempdir;

@@ -7407,7 +7407,9 @@ mod tests {
 
         let mut report = fixture_report("backfilled-run", &db_path);
         report.finished_at_rfc3339 = "2024-01-01T00:00:05Z".to_owned();
-        store.persist_report(&report).expect("persist backfilled run");
+        store
+            .persist_report(&report)
+            .expect("persist backfilled run");
 
         let second_manifest =
             export_incremental(&db_path, &export_dir_2, &state_root).expect("second export");
@@ -7417,7 +7419,10 @@ mod tests {
         );
 
         let runs = fs::read_to_string(export_dir_2.join("runs.jsonl")).expect("read runs");
-        let lines: Vec<&str> = runs.lines().filter(|line| !line.trim().is_empty()).collect();
+        let lines: Vec<&str> = runs
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
         assert_eq!(lines.len(), 1);
         let run_obj: serde_json::Value = serde_json::from_str(lines[0]).expect("parse run");
         assert_eq!(run_obj["id"].as_str().unwrap(), "backfilled-run");

@@ -295,8 +295,8 @@ fn schema_has_expected_event_types() {
 
     assert_eq!(
         events.len(),
-        11,
-        "schema must define exactly 11 event types, found {}",
+        12,
+        "schema must define exactly 12 event types, found {}",
         events.len()
     );
 
@@ -307,6 +307,7 @@ fn schema_has_expected_event_types() {
         "run_complete",
         "run_error",
         "backends.discovery",
+        "routing_decision",
         "transcript.partial",
         "transcript.confirm",
         "transcript.retract",

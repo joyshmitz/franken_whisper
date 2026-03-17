@@ -2076,6 +2076,10 @@ fn transcribe_file_input_uses_state_dir_provisioned_ffmpeg_when_path_is_missing(
         &[
             ("PATH", ""),
             ("FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG", "0"),
+            // Force the ffmpeg normalizer so the provisioned stub is actually
+            // invoked. Without this, the built-in symphonia decoder handles
+            // WAV files natively and ffmpeg is never called.
+            ("FRANKEN_WHISPER_FORCE_FFMPEG_NORMALIZE", "1"),
             ("FRANKEN_WHISPER_TEST_FFMPEG_MARKER", ffmpeg_marker_env),
             ("FRANKEN_WHISPER_TEST_FFPROBE_MARKER", ffprobe_marker_env),
         ],

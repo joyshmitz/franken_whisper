@@ -1094,6 +1094,10 @@ fn duplicate_frame_in_skip_missing_mode_drops_and_records() {
         decode_frames_to_raw_with_policy(&mut reader, DecodeRecoveryPolicy::SkipMissing)
             .expect("should recover");
 
+    assert_eq!(
+        report.frames_decoded, 3,
+        "only successfully decoded frames count"
+    );
     assert_eq!(report.duplicates, vec![1]);
     assert_eq!(report.dropped_frames, vec![1]);
     assert_eq!(raw, b"ok-0ok-1ok-2");
@@ -1125,7 +1129,10 @@ fn end_to_end_mixed_anomalies_skip_missing() {
             .expect("should recover from mixed anomalies");
 
     // Verify telemetry
-    assert_eq!(report.frames_decoded, 5, "5 audio frames in input");
+    assert_eq!(
+        report.frames_decoded, 4,
+        "only intact frames should count as decoded"
+    );
     assert_eq!(report.gaps.len(), 1, "gap at seq 2");
     assert_eq!(report.gaps[0].expected, 2);
     assert_eq!(report.gaps[0].got, 3);

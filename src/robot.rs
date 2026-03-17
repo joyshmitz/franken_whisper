@@ -526,7 +526,10 @@ pub fn check_database(db_path: &Path) -> DependencyCheck {
                 ));
             }
             Ok(metadata) if metadata.permissions().readonly() => {
-                issues.push(format!("database file is not writable: {}", db_path.display()));
+                issues.push(format!(
+                    "database file is not writable: {}",
+                    db_path.display()
+                ));
             }
             Ok(_) => {}
             Err(error) => {
@@ -3578,7 +3581,8 @@ mod tests {
             "directory path should not be treated as a writable database file"
         );
         assert!(
-            check.issues
+            check
+                .issues
                 .iter()
                 .any(|issue| issue.contains("directory, not a file")),
             "issue should mention directory path: {:?}",
@@ -3604,7 +3608,8 @@ mod tests {
             "read-only database file should not be reported as writable"
         );
         assert!(
-            check.issues
+            check
+                .issues
                 .iter()
                 .any(|issue| issue.contains("database file is not writable")),
             "issue should mention unwritable file: {:?}",
