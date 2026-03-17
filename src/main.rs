@@ -11,7 +11,8 @@ use franken_whisper::robot::{
     build_health_report, emit_health_report, emit_robot_complete, emit_robot_error,
     emit_robot_stage, emit_robot_start, robot_schema_value, routing_decision_value,
 };
-use franken_whisper::storage::{RunStore, StoredRunDetails};
+use franken_whisper::model::StoredRunDetails;
+use franken_whisper::storage::RunStore;
 use franken_whisper::tty_audio;
 use franken_whisper::{FrankenWhisperEngine, FwError, FwResult};
 
