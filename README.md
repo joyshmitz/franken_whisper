@@ -141,30 +141,30 @@ franken_whisper can transcribe MP3, AAC, FLAC, WAV, OGG, and other common audio 
 The whisper ecosystem has dozens of tools. This diagram shows where franken_whisper fits:
 
 ```
-                +----------------------------------------------------------+
-                |              INFERENCE ENGINES (run models)               |
-                |                                                          |
-                |  whisper.cpp (C++, CPU/Metal/CUDA, ~47k stars)           |
-                |  faster-whisper (Python/CTranslate2, ~14k stars)         |
-                |  OpenAI Whisper (Python/PyTorch, ~95k stars)             |
-                +----------------------------+-----------------------------+
-                                             |
-                +----------------------------v-----------------------------+
-                |         ENHANCED PIPELINES (add features on top)         |
-                |                                                          |
-                |  WhisperX (faster-whisper + wav2vec2 + pyannote)         |
-                |  whisper-diarization (Whisper + Demucs + TitaNet)        |
-                |  insanely-fast-whisper (HF Transformers, max GPU)        |
-                |  whisper-timestamped (DTW word timestamps)               |
-                +----------------------------+-----------------------------+
-                                             |
-                +----------------------------v-----------------------------+
-                |  ORCHESTRATION (manage multiple engines/pipelines)        |
-                |                                                          |
-                |  > franken_whisper < (Rust, Bayesian routing,            |
-                |    10-stage pipeline, speculative streaming,              |
-                |    conformance validation, evidence-based decisions)      |
-                +----------------------------------------------------------+
+          +--------------------------------------------------------------+
+          |            INFERENCE ENGINES (run models)                    |
+          |                                                              |
+          | whisper.cpp (C++, CPU/Metal/CUDA, ~47k stars)                |
+          | faster-whisper (Python/CTranslate2, ~14k stars)              |
+          | OpenAI Whisper (Python/PyTorch, ~95k stars)                  |
+          +--------------------------------------------------------------+
+                                         |
+          +------------------------------v-------------------------------+
+          |     ENHANCED PIPELINES (add features on top)                 |
+          |                                                              |
+          | WhisperX (faster-whisper + wav2vec2 + pyannote)              |
+          | whisper-diarization (Whisper + Demucs + TitaNet)             |
+          | insanely-fast-whisper (HF Transformers, max GPU)             |
+          | whisper-timestamped (DTW word timestamps)                    |
+          +--------------------------------------------------------------+
+                                         |
+          +------------------------------v-------------------------------+
+          | ORCHESTRATION (manage engines/pipelines)                     |
+          |                                                              |
+          | > franken_whisper < (Rust, Bayesian routing,                 |
+          |   10-stage pipeline, speculative streaming,                  |
+          |   conformance validation, evidence-based decisions)          |
+          +--------------------------------------------------------------+
 ```
 
 Most tools in the ecosystem occupy one level. franken_whisper occupies the orchestration level: it wraps inference engines and enhanced pipelines behind a unified interface, then adds capabilities that none of them provide individually.
@@ -685,44 +685,44 @@ Native Rust engine replacements follow a staged rollout:
 ## Architecture
 
 ```
-                           +-------------------------+
-                           |      CLI / Robot         |
-                           |   (clap + NDJSON emit)   |
-                           +------------+------------+
-                                        |
-                           +------------v------------+
-                           |  FrankenWhisperEngine    |
-                           |   (orchestrator.rs)      |
-                           |                          |
-                           |  10-Stage Pipeline:      |
-                           |  1. Ingest               |
-                           |  2. Normalize (Rust/ffmpeg)|
-                           |  3. VAD                  |
-                           |  4. Source Separate       |
-                           |  5. Backend Execution    |
-                           |  6. Accelerate (GPU)     |
-                           |  7. Alignment            |
-                           |  8. Punctuation          |
-                           |  9. Diarization          |
-                           | 10. Persist              |
-                           +----+-------+-------+----+
-                                |       |       |
-                  +-------------v-+ +---v---+ +-v--------------+
-                  |   Backends    | | Accel | |   Storage      |
-                  |               | |       | |                |
-                  | whisper.cpp   | | frank | | fsqlite        |
-                  | insanely-fast | | torch | | (SQLite WAL)   |
-                  | whisper-diar  | | frank | |                |
-                  | native pilots | |  jax  | | JSONL export   |
-                  +---------------+ +-------+ +----------------+
+                  +------------------------------------+
+                  |       CLI / Robot                  |
+                  |   (clap + NDJSON emit)             |
+                  +------------------------------------+
+                                    |
+                  +-----------------v------------------+
+                  |   FrankenWhisperEngine             |
+                  |     (orchestrator.rs)              |
+                  |                                    |
+                  |   10-Stage Pipeline:               |
+                  |    1. Ingest                       |
+                  |    2. Normalize                    |
+                  |    3. VAD                          |
+                  |    4. Source Separate              |
+                  |    5. Backend Execution            |
+                  |    6. Accelerate (GPU)             |
+                  |    7. Alignment                    |
+                  |    8. Punctuation                  |
+                  |    9. Diarization                  |
+                  |   10. Persist                      |
+                  +------------------------------------+
+                         |       |       |
+    +------------------+  +----------+  +------------------+
+    | Backends         |  | Accel    |  | Storage          |
+    |                  |  |          |  |                  |
+    | whisper.cpp      |  | frank    |  | fsqlite          |
+    | insanely-fast    |  | torch    |  | (SQLite WAL)     |
+    | whisper-diar     |  | frank    |  |                  |
+    | native pilots    |  |  jax     |  | JSONL export     |
+    +------------------+  +----------+  +------------------+
 
-  +------------------+    +------------------+    +------------------+
-  |   TTY Audio      |    |   Conformance    |    |   Replay         |
-  |                  |    |                  |    |                  |
-  | mulaw+zlib+b64   |    | 50ms tolerance   |    | SHA-256 content  |
-  | NDJSON transport |    | cross-engine     |    | hash envelopes   |
-  | handshake/retry  |    | comparator       |    | drift detection  |
-  +------------------+    +------------------+    +------------------+
+  +------------------+   +------------------+   +------------------+
+  | TTY Audio        |   | Conformance      |   | Replay           |
+  |                  |   |                  |   |                  |
+  | mulaw+zlib+b64   |   | 50ms tolerance   |   | SHA-256 content  |
+  | NDJSON transport |   | cross-engine     |   | hash envelopes   |
+  | handshake/retry  |   | comparator       |   | drift detection  |
+  +------------------+   +------------------+   +------------------+
 ```
 
 ### Data Flow
@@ -871,14 +871,14 @@ After each run, the orchestrator emits an `orchestration.latency_profile` stage 
 Every completed run produces a `ReplayEnvelope` containing SHA-256 hashes:
 
 ```
-+----------------------------------------------+
-|              ReplayEnvelope                  |
-+----------------------------------------------+
-| input_content_hash:  SHA-256(normalized WAV) |
-| backend_identity:    "whisper-cli-v1.7.2"    |
-| backend_version:     "1.7.2"                 |
-| output_payload_hash: SHA-256(raw backend JSON)|
-+----------------------------------------------+
++-------------------------------------------------+
+|               ReplayEnvelope                    |
++-------------------------------------------------+
+| input_content_hash:  SHA-256(normalized WAV)    |
+| backend_identity:    "whisper-cli-v1.7.2"       |
+| backend_version:     "1.7.2"                    |
+| output_payload_hash: SHA-256(raw backend JSON)  |
++-------------------------------------------------+
 ```
 
 Given identical input audio and the same backend version, the output hash should be identical. If it changes between runs, something drifted.
@@ -1117,26 +1117,26 @@ The CLI thread polls the receive end of the channel every 40ms, formatting each 
 The TTY audio protocol begins with a version and codec negotiation before any audio frames flow:
 
 ```
-Encoder                                    Decoder
-   |                                          |
-   |-- Handshake {                            |
-   |     min_version: 1,                      |
-   |     max_version: 2,                      |
-   |     supported_codecs: ["mulaw+zlib+b64"] |
-   |   } -------------------------------->    |
-   |                                          |
-   |    <--------------------------------     |
-   |        HandshakeAck {                    |
-   |          negotiated_version: 1,          |
-   |          negotiated_codec: "mulaw+zlib+b64"
-   |        }                                 |
-   |                                          |
-   |-- AudioFrame { seq: 0, ... } -------->   |
-   |-- AudioFrame { seq: 1, ... } -------->   |
-   |           ...                            |
-   |-- SessionClose { last_data_seq: N } -->  |
-   |                                          |
-   |    <--- Ack { up_to_seq: N }             |
+Encoder                                         Decoder
+   |                                               |
+   |-- Handshake {                                 |
+   |     min_version: 1,                           |
+   |     max_version: 2,                           |
+   |     supported_codecs: ["mulaw+zlib+b64"]      |
+   |   } -------------------------------------->   |
+   |                                               |
+   |   <---------------------------------------    |
+   |       HandshakeAck {                          |
+   |         negotiated_version: 1,                |
+   |         negotiated_codec: "mulaw+zlib+b64"    |
+   |       }                                       |
+   |                                               |
+   |-- AudioFrame { seq: 0, ... } ------------>    |
+   |-- AudioFrame { seq: 1, ... } ------------>    |
+   |           ...                                 |
+   |-- SessionClose { last_data_seq: N } ----->    |
+   |                                               |
+   |   <--- Ack { up_to_seq: N }                   |
 ```
 
 **Version Negotiation:** The encoder advertises its supported version range. The decoder picks the highest version both support. If ranges don't overlap, the handshake fails.
@@ -2113,19 +2113,19 @@ All accumulated evidence is included in the final `RunReport.evidence` field and
 The interactive TUI (enabled with `--features tui`) provides a three-pane interface:
 
 ```
-+-------------------+-----------------------------------+
-|                   |                                   |
-|   Runs List       |   Timeline / Transcript           |
-|   (left pane)     |   (main pane)                     |
-|                   |                                   |
-|   - run-abc       |   [0.0s - 2.5s] Hello world       |
-|   - run-def       |   [2.5s - 5.1s] How are you       |
-|   > run-ghi       |   [5.1s - 7.3s] [SPK_01] Fine     |
-|                   |                                   |
-+-------------------+-----------------------------------+
-|   Event Details (bottom pane)                         |
-|   stage: backend | code: backend.ok | 4.2s            |
-+-------------------------------------------------------+
++-------------------+-------------------------------------+
+|                   |                                     |
+|   Runs List       |   Timeline / Transcript             |
+|   (left pane)     |   (main pane)                       |
+|                   |                                     |
+|   - run-abc       |   [0.0s - 2.5s] Hello world         |
+|   - run-def       |   [2.5s - 5.1s] How are you         |
+|   > run-ghi       |   [5.1s - 7.3s] [SPK_01] Fine       |
+|                   |                                     |
++-------------------+-------------------------------------+
+|   Event Details (bottom pane)                           |
+|   stage: backend | code: backend.ok | 4.2s              |
++---------------------------------------------------------+
 ```
 
 **Keyboard Bindings:**
@@ -2316,18 +2316,18 @@ Overlap detection runs before cross-engine comparison, so a backend that produce
 franken_whisper is designed with privacy as a hard constraint:
 
 ```
-+-------------------------------------------------------------+
-|                     YOUR MACHINE                             |
-|                                                              |
-|  +-----------+    +-------------+    +-----------+           |
-|  |   Input   |--->|  Pipeline   |--->|  Output   |           |
-|  +-----------+    +-------------+    +-----------+           |
-|                                                              |
-|  No network calls (inference is local)                       |
-|  No telemetry or analytics                                   |
-|  No cloud sync                                               |
-|  No API keys required (except HuggingFace for diarization)   |
-+-------------------------------------------------------------+
++----------------------------------------------------------------+
+|                        YOUR MACHINE                            |
+|                                                                |
+|  +-----------+    +-------------+    +-----------+             |
+|  |   Input   |--->|  Pipeline   |--->|  Output   |             |
+|  +-----------+    +-------------+    +-----------+             |
+|                                                                |
+|  No network calls (inference is local)                         |
+|  No telemetry or analytics                                     |
+|  No cloud sync                                                 |
+|  No API keys required (except HuggingFace for diarization)     |
++----------------------------------------------------------------+
 ```
 
 All processing happens on your hardware using local backend binaries. The only external network access is:
