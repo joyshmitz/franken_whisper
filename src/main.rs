@@ -441,8 +441,8 @@ mod tests {
             .execute_with_params(
                 "UPDATE runs SET result_json = ?1 WHERE id = ?2",
                 &[
-                    fsqlite_types::value::SqliteValue::Text("not valid json".to_owned()),
-                    fsqlite_types::value::SqliteValue::Text("routing-bad".to_owned()),
+                    fsqlite_types::value::SqliteValue::Text("not valid json".to_owned().into()),
+                    fsqlite_types::value::SqliteValue::Text("routing-bad".to_owned().into()),
                 ],
             )
             .expect("corrupt result_json");

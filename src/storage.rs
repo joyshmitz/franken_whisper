@@ -268,7 +268,7 @@ impl RunStore {
         );
         let rows = self
             .connection
-            .query_with_params(&run_sql, &[SqliteValue::Text(run_id.to_owned())])
+            .query_with_params(&run_sql, &[SqliteValue::Text(run_id.to_owned().into())])
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
         let Some(row) = rows.first() else {
@@ -309,7 +309,7 @@ impl RunStore {
             .connection
             .query_with_params(
                 "SELECT seq, ts_rfc3339, stage, code, message, payload_json FROM events WHERE run_id = ?1 ORDER BY seq ASC",
-                &[SqliteValue::Text(run_id.clone())],
+                &[SqliteValue::Text(run_id.clone().into())],
             )
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
@@ -665,7 +665,7 @@ CREATE TABLE IF NOT EXISTS _meta (
                 declared_type: value_to_string(row.get(2)),
                 not_null: value_to_i64(row.get(3)) != 0,
                 default_value: match row.get(4) {
-                    Some(SqliteValue::Text(value)) if !value.is_empty() => Some(value.clone()),
+                    Some(SqliteValue::Text(value)) if !value.is_empty() => Some(value.to_string()),
                     Some(value) => {
                         let text = value_to_string(Some(value));
                         (!text.is_empty()).then_some(text)
@@ -701,7 +701,7 @@ CREATE TABLE IF NOT EXISTS _meta (
                 let name = value_to_string(row.get(0));
                 match row.get(1) {
                     Some(SqliteValue::Text(sql)) if !name.is_empty() && !sql.is_empty() => {
-                        Some((name, sql.clone()))
+                        Some((name, sql.to_string()))
                     }
                     _ => None,
                 }
@@ -1398,12 +1398,12 @@ fn is_busy_storage_error(error: &FwError) -> bool {
 }
 
 fn text_value(value: String) -> SqliteValue {
-    SqliteValue::Text(value)
+    SqliteValue::Text(value.into())
 }
 
 fn optional_text(value: Option<&str>) -> SqliteValue {
     match value {
-        Some(text) => SqliteValue::Text(text.to_owned()),
+        Some(text) => SqliteValue::Text(text.to_owned().into()),
         None => SqliteValue::Null,
     }
 }
@@ -1417,7 +1417,7 @@ fn optional_float(value: Option<f64>) -> SqliteValue {
 
 fn value_to_string(value: Option<&SqliteValue>) -> String {
     match value {
-        Some(SqliteValue::Text(text)) => text.clone(),
+        Some(SqliteValue::Text(text)) => text.to_string(),
         Some(SqliteValue::Integer(number)) => number.to_string(),
         Some(SqliteValue::Float(number)) => number.to_string(),
         Some(SqliteValue::Blob(blob)) => format!("<blob:{}>", blob.len()),
@@ -1831,13 +1831,13 @@ mod tests {
     fn value_to_string_all_variants() {
         use super::value_to_string;
         assert_eq!(
-            value_to_string(Some(&SqliteValue::Text("hello".to_owned()))),
+            value_to_string(Some(&SqliteValue::Text("hello".to_owned().into()))),
             "hello"
         );
         assert_eq!(value_to_string(Some(&SqliteValue::Integer(42))), "42");
         assert_eq!(value_to_string(Some(&SqliteValue::Float(2.75))), "2.75");
         assert_eq!(
-            value_to_string(Some(&SqliteValue::Blob(vec![1, 2, 3]))),
+            value_to_string(Some(&SqliteValue::Blob(vec![1, 2, 3].into()))),
             "<blob:3>"
         );
         assert_eq!(value_to_string(Some(&SqliteValue::Null)), "");
@@ -1848,7 +1848,7 @@ mod tests {
     fn text_value_wraps_string() {
         use super::text_value;
         let val = text_value("hello".to_owned());
-        assert!(matches!(val, SqliteValue::Text(ref s) if s == "hello"));
+        assert!(matches!(val, SqliteValue::Text(ref s) if &**s == "hello"));
     }
 
     #[test]
@@ -1862,7 +1862,7 @@ mod tests {
     fn optional_text_some_wraps_to_text() {
         use super::optional_text;
         let val = optional_text(Some("value"));
-        assert!(matches!(val, SqliteValue::Text(ref s) if s == "value"));
+        assert!(matches!(val, SqliteValue::Text(ref s) if &**s == "value"));
     }
 
     #[test]
@@ -2228,7 +2228,7 @@ mod tests {
     fn value_to_string_empty_blob() {
         use super::value_to_string;
         assert_eq!(
-            value_to_string(Some(&SqliteValue::Blob(vec![]))),
+            value_to_string(Some(&SqliteValue::Blob(vec![].into()))),
             "<blob:0>"
         );
     }
@@ -2734,8 +2734,8 @@ mod tests {
         conn.execute_with_params(
             "UPDATE runs SET result_json = ?1 WHERE id = ?2",
             &[
-                fsqlite_types::value::SqliteValue::Text("{invalid json!!!".to_owned()),
-                fsqlite_types::value::SqliteValue::Text("run-corrupt".to_owned()),
+                fsqlite_types::value::SqliteValue::Text("{invalid json!!!".to_owned().into()),
+                fsqlite_types::value::SqliteValue::Text("run-corrupt".to_owned().into()),
             ],
         )
         .expect("update");
@@ -2772,8 +2772,8 @@ mod tests {
         conn.execute_with_params(
             "UPDATE events SET payload_json = ?1 WHERE run_id = ?2 AND seq = ?3",
             &[
-                fsqlite_types::value::SqliteValue::Text("{broken".to_owned()),
-                fsqlite_types::value::SqliteValue::Text("run-evt-corrupt".to_owned()),
+                fsqlite_types::value::SqliteValue::Text("{broken".to_owned().into()),
+                fsqlite_types::value::SqliteValue::Text("run-evt-corrupt".to_owned().into()),
                 fsqlite_types::value::SqliteValue::Integer(1),
             ],
         )
@@ -2864,8 +2864,8 @@ mod tests {
         conn.execute_with_params(
             "UPDATE runs SET warnings_json = ?1 WHERE id = ?2",
             &[
-                SqliteValue::Text("{not valid json".to_owned()),
-                SqliteValue::Text("run-bad-warns".to_owned()),
+                SqliteValue::Text("{not valid json".to_owned().into()),
+                SqliteValue::Text("run-bad-warns".to_owned().into()),
             ],
         )
         .expect("corrupt");
@@ -2889,8 +2889,8 @@ mod tests {
         conn.execute_with_params(
             "UPDATE runs SET replay_json = ?1 WHERE id = ?2",
             &[
-                SqliteValue::Text("{broken json!!!".to_owned()),
-                SqliteValue::Text("run-bad-replay".to_owned()),
+                SqliteValue::Text("{broken json!!!".to_owned().into()),
+                SqliteValue::Text("run-bad-replay".to_owned().into()),
             ],
         )
         .expect("corrupt");
@@ -3190,13 +3190,13 @@ mod tests {
         conn.execute_with_params(
             "INSERT INTO events (run_id, seq, ts_rfc3339, stage, code, message, payload_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             &[
-                SqliteValue::Text("run-bad-seq".to_owned()),
-                SqliteValue::Text("not_a_number".to_owned()),
-                SqliteValue::Text("2026-01-01T00:00:00Z".to_owned()),
-                SqliteValue::Text("test".to_owned()),
-                SqliteValue::Text("test.ok".to_owned()),
-                SqliteValue::Text("msg".to_owned()),
-                SqliteValue::Text("{}".to_owned()),
+                SqliteValue::Text("run-bad-seq".to_owned().into()),
+                SqliteValue::Text("not_a_number".to_owned().into()),
+                SqliteValue::Text("2026-01-01T00:00:00Z".to_owned().into()),
+                SqliteValue::Text("test".to_owned().into()),
+                SqliteValue::Text("test.ok".to_owned().into()),
+                SqliteValue::Text("msg".to_owned().into()),
+                SqliteValue::Text("{}".to_owned().into()),
             ],
         )
         .expect("insert corrupt event");
@@ -3243,8 +3243,8 @@ mod tests {
         conn.execute_with_params(
             "UPDATE runs SET result_json = ?1 WHERE id = ?2",
             &[
-                SqliteValue::Text(String::new()),
-                SqliteValue::Text("run-empty-rj".to_owned()),
+                SqliteValue::Text(String::new().into()),
+                SqliteValue::Text("run-empty-rj".to_owned().into()),
             ],
         )
         .expect("update");
@@ -3276,8 +3276,8 @@ mod tests {
         conn.execute_with_params(
             "UPDATE runs SET transcript = ?1 WHERE id = ?2",
             &[
-                SqliteValue::Text("fallback transcript value".to_owned()),
-                SqliteValue::Text("run-ws-transcript".to_owned()),
+                SqliteValue::Text("fallback transcript value".to_owned().into()),
+                SqliteValue::Text("run-ws-transcript".to_owned().into()),
             ],
         )
         .expect("update");
@@ -3543,7 +3543,7 @@ mod tests {
         let conn = fsqlite::Connection::open(db_path.display().to_string()).expect("conn");
         conn.execute_with_params(
             "DELETE FROM segments WHERE run_id = ?1",
-            &[SqliteValue::Text("run-segsrc".to_owned())],
+            &[SqliteValue::Text("run-segsrc".to_owned().into())],
         )
         .expect("delete segments rows");
 
@@ -3648,8 +3648,8 @@ mod tests {
         conn.execute_with_params(
             "UPDATE runs SET transcript = ?1 WHERE id = ?2",
             &[
-                SqliteValue::Text("from transcript column".to_owned()),
-                SqliteValue::Text("run-prio".to_owned()),
+                SqliteValue::Text("from transcript column".to_owned().into()),
+                SqliteValue::Text("run-prio".to_owned().into()),
             ],
         )
         .expect("update");
@@ -3840,7 +3840,7 @@ mod tests {
             .expect("create _meta");
         conn.execute_with_params(
             "INSERT INTO _meta (key, value) VALUES ('schema_version', ?1);",
-            &[SqliteValue::Text("999".to_owned())],
+            &[SqliteValue::Text("999".to_owned().into())],
         )
         .expect("insert future version");
         conn.execute(
@@ -5053,8 +5053,8 @@ mod tests {
             .execute_with_params(
                 "INSERT INTO _meta (key, value) VALUES (?1, ?2);",
                 &[
-                    SqliteValue::Text("session_test".to_owned()),
-                    SqliteValue::Text("alpha_value".to_owned()),
+                    SqliteValue::Text("session_test".to_owned().into()),
+                    SqliteValue::Text("alpha_value".to_owned().into()),
                 ],
             )
             .expect("insert via session");
@@ -5092,8 +5092,8 @@ mod tests {
             .execute_with_params(
                 "INSERT INTO _meta (key, value) VALUES (?1, ?2);",
                 &[
-                    SqliteValue::Text("rollback_test".to_owned()),
-                    SqliteValue::Text("should_vanish".to_owned()),
+                    SqliteValue::Text("rollback_test".to_owned().into()),
+                    SqliteValue::Text("should_vanish".to_owned().into()),
                 ],
             )
             .expect("insert via session");
@@ -5134,8 +5134,8 @@ mod tests {
                 .execute_with_params(
                     "INSERT INTO _meta (key, value) VALUES (?1, ?2);",
                     &[
-                        SqliteValue::Text("drop_test".to_owned()),
-                        SqliteValue::Text("should_vanish".to_owned()),
+                        SqliteValue::Text("drop_test".to_owned().into()),
+                        SqliteValue::Text("should_vanish".to_owned().into()),
                     ],
                 )
                 .expect("insert via session");
@@ -5176,8 +5176,8 @@ mod tests {
             .execute_with_params(
                 "INSERT INTO _meta (key, value) VALUES (?1, ?2);",
                 &[
-                    SqliteValue::Text("nested_outer".to_owned()),
-                    SqliteValue::Text("outer_value".to_owned()),
+                    SqliteValue::Text("nested_outer".to_owned().into()),
+                    SqliteValue::Text("outer_value".to_owned().into()),
                 ],
             )
             .expect("insert outer");
@@ -5189,8 +5189,8 @@ mod tests {
             .execute_with_params(
                 "INSERT INTO _meta (key, value) VALUES (?1, ?2);",
                 &[
-                    SqliteValue::Text("nested_inner".to_owned()),
-                    SqliteValue::Text("inner_value".to_owned()),
+                    SqliteValue::Text("nested_inner".to_owned().into()),
+                    SqliteValue::Text("inner_value".to_owned().into()),
                 ],
             )
             .expect("insert inner");
@@ -5231,8 +5231,8 @@ mod tests {
             .execute_with_params(
                 "INSERT INTO _meta (key, value) VALUES (?1, ?2);",
                 &[
-                    SqliteValue::Text("outerpersist_key".to_owned()),
-                    SqliteValue::Text("outerpersist_value".to_owned()),
+                    SqliteValue::Text("outerpersist_key".to_owned().into()),
+                    SqliteValue::Text("outerpersist_value".to_owned().into()),
                 ],
             )
             .expect("insert via outer session");
@@ -5300,8 +5300,8 @@ mod tests {
             .execute_with_params(
                 "INSERT INTO _meta (key, value) VALUES (?1, ?2);",
                 &[
-                    SqliteValue::Text("query_key".to_owned()),
-                    SqliteValue::Text("query_value".to_owned()),
+                    SqliteValue::Text("query_key".to_owned().into()),
+                    SqliteValue::Text("query_value".to_owned().into()),
                 ],
             )
             .expect("insert");
@@ -5641,18 +5641,18 @@ mod tests {
             i64::MAX
         );
         assert_eq!(
-            value_to_i64(Some(&SqliteValue::Text("123".to_owned()))),
+            value_to_i64(Some(&SqliteValue::Text("123".to_owned().into()))),
             123
         );
         assert_eq!(
-            value_to_i64(Some(&SqliteValue::Text("not_a_number".to_owned()))),
+            value_to_i64(Some(&SqliteValue::Text("not_a_number".to_owned().into()))),
             0
         );
         assert_eq!(
             value_to_i64(Some(&SqliteValue::Float(std::f64::consts::PI))),
             0
         );
-        assert_eq!(value_to_i64(Some(&SqliteValue::Blob(vec![1, 2]))), 0);
+        assert_eq!(value_to_i64(Some(&SqliteValue::Blob(vec![1, 2].into()))), 0);
         assert_eq!(value_to_i64(Some(&SqliteValue::Null)), 0);
         assert_eq!(value_to_i64(None), 0);
     }
@@ -5746,7 +5746,7 @@ mod tests {
         // i64::MAX + 1 overflows → parse fails → 0
         let overflow = format!("{}", i64::MAX as u128 + 1);
         assert_eq!(
-            value_to_i64(Some(&SqliteValue::Text(overflow))),
+            value_to_i64(Some(&SqliteValue::Text(overflow.into()))),
             0,
             "text exceeding i64::MAX should return 0"
         );
@@ -5754,7 +5754,7 @@ mod tests {
         // i64::MIN - 1 overflows → parse fails → 0
         let underflow = format!("{}", i64::MIN as i128 - 1);
         assert_eq!(
-            value_to_i64(Some(&SqliteValue::Text(underflow))),
+            value_to_i64(Some(&SqliteValue::Text(underflow.into()))),
             0,
             "text below i64::MIN should return 0"
         );
@@ -5762,14 +5762,14 @@ mod tests {
         // Very large number → 0
         assert_eq!(
             value_to_i64(Some(&SqliteValue::Text(
-                "999999999999999999999999".to_owned()
+                "999999999999999999999999".to_owned().into()
             ))),
             0
         );
 
         // Negative integer text that IS valid parses correctly
         assert_eq!(
-            value_to_i64(Some(&SqliteValue::Text("-42".to_owned()))),
+            value_to_i64(Some(&SqliteValue::Text("-42".to_owned().into()))),
             -42
         );
     }
@@ -5948,8 +5948,8 @@ mod tests {
             .execute_with_params(
                 "UPDATE runs SET warnings_json = ?1 WHERE id = ?2",
                 &[
-                    SqliteValue::Text("{not valid json array!!!}".to_owned()),
-                    SqliteValue::Text("run-bad-warn".to_owned()),
+                    SqliteValue::Text("{not valid json array!!!}".to_owned().into()),
+                    SqliteValue::Text("run-bad-warn".to_owned().into()),
                 ],
             )
             .expect("corrupt warnings");
@@ -5975,8 +5975,8 @@ mod tests {
             .execute_with_params(
                 "UPDATE runs SET replay_json = ?1 WHERE id = ?2",
                 &[
-                    SqliteValue::Text("!!! not json !!!".to_owned()),
-                    SqliteValue::Text("run-bad-replay".to_owned()),
+                    SqliteValue::Text("!!! not json !!!".to_owned().into()),
+                    SqliteValue::Text("run-bad-replay".to_owned().into()),
                 ],
             )
             .expect("corrupt replay");
@@ -6105,11 +6105,11 @@ mod tests {
 
         assert_eq!(
             text_value("hello".to_owned()),
-            SqliteValue::Text("hello".to_owned())
+            SqliteValue::Text("hello".to_owned().into())
         );
         assert_eq!(
             optional_text(Some("world")),
-            SqliteValue::Text("world".to_owned())
+            SqliteValue::Text("world".to_owned().into())
         );
         assert_eq!(optional_text(None), SqliteValue::Null);
         assert_eq!(optional_float(Some(2.75)), SqliteValue::Float(2.75));
@@ -6168,7 +6168,7 @@ mod tests {
 
         let result = session.execute_with_params(
             "INSERT INTO nonexistent_table_xyz (col) VALUES (?1)",
-            &[SqliteValue::Text("val".to_owned())],
+            &[SqliteValue::Text("val".to_owned().into())],
         );
         assert!(result.is_err(), "invalid table should produce error");
         let msg = result.unwrap_err().to_string();
@@ -6187,7 +6187,7 @@ mod tests {
         );
         // Text representation should also parse.
         assert_eq!(
-            value_to_i64(Some(&SqliteValue::Text(i64::MIN.to_string()))),
+            value_to_i64(Some(&SqliteValue::Text(i64::MIN.to_string().into()))),
             i64::MIN
         );
     }
@@ -6266,7 +6266,7 @@ mod tests {
         // optional_text
         assert!(matches!(
             optional_text(Some("hello")),
-            SqliteValue::Text(ref s) if s == "hello"
+            SqliteValue::Text(ref s) if &**s == "hello"
         ));
         assert!(matches!(optional_text(None), SqliteValue::Null));
 
@@ -6280,7 +6280,7 @@ mod tests {
         // text_value
         assert!(matches!(
             text_value("world".to_owned()),
-            SqliteValue::Text(ref s) if s == "world"
+            SqliteValue::Text(ref s) if &**s == "world"
         ));
     }
 
@@ -6289,11 +6289,11 @@ mod tests {
         use super::value_to_string;
 
         assert_eq!(
-            value_to_string(Some(&SqliteValue::Blob(vec![0xDE, 0xAD]))),
+            value_to_string(Some(&SqliteValue::Blob(vec![0xDE, 0xAD].into()))),
             "<blob:2>"
         );
         assert_eq!(
-            value_to_string(Some(&SqliteValue::Blob(vec![]))),
+            value_to_string(Some(&SqliteValue::Blob(vec![].into()))),
             "<blob:0>",
             "empty blob should show zero length"
         );
@@ -6324,8 +6324,8 @@ mod tests {
             .execute_with_params(
                 "UPDATE runs SET acceleration_json = ?1 WHERE id = ?2",
                 &[
-                    SqliteValue::Text("NOT VALID JSON {{{".to_owned()),
-                    SqliteValue::Text("run-accel-corrupt".to_owned()),
+                    SqliteValue::Text("NOT VALID JSON {{{".to_owned().into()),
+                    SqliteValue::Text("run-accel-corrupt".to_owned().into()),
                 ],
             )
             .expect("corrupt");
@@ -6370,8 +6370,8 @@ mod tests {
             .execute_with_params(
                 "UPDATE runs SET acceleration_json = ?1 WHERE id = ?2",
                 &[
-                    SqliteValue::Text(override_json),
-                    SqliteValue::Text("run-accel-override".to_owned()),
+                    SqliteValue::Text(override_json.into()),
+                    SqliteValue::Text("run-accel-override".to_owned().into()),
                 ],
             )
             .expect("override");
@@ -6403,8 +6403,8 @@ mod tests {
             .execute_with_params(
                 "INSERT INTO _meta (key, value) VALUES (?1, ?2)",
                 &[
-                    SqliteValue::Text("test_key".to_owned()),
-                    SqliteValue::Text("test_value".to_owned()),
+                    SqliteValue::Text("test_key".to_owned().into()),
+                    SqliteValue::Text("test_value".to_owned().into()),
                 ],
             )
             .expect("insert with params");
@@ -6842,16 +6842,16 @@ mod tests {
              normalized_wav_path, request_json, result_json, warnings_json, transcript) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             &[
-                SqliteValue::Text("legacy-run".to_owned()),
-                SqliteValue::Text("2025-06-01T00:00:00Z".to_owned()),
-                SqliteValue::Text("2025-06-01T00:00:05Z".to_owned()),
-                SqliteValue::Text("whisper_cpp".to_owned()),
-                SqliteValue::Text("old.wav".to_owned()),
-                SqliteValue::Text("old_norm.wav".to_owned()),
-                SqliteValue::Text("{}".to_owned()),
-                SqliteValue::Text(result_json.to_string()),
-                SqliteValue::Text("[]".to_owned()),
-                SqliteValue::Text("legacy audio".to_owned()),
+                SqliteValue::Text("legacy-run".to_owned().into()),
+                SqliteValue::Text("2025-06-01T00:00:00Z".to_owned().into()),
+                SqliteValue::Text("2025-06-01T00:00:05Z".to_owned().into()),
+                SqliteValue::Text("whisper_cpp".to_owned().into()),
+                SqliteValue::Text("old.wav".to_owned().into()),
+                SqliteValue::Text("old_norm.wav".to_owned().into()),
+                SqliteValue::Text("{}".to_owned().into()),
+                SqliteValue::Text(result_json.to_string().into()),
+                SqliteValue::Text("[]".to_owned().into()),
+                SqliteValue::Text("legacy audio".to_owned().into()),
             ],
         )
         .expect("insert legacy run");
@@ -6939,17 +6939,17 @@ mod tests {
              normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             &[
-                SqliteValue::Text("partial-legacy-run".to_owned()),
-                SqliteValue::Text("2025-06-02T00:00:00Z".to_owned()),
-                SqliteValue::Text("2025-06-02T00:00:05Z".to_owned()),
-                SqliteValue::Text("whisper_cpp".to_owned()),
-                SqliteValue::Text("old.wav".to_owned()),
-                SqliteValue::Text("old_norm.wav".to_owned()),
-                SqliteValue::Text("{}".to_owned()),
-                SqliteValue::Text(result_json),
-                SqliteValue::Text("[]".to_owned()),
-                SqliteValue::Text("legacy replay run".to_owned()),
-                SqliteValue::Text(replay_json),
+                SqliteValue::Text("partial-legacy-run".to_owned().into()),
+                SqliteValue::Text("2025-06-02T00:00:00Z".to_owned().into()),
+                SqliteValue::Text("2025-06-02T00:00:05Z".to_owned().into()),
+                SqliteValue::Text("whisper_cpp".to_owned().into()),
+                SqliteValue::Text("old.wav".to_owned().into()),
+                SqliteValue::Text("old_norm.wav".to_owned().into()),
+                SqliteValue::Text("{}".to_owned().into()),
+                SqliteValue::Text(result_json.into()),
+                SqliteValue::Text("[]".to_owned().into()),
+                SqliteValue::Text("legacy replay run".to_owned().into()),
+                SqliteValue::Text(replay_json.into()),
             ],
         )
         .expect("insert partial legacy run");
@@ -7017,7 +7017,9 @@ mod tests {
             .expect("create _meta");
         conn.execute_with_params(
             "INSERT INTO _meta (key, value) VALUES ('schema_version', ?1)",
-            &[SqliteValue::Text(RunStore::SCHEMA_VERSION.to_string())],
+            &[SqliteValue::Text(
+                RunStore::SCHEMA_VERSION.to_string().into(),
+            )],
         )
         .expect("freeze schema version");
         conn.execute_with_params(
@@ -7025,13 +7027,13 @@ mod tests {
              normalized_wav_path, request_json, result_json, warnings_json, transcript) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             &[
-                SqliteValue::Text("rollback-run".to_owned()),
-                SqliteValue::Text("2025-06-03T00:00:00Z".to_owned()),
-                SqliteValue::Text("2025-06-03T00:00:05Z".to_owned()),
-                SqliteValue::Text("whisper_cpp".to_owned()),
-                SqliteValue::Text("legacy.wav".to_owned()),
-                SqliteValue::Text("legacy_norm.wav".to_owned()),
-                SqliteValue::Text("{}".to_owned()),
+                SqliteValue::Text("rollback-run".to_owned().into()),
+                SqliteValue::Text("2025-06-03T00:00:00Z".to_owned().into()),
+                SqliteValue::Text("2025-06-03T00:00:05Z".to_owned().into()),
+                SqliteValue::Text("whisper_cpp".to_owned().into()),
+                SqliteValue::Text("legacy.wav".to_owned().into()),
+                SqliteValue::Text("legacy_norm.wav".to_owned().into()),
+                SqliteValue::Text("{}".to_owned().into()),
                 SqliteValue::Text(
                     serde_json::json!({
                         "backend": "whisper_cpp",
@@ -7042,10 +7044,11 @@ mod tests {
                         "raw_output": {},
                         "artifact_paths": []
                     })
-                    .to_string(),
+                    .to_string()
+                    .into(),
                 ),
-                SqliteValue::Text("[]".to_owned()),
-                SqliteValue::Text("rollback transcript".to_owned()),
+                SqliteValue::Text("[]".to_owned().into()),
+                SqliteValue::Text("rollback transcript".to_owned().into()),
             ],
         )
         .expect("insert rollback row");

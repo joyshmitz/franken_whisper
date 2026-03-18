@@ -2913,8 +2913,8 @@ fn sync_overwrite_strict_policy_replaces_conflicting_segment_row() {
     conn.execute_with_params(
         "UPDATE segments SET text = ?1 WHERE run_id = ?2 AND idx = ?3",
         &[
-            SqliteValue::Text("mutated segment text".to_owned()),
-            SqliteValue::Text("strict-seg-1".to_owned()),
+            SqliteValue::Text("mutated segment text".to_owned().into()),
+            SqliteValue::Text("strict-seg-1".to_owned().into()),
             SqliteValue::Integer(0),
         ],
     )

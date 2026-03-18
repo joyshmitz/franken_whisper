@@ -519,8 +519,8 @@ fn export_table_runs_incremental(
              ORDER BY finished_at ASC, id ASC"
                 .to_owned(),
             vec![
-                SqliteValue::Text(c.last_export_rfc3339.clone()),
-                SqliteValue::Text(c.last_export_run_id.clone().unwrap_or_default()),
+                SqliteValue::Text(c.last_export_rfc3339.clone().into()),
+                SqliteValue::Text(c.last_export_run_id.clone().unwrap_or_default().into()),
             ],
         ),
         None => (
@@ -582,8 +582,8 @@ fn collect_exported_run_ids(
              ORDER BY finished_at ASC, id ASC"
                 .to_owned(),
             vec![
-                SqliteValue::Text(c.last_export_rfc3339.clone()),
-                SqliteValue::Text(c.last_export_run_id.clone().unwrap_or_default()),
+                SqliteValue::Text(c.last_export_rfc3339.clone().into()),
+                SqliteValue::Text(c.last_export_run_id.clone().unwrap_or_default().into()),
             ],
         ),
         None => (
@@ -622,7 +622,7 @@ fn export_table_segments_for_runs(
             .query_with_params(
                 "SELECT run_id, idx, start_sec, end_sec, speaker, text, confidence \
                  FROM segments WHERE run_id = ?1 ORDER BY idx ASC",
-                &[SqliteValue::Text(run_id.clone())],
+                &[SqliteValue::Text(run_id.clone().into())],
             )
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
@@ -660,7 +660,7 @@ fn export_table_events_for_runs(
             .query_with_params(
                 "SELECT run_id, seq, ts_rfc3339, stage, code, message, payload_json \
                  FROM events WHERE run_id = ?1 ORDER BY seq ASC",
-                &[SqliteValue::Text(run_id.clone())],
+                &[SqliteValue::Text(run_id.clone().into())],
             )
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
@@ -697,8 +697,8 @@ fn max_export_position(
              ORDER BY finished_at DESC, id DESC LIMIT 1"
                 .to_owned(),
             vec![
-                SqliteValue::Text(c.last_export_rfc3339.clone()),
-                SqliteValue::Text(c.last_export_run_id.clone().unwrap_or_default()),
+                SqliteValue::Text(c.last_export_rfc3339.clone().into()),
+                SqliteValue::Text(c.last_export_run_id.clone().unwrap_or_default().into()),
             ],
         ),
         None => (
@@ -948,7 +948,7 @@ fn import_runs(
         let existing = connection
             .query_with_params(
                 "SELECT id, started_at, finished_at, backend, input_path, normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json, acceleration_json FROM runs WHERE id = ?1",
-                &[SqliteValue::Text(id.clone())],
+                &[SqliteValue::Text(id.clone().into())],
             )
             .map_err(|error| FwError::Storage(format!("query runs existing `{id}` failed: {error}")))?;
 
@@ -1018,7 +1018,7 @@ fn import_runs(
                     connection
                         .execute_with_params(
                             "DELETE FROM segments WHERE run_id = ?1",
-                            &[SqliteValue::Text(id.clone())],
+                            &[SqliteValue::Text(id.clone().into())],
                         )
                         .map_err(|error| {
                             FwError::Storage(format!(
@@ -1028,7 +1028,7 @@ fn import_runs(
                     connection
                         .execute_with_params(
                             "DELETE FROM events WHERE run_id = ?1",
-                            &[SqliteValue::Text(id.clone())],
+                            &[SqliteValue::Text(id.clone().into())],
                         )
                         .map_err(|error| {
                             FwError::Storage(format!(
@@ -1038,7 +1038,7 @@ fn import_runs(
                     connection
                         .execute_with_params(
                             "DELETE FROM runs WHERE id = ?1",
-                            &[SqliteValue::Text(id.clone())],
+                            &[SqliteValue::Text(id.clone().into())],
                         )
                         .map_err(|error| {
                             FwError::Storage(format!(
@@ -1057,18 +1057,18 @@ fn import_runs(
                  normalized_wav_path, request_json, result_json, warnings_json, transcript, replay_json, acceleration_json) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 &[
-                    SqliteValue::Text(id.clone()),
-                    SqliteValue::Text(json_str(&row, "started_at")?),
-                    SqliteValue::Text(json_str(&row, "finished_at")?),
-                    SqliteValue::Text(json_str(&row, "backend")?),
-                    SqliteValue::Text(json_str(&row, "input_path")?),
-                    SqliteValue::Text(json_str(&row, "normalized_wav_path")?),
-                    SqliteValue::Text(json_str(&row, "request_json")?),
-                    SqliteValue::Text(json_str(&row, "result_json")?),
-                    SqliteValue::Text(json_str(&row, "warnings_json")?),
-                    SqliteValue::Text(json_str(&row, "transcript")?),
-                    SqliteValue::Text(json_string_or_default(&row, "replay_json", "{}")),
-                    SqliteValue::Text(json_string_or_default(&row, "acceleration_json", "{}")),
+                    SqliteValue::Text(id.clone().into()),
+                    SqliteValue::Text(json_str(&row, "started_at")?.into()),
+                    SqliteValue::Text(json_str(&row, "finished_at")?.into()),
+                    SqliteValue::Text(json_str(&row, "backend")?.into()),
+                    SqliteValue::Text(json_str(&row, "input_path")?.into()),
+                    SqliteValue::Text(json_str(&row, "normalized_wav_path")?.into()),
+                    SqliteValue::Text(json_str(&row, "request_json")?.into()),
+                    SqliteValue::Text(json_str(&row, "result_json")?.into()),
+                    SqliteValue::Text(json_str(&row, "warnings_json")?.into()),
+                    SqliteValue::Text(json_str(&row, "transcript")?.into()),
+                    SqliteValue::Text(json_string_or_default(&row, "replay_json", "{}").into()),
+                    SqliteValue::Text(json_string_or_default(&row, "acceleration_json", "{}").into()),
                 ],
             )
             .map_err(|error| FwError::Storage(format!("insert runs `{id}` failed: {error}")))?;
@@ -1128,7 +1128,7 @@ fn import_segments(
         let existing = connection
             .query_with_params(
                 "SELECT run_id, idx, start_sec, end_sec, speaker, text, confidence FROM segments WHERE run_id = ?1 AND idx = ?2",
-                &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(idx)],
+                &[SqliteValue::Text(run_id.clone().into()), SqliteValue::Integer(idx)],
             )
             .map_err(|error| {
                 FwError::Storage(format!(
@@ -1182,7 +1182,7 @@ fn import_segments(
                     connection
                         .execute_with_params(
                             "DELETE FROM segments WHERE run_id = ?1 AND idx = ?2",
-                            &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(idx)],
+                            &[SqliteValue::Text(run_id.clone().into()), SqliteValue::Integer(idx)],
                         )
                         .map_err(|error| {
                             FwError::Storage(format!(
@@ -1198,12 +1198,12 @@ fn import_segments(
                 "INSERT INTO segments (run_id, idx, start_sec, end_sec, speaker, text, confidence) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 &[
-                    SqliteValue::Text(run_id.clone()),
+                    SqliteValue::Text(run_id.clone().into()),
                     SqliteValue::Integer(idx),
                     json_optional_float(&row, "start_sec"),
                     json_optional_float(&row, "end_sec"),
                     json_optional_text(&row, "speaker"),
-                    SqliteValue::Text(json_str(&row, "text")?),
+                    SqliteValue::Text(json_str(&row, "text")?.into()),
                     json_optional_float(&row, "confidence"),
                 ],
             )
@@ -1280,7 +1280,7 @@ fn import_events(
         let existing = connection
             .query_with_params(
                 "SELECT run_id, seq, ts_rfc3339, stage, code, message, payload_json FROM events WHERE run_id = ?1 AND seq = ?2",
-                &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(seq)],
+                &[SqliteValue::Text(run_id.clone().into()), SqliteValue::Integer(seq)],
             )
             .map_err(|error| {
                 FwError::Storage(format!("query events existing `{run_id}/{seq}` failed: {error}"))
@@ -1324,7 +1324,7 @@ fn import_events(
                     connection
                         .execute_with_params(
                             "DELETE FROM events WHERE run_id = ?1 AND seq = ?2",
-                            &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(seq)],
+                            &[SqliteValue::Text(run_id.clone().into()), SqliteValue::Integer(seq)],
                         )
                         .map_err(|error| {
                             FwError::Storage(format!(
@@ -1340,13 +1340,13 @@ fn import_events(
                 "INSERT INTO events (run_id, seq, ts_rfc3339, stage, code, message, payload_json) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 &[
-                    SqliteValue::Text(run_id.clone()),
+                    SqliteValue::Text(run_id.clone().into()),
                     SqliteValue::Integer(seq),
-                    SqliteValue::Text(json_str(&row, "ts_rfc3339")?),
-                    SqliteValue::Text(json_str(&row, "stage")?),
-                    SqliteValue::Text(json_str(&row, "code")?),
-                    SqliteValue::Text(json_str(&row, "message")?),
-                    SqliteValue::Text(json_str(&row, "payload_json")?),
+                    SqliteValue::Text(json_str(&row, "ts_rfc3339")?.into()),
+                    SqliteValue::Text(json_str(&row, "stage")?.into()),
+                    SqliteValue::Text(json_str(&row, "code")?.into()),
+                    SqliteValue::Text(json_str(&row, "message")?.into()),
+                    SqliteValue::Text(json_str(&row, "payload_json")?.into()),
                 ],
             )
             .map_err(|error| {
@@ -1443,7 +1443,10 @@ fn delete_stale_segments_for_strict_overwrite(
             connection
                 .execute_with_params(
                     "DELETE FROM segments WHERE run_id = ?1 AND idx = ?2",
-                    &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(idx)],
+                    &[
+                        SqliteValue::Text(run_id.clone().into()),
+                        SqliteValue::Integer(idx),
+                    ],
                 )
                 .map_err(|error| {
                     FwError::Storage(format!(
@@ -1472,7 +1475,10 @@ fn delete_stale_events_for_strict_overwrite(
             connection
                 .execute_with_params(
                     "DELETE FROM events WHERE run_id = ?1 AND seq = ?2",
-                    &[SqliteValue::Text(run_id.clone()), SqliteValue::Integer(seq)],
+                    &[
+                        SqliteValue::Text(run_id.clone().into()),
+                        SqliteValue::Integer(seq),
+                    ],
                 )
                 .map_err(|error| {
                     FwError::Storage(format!(
@@ -1488,7 +1494,7 @@ fn query_segment_idxs_for_run(connection: &Connection, run_id: &str) -> FwResult
     let rows = connection
         .query_with_params(
             "SELECT idx FROM segments WHERE run_id = ?1",
-            &[SqliteValue::Text(run_id.to_owned())],
+            &[SqliteValue::Text(run_id.to_owned().into())],
         )
         .map_err(|error| {
             FwError::Storage(format!(
@@ -1506,7 +1512,7 @@ fn query_event_seqs_for_run(connection: &Connection, run_id: &str) -> FwResult<H
     let rows = connection
         .query_with_params(
             "SELECT seq FROM events WHERE run_id = ?1",
-            &[SqliteValue::Text(run_id.to_owned())],
+            &[SqliteValue::Text(run_id.to_owned().into())],
         )
         .map_err(|error| {
             FwError::Storage(format!(
@@ -1534,7 +1540,7 @@ fn ensure_run_reference_exists(
     let parent = connection
         .query_with_params(
             "SELECT id FROM runs WHERE id = ?1 LIMIT 1",
-            &[SqliteValue::Text(run_id.to_owned())],
+            &[SqliteValue::Text(run_id.to_owned().into())],
         )
         .map_err(|error| FwError::Storage(error.to_string()))?;
 
@@ -1713,7 +1719,7 @@ fn sha256_file(path: &Path) -> FwResult<String> {
 
 fn value_to_json(value: Option<&SqliteValue>) -> serde_json::Value {
     match value {
-        Some(SqliteValue::Text(text)) => serde_json::Value::String(text.clone()),
+        Some(SqliteValue::Text(text)) => serde_json::Value::String(text.to_string()),
         Some(SqliteValue::Integer(number)) => serde_json::json!(number),
         Some(SqliteValue::Float(number)) => serde_json::json!(number),
         Some(SqliteValue::Blob(blob)) => {
@@ -1725,7 +1731,7 @@ fn value_to_json(value: Option<&SqliteValue>) -> serde_json::Value {
 
 fn value_to_string_sqlite(value: Option<&SqliteValue>) -> String {
     match value {
-        Some(SqliteValue::Text(text)) => text.clone(),
+        Some(SqliteValue::Text(text)) => text.to_string(),
         Some(SqliteValue::Integer(number)) => number.to_string(),
         Some(SqliteValue::Float(number)) => number.to_string(),
         _ => String::new(),
@@ -1742,7 +1748,7 @@ fn sqlite_to_optional_f64(value: Option<&SqliteValue>) -> Option<f64> {
 
 fn sqlite_to_optional_text(value: Option<&SqliteValue>) -> Option<String> {
     match value {
-        Some(SqliteValue::Text(text)) => Some(text.clone()),
+        Some(SqliteValue::Text(text)) => Some(text.to_string()),
         _ => None,
     }
 }
@@ -1921,7 +1927,7 @@ fn json_optional_float(value: &serde_json::Value, key: &str) -> SqliteValue {
 
 fn json_optional_text(value: &serde_json::Value, key: &str) -> SqliteValue {
     match value.get(key) {
-        Some(serde_json::Value::String(text)) => SqliteValue::Text(text.clone()),
+        Some(serde_json::Value::String(text)) => SqliteValue::Text(text.clone().into()),
         _ => SqliteValue::Null,
     }
 }
@@ -2087,7 +2093,7 @@ pub fn validate_sync(db_path: &Path, jsonl_dir: &Path) -> FwResult<SyncValidatio
                 "SELECT id, started_at, finished_at, backend, input_path, \
                  normalized_wav_path, request_json, result_json, warnings_json, \
                  transcript, replay_json, acceleration_json FROM runs WHERE id = ?1",
-                &[SqliteValue::Text((*id).clone())],
+                &[SqliteValue::Text((*id).clone().into())],
             )
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
@@ -2241,7 +2247,7 @@ pub fn max_started_at(conn: &Connection, after_ts: Option<&str>) -> FwResult<Opt
     let (sql, params): (&str, Vec<SqliteValue>) = if let Some(ts) = after_ts {
         (
             "SELECT MAX(started_at) FROM runs WHERE started_at > ?1",
-            vec![SqliteValue::Text(ts.to_owned())],
+            vec![SqliteValue::Text(ts.to_owned().into())],
         )
     } else {
         ("SELECT MAX(started_at) FROM runs", vec![])
@@ -2256,7 +2262,7 @@ pub fn max_started_at(conn: &Connection, after_ts: Option<&str>) -> FwResult<Opt
     }
 
     match rows[0].get(0) {
-        Some(SqliteValue::Text(s)) if !s.is_empty() => Ok(Some(s.clone())),
+        Some(SqliteValue::Text(s)) if !s.is_empty() => Ok(Some(s.to_string())),
         _ => Ok(None),
     }
 }
@@ -3155,13 +3161,13 @@ mod tests {
     fn value_to_json_all_variants() {
         use serde_json::Value as JV;
         assert_eq!(
-            value_to_json(Some(&SqliteValue::Text("hi".to_owned()))),
+            value_to_json(Some(&SqliteValue::Text("hi".to_owned().into()))),
             JV::String("hi".to_owned())
         );
         assert_eq!(value_to_json(Some(&SqliteValue::Integer(42))), json!(42));
         assert_eq!(value_to_json(Some(&SqliteValue::Float(1.5))), json!(1.5));
         assert!(matches!(
-            value_to_json(Some(&SqliteValue::Blob(vec![1, 2]))),
+            value_to_json(Some(&SqliteValue::Blob(vec![1, 2].into()))),
             JV::String(_)
         ));
         assert_eq!(value_to_json(Some(&SqliteValue::Null)), JV::Null);
@@ -3216,7 +3222,7 @@ mod tests {
     #[test]
     fn value_to_string_sqlite_all_variants() {
         assert_eq!(
-            value_to_string_sqlite(Some(&SqliteValue::Text("hello".to_owned()))),
+            value_to_string_sqlite(Some(&SqliteValue::Text("hello".to_owned().into()))),
             "hello"
         );
         assert_eq!(
@@ -3228,7 +3234,7 @@ mod tests {
             "3.5"
         );
         assert_eq!(
-            value_to_string_sqlite(Some(&SqliteValue::Blob(vec![1, 2, 3]))),
+            value_to_string_sqlite(Some(&SqliteValue::Blob(vec![1, 2, 3].into()))),
             ""
         );
         assert_eq!(value_to_string_sqlite(Some(&SqliteValue::Null)), "");
@@ -3246,7 +3252,7 @@ mod tests {
             Some(7.0)
         );
         assert_eq!(
-            sqlite_to_optional_f64(Some(&SqliteValue::Text("nope".to_owned()))),
+            sqlite_to_optional_f64(Some(&SqliteValue::Text("nope".to_owned().into()))),
             None
         );
         assert_eq!(sqlite_to_optional_f64(Some(&SqliteValue::Null)), None);
@@ -3256,7 +3262,7 @@ mod tests {
     #[test]
     fn sqlite_to_optional_text_all_variants() {
         assert_eq!(
-            sqlite_to_optional_text(Some(&SqliteValue::Text("hi".to_owned()))),
+            sqlite_to_optional_text(Some(&SqliteValue::Text("hi".to_owned().into()))),
             Some("hi".to_owned())
         );
         assert_eq!(
@@ -3295,7 +3301,7 @@ mod tests {
     fn json_optional_text_extracts_string_or_null() {
         let value = json!({"name": "alice", "count": 5});
         match json_optional_text(&value, "name") {
-            SqliteValue::Text(s) => assert_eq!(s, "alice"),
+            SqliteValue::Text(s) => assert_eq!(&*s, "alice"),
             other => panic!("expected Text, got {other:?}"),
         }
         assert!(matches!(
@@ -3625,7 +3631,7 @@ mod tests {
 
     #[test]
     fn value_to_json_blob_format_includes_length() {
-        let blob = SqliteValue::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let blob = SqliteValue::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF].into());
         let result = value_to_json(Some(&blob));
         assert_eq!(result, serde_json::Value::String("<blob:4>".to_owned()));
     }
@@ -4040,7 +4046,7 @@ mod tests {
             .query_with_params(
                 "SELECT text FROM segments WHERE run_id = ?1 AND idx = ?2",
                 &[
-                    SqliteValue::Text("seg-strict-1".to_owned()),
+                    SqliteValue::Text("seg-strict-1".to_owned().into()),
                     SqliteValue::Integer(0),
                 ],
             )
@@ -4127,12 +4133,12 @@ mod tests {
             .execute_with_params(
                 "INSERT INTO segments (run_id, idx, start_sec, end_sec, speaker, text, confidence) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 &[
-                    SqliteValue::Text("strict-prune-1".to_owned()),
+                    SqliteValue::Text("strict-prune-1".to_owned().into()),
                     SqliteValue::Integer(99),
                     SqliteValue::Float(9.0),
                     SqliteValue::Float(10.0),
                     SqliteValue::Null,
-                    SqliteValue::Text("stale strict segment".to_owned()),
+                    SqliteValue::Text("stale strict segment".to_owned().into()),
                     SqliteValue::Float(0.1),
                 ],
             )
@@ -4141,13 +4147,13 @@ mod tests {
             .execute_with_params(
                 "INSERT INTO events (run_id, seq, ts_rfc3339, stage, code, message, payload_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 &[
-                    SqliteValue::Text("strict-prune-1".to_owned()),
+                    SqliteValue::Text("strict-prune-1".to_owned().into()),
                     SqliteValue::Integer(99),
-                    SqliteValue::Text("2026-01-01T00:00:09Z".to_owned()),
-                    SqliteValue::Text("persist".to_owned()),
-                    SqliteValue::Text("persist.ok".to_owned()),
-                    SqliteValue::Text("stale strict event".to_owned()),
-                    SqliteValue::Text("{\"stale\":true}".to_owned()),
+                    SqliteValue::Text("2026-01-01T00:00:09Z".to_owned().into()),
+                    SqliteValue::Text("persist".to_owned().into()),
+                    SqliteValue::Text("persist.ok".to_owned().into()),
+                    SqliteValue::Text("stale strict event".to_owned().into()),
+                    SqliteValue::Text("{\"stale\":true}".to_owned().into()),
                 ],
             )
             .expect("insert stale event");
@@ -5187,7 +5193,7 @@ mod tests {
         let rows = conn
             .query_with_params(
                 "SELECT transcript FROM runs WHERE id = ?1",
-                &[SqliteValue::Text("ow-replace-1".to_owned())],
+                &[SqliteValue::Text("ow-replace-1".to_owned().into())],
             )
             .expect("query");
         assert!(!rows.is_empty(), "run should exist after overwrite");
@@ -5283,17 +5289,17 @@ mod tests {
     fn value_to_json_all_sqlite_variants() {
         use super::value_to_json;
         assert_eq!(
-            value_to_json(Some(&SqliteValue::Text("hello".to_owned()))),
+            value_to_json(Some(&SqliteValue::Text("hello".to_owned().into()))),
             json!("hello")
         );
         assert_eq!(value_to_json(Some(&SqliteValue::Integer(42))), json!(42));
         assert_eq!(value_to_json(Some(&SqliteValue::Float(2.75))), json!(2.75));
         assert_eq!(
-            value_to_json(Some(&SqliteValue::Blob(vec![1, 2, 3]))),
+            value_to_json(Some(&SqliteValue::Blob(vec![1, 2, 3].into()))),
             json!("<blob:3>")
         );
         assert_eq!(
-            value_to_json(Some(&SqliteValue::Blob(vec![]))),
+            value_to_json(Some(&SqliteValue::Blob(vec![].into()))),
             json!("<blob:0>")
         );
         assert_eq!(value_to_json(Some(&SqliteValue::Null)), json!(null));
@@ -6470,7 +6476,7 @@ mod tests {
         let rows = conn
             .query_with_params(
                 "SELECT code, message FROM events WHERE run_id = ?1 AND seq = 1",
-                &[SqliteValue::Text("uni-all-1".to_owned())],
+                &[SqliteValue::Text("uni-all-1".to_owned().into())],
             )
             .expect("query events");
         let code = value_to_string_sqlite(rows[0].get(0));
@@ -6580,7 +6586,7 @@ mod tests {
         let rows = conn
             .query_with_params(
                 "SELECT count(*) FROM events WHERE run_id = ?1",
-                &[SqliteValue::Text("many-evt-1".to_owned())],
+                &[SqliteValue::Text("many-evt-1".to_owned().into())],
             )
             .expect("query");
         let count = match rows[0].get(0) {
@@ -6593,7 +6599,7 @@ mod tests {
         let first = conn
             .query_with_params(
                 "SELECT message FROM events WHERE run_id = ?1 AND seq = 1",
-                &[SqliteValue::Text("many-evt-1".to_owned())],
+                &[SqliteValue::Text("many-evt-1".to_owned().into())],
             )
             .expect("query first");
         assert_eq!(value_to_string_sqlite(first[0].get(0)), "event number 1");
@@ -6601,7 +6607,7 @@ mod tests {
         let last = conn
             .query_with_params(
                 "SELECT message FROM events WHERE run_id = ?1 AND seq = 150",
-                &[SqliteValue::Text("many-evt-1".to_owned())],
+                &[SqliteValue::Text("many-evt-1".to_owned().into())],
             )
             .expect("query last");
         assert_eq!(value_to_string_sqlite(last[0].get(0)), "event number 150");
@@ -6790,7 +6796,7 @@ mod tests {
         let rows = conn
             .query_with_params(
                 "SELECT count(*) FROM segments WHERE run_id = ?1",
-                &[SqliteValue::Text("many-seg-1".to_owned())],
+                &[SqliteValue::Text("many-seg-1".to_owned().into())],
             )
             .expect("query");
         let count = match rows[0].get(0) {
@@ -6803,7 +6809,7 @@ mod tests {
         let last = conn
             .query_with_params(
                 "SELECT text FROM segments WHERE run_id = ?1 AND idx = 59",
-                &[SqliteValue::Text("many-seg-1".to_owned())],
+                &[SqliteValue::Text("many-seg-1".to_owned().into())],
             )
             .expect("query last segment");
         assert_eq!(
@@ -8986,13 +8992,13 @@ mod tests {
 
         // Text with valid integer string.
         assert_eq!(
-            value_to_i64_sqlite(Some(&SqliteValue::Text("99".to_owned()))),
+            value_to_i64_sqlite(Some(&SqliteValue::Text("99".to_owned().into()))),
             99
         );
 
         // Text with non-parseable string → unwrap_or(0).
         assert_eq!(
-            value_to_i64_sqlite(Some(&SqliteValue::Text("not_a_number".to_owned()))),
+            value_to_i64_sqlite(Some(&SqliteValue::Text("not_a_number".to_owned().into()))),
             0,
             "non-parseable text should return 0"
         );
@@ -9348,7 +9354,7 @@ mod tests {
         let rows = conn
             .query_with_params(
                 "SELECT transcript FROM runs WHERE id = ?1",
-                &[SqliteValue::Text("run-skip-conflict".to_owned())],
+                &[SqliteValue::Text("run-skip-conflict".to_owned().into())],
             )
             .expect("query");
         let transcript = value_to_string_sqlite(rows[0].get(0));
@@ -9407,7 +9413,7 @@ mod tests {
         let rows = conn
             .query_with_params(
                 "SELECT text FROM segments WHERE run_id = ?1 AND idx = 0",
-                &[SqliteValue::Text("run-seg-skip".to_owned())],
+                &[SqliteValue::Text("run-seg-skip".to_owned().into())],
             )
             .expect("query");
         let text = value_to_string_sqlite(rows[0].get(0));
@@ -9466,7 +9472,7 @@ mod tests {
         let rows = conn
             .query_with_params(
                 "SELECT message FROM events WHERE run_id = ?1 AND seq = 1",
-                &[SqliteValue::Text("run-evt-skip".to_owned())],
+                &[SqliteValue::Text("run-evt-skip".to_owned().into())],
             )
             .expect("query");
         let message = value_to_string_sqlite(rows[0].get(0));
@@ -9643,14 +9649,14 @@ mod tests {
 
         // Negative integer as text.
         assert_eq!(
-            value_to_i64_sqlite(Some(&SqliteValue::Text("-99".to_owned()))),
+            value_to_i64_sqlite(Some(&SqliteValue::Text("-99".to_owned().into()))),
             -99,
             "negative text should parse correctly"
         );
 
         // Blob variant → wildcard → 0.
         assert_eq!(
-            value_to_i64_sqlite(Some(&SqliteValue::Blob(vec![1, 2, 3]))),
+            value_to_i64_sqlite(Some(&SqliteValue::Blob(vec![1, 2, 3].into()))),
             0,
             "Blob variant should fall through to 0"
         );
@@ -9835,7 +9841,7 @@ mod tests {
             fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
         conn.execute_with_params(
             "DELETE FROM runs WHERE id = ?1",
-            &[SqliteValue::Text("run-a".to_owned())],
+            &[SqliteValue::Text("run-a".to_owned().into())],
         )
         .expect("delete run-a from DB");
         drop(conn);
@@ -10050,7 +10056,7 @@ mod tests {
             fsqlite::Connection::open(db_path.display().to_string()).expect("open connection");
         conn.execute_with_params(
             "UPDATE runs SET replay_json = '{}', acceleration_json = '{}' WHERE id = ?1",
-            &[SqliteValue::Text("legacy-1".to_owned())],
+            &[SqliteValue::Text("legacy-1".to_owned().into())],
         )
         .expect("reset to defaults");
         drop(conn);
@@ -10193,14 +10199,14 @@ mod tests {
             None
         );
         assert_eq!(
-            sqlite_to_optional_text(Some(&SqliteValue::Blob(vec![1, 2]))),
+            sqlite_to_optional_text(Some(&SqliteValue::Blob(vec![1, 2].into()))),
             None
         );
         assert_eq!(sqlite_to_optional_text(Some(&SqliteValue::Null)), None);
         assert_eq!(sqlite_to_optional_text(None), None);
         // Text returns Some.
         assert_eq!(
-            sqlite_to_optional_text(Some(&SqliteValue::Text("hello".to_owned()))),
+            sqlite_to_optional_text(Some(&SqliteValue::Text("hello".to_owned().into()))),
             Some("hello".to_owned())
         );
     }
@@ -10924,8 +10930,8 @@ mod tests {
         conn.execute_with_params(
             "UPDATE runs SET finished_at = ?1 WHERE id = ?2",
             &[
-                SqliteValue::Text(String::new()),
-                SqliteValue::Text("run-empty-ts".to_owned()),
+                SqliteValue::Text(String::new().into()),
+                SqliteValue::Text("run-empty-ts".to_owned().into()),
             ],
         )
         .expect("update finished_at to empty");
