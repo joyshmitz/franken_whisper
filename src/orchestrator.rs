@@ -1667,10 +1667,9 @@ async fn execute_normalize(
     // Checkpoint: between ingest -> normalize
     checkpoint_or_emit("normalize", pcx, log)?;
 
-    let input_path = inter
-        .input_path
-        .as_ref()
-        .expect("Normalize requires Ingest to have run first");
+    let input_path = inter.input_path.as_ref().ok_or_else(|| {
+        FwError::InvalidRequest("Normalize requires Ingest to have run first".to_owned())
+    })?;
 
     log.mark_stage_start();
     log.push(
@@ -1746,10 +1745,9 @@ async fn execute_backend(
     stage_budgets: StageBudgetPolicy,
     inter: &mut PipelineIntermediate,
 ) -> FwResult<()> {
-    let normalized_wav = inter
-        .normalized_wav
-        .as_ref()
-        .expect("Backend requires Normalize to have run first");
+    let normalized_wav = inter.normalized_wav.as_ref().ok_or_else(|| {
+        FwError::InvalidRequest("Backend requires Normalize to have run first".to_owned())
+    })?;
     let normalized_duration = inter.normalized_duration;
 
     let routing_safe_mode = std::env::var("FRANKEN_WHISPER_ROUTING_SAFE_MODE")
@@ -1944,10 +1942,9 @@ async fn execute_accelerate(
     trace_id_str: &str,
     inter: &mut PipelineIntermediate,
 ) -> FwResult<()> {
-    let result = inter
-        .result
-        .take()
-        .expect("Accelerate requires Backend to have run first");
+    let result = inter.result.take().ok_or_else(|| {
+        FwError::InvalidRequest("Accelerate requires Backend to have run first".to_owned())
+    })?;
 
     // Checkpoint: between backend -> accelerate
     checkpoint_or_emit("acceleration", pcx, log)?;
@@ -2215,10 +2212,9 @@ async fn execute_align(
     stage_budgets: StageBudgetPolicy,
     inter: &mut PipelineIntermediate,
 ) -> FwResult<()> {
-    let mut result = inter
-        .result
-        .take()
-        .expect("Align requires Backend to have run first");
+    let mut result = inter.result.take().ok_or_else(|| {
+        FwError::InvalidRequest("Align requires Backend to have run first".to_owned())
+    })?;
 
     // Checkpoint: between previous stage -> align
     checkpoint_or_emit("align", pcx, log)?;
@@ -2693,10 +2689,9 @@ async fn execute_vad(
     stage_budgets: StageBudgetPolicy,
     inter: &mut PipelineIntermediate,
 ) -> FwResult<()> {
-    let normalized_wav = inter
-        .normalized_wav
-        .as_ref()
-        .expect("Vad requires Normalize to have run first");
+    let normalized_wav = inter.normalized_wav.as_ref().ok_or_else(|| {
+        FwError::InvalidRequest("Vad requires Normalize to have run first".to_owned())
+    })?;
 
     checkpoint_or_emit("vad", pcx, log)?;
 
@@ -2878,10 +2873,9 @@ async fn execute_separate(
     stage_budgets: StageBudgetPolicy,
     inter: &mut PipelineIntermediate,
 ) -> FwResult<()> {
-    let normalized_wav = inter
-        .normalized_wav
-        .as_ref()
-        .expect("Separate requires Normalize to have run first");
+    let normalized_wav = inter.normalized_wav.as_ref().ok_or_else(|| {
+        FwError::InvalidRequest("Separate requires Normalize to have run first".to_owned())
+    })?;
 
     checkpoint_or_emit("separate", pcx, log)?;
 
@@ -3144,10 +3138,9 @@ async fn execute_punctuate(
     stage_budgets: StageBudgetPolicy,
     inter: &mut PipelineIntermediate,
 ) -> FwResult<()> {
-    let mut result = inter
-        .result
-        .take()
-        .expect("Punctuate requires Backend to have run first");
+    let mut result = inter.result.take().ok_or_else(|| {
+        FwError::InvalidRequest("Punctuate requires Backend to have run first".to_owned())
+    })?;
 
     checkpoint_or_emit("punctuate", pcx, log)?;
 
@@ -3632,10 +3625,9 @@ async fn execute_diarize(
     stage_budgets: StageBudgetPolicy,
     inter: &mut PipelineIntermediate,
 ) -> FwResult<()> {
-    let mut result = inter
-        .result
-        .take()
-        .expect("Diarize requires Backend to have run first");
+    let mut result = inter.result.take().ok_or_else(|| {
+        FwError::InvalidRequest("Diarize requires Backend to have run first".to_owned())
+    })?;
 
     checkpoint_or_emit("diarize", pcx, log)?;
 
