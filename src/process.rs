@@ -235,16 +235,16 @@ mod tests {
     #[test]
     fn cancellable_completes_fast_command() {
         // A command that exits immediately should succeed with a far-future deadline.
-        let token = CancellationToken::with_deadline_from_now(Duration::from_secs(60));
+        let cancel = CancellationToken::with_deadline_from_now(Duration::from_secs(60));
         let result =
-            run_command_cancellable("true", &[], None, &token, Some(Duration::from_secs(10)));
+            run_command_cancellable("true", &[], None, &cancel, Some(Duration::from_secs(10)));
         assert!(result.is_ok(), "true should succeed: {result:?}");
     }
 
     #[test]
     fn cancellable_kills_on_expired_deadline() {
         // Create a token whose deadline is already in the past.
-        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        let cancel = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
         // Tiny sleep to ensure we're past the deadline.
         std::thread::sleep(Duration::from_millis(10));
 
@@ -252,7 +252,7 @@ mod tests {
             "sleep",
             &["60".to_owned()],
             None,
-            &token,
+            &cancel,
             Some(Duration::from_secs(120)),
         );
 
@@ -267,12 +267,12 @@ mod tests {
     #[test]
     fn cancellable_hard_timeout_takes_effect() {
         // Token with no deadline (far future), but hard timeout is tiny.
-        let token = CancellationToken::with_deadline_from_now(Duration::from_secs(600));
+        let cancel = CancellationToken::with_deadline_from_now(Duration::from_secs(600));
         let result = run_command_cancellable(
             "sleep",
             &["60".to_owned()],
             None,
-            &token,
+            &cancel,
             Some(Duration::from_millis(100)),
         );
 
@@ -288,8 +288,8 @@ mod tests {
     #[test]
     fn cancellable_no_deadline_still_works() {
         // Token with no deadline at all — should complete normally for fast commands.
-        let token = CancellationToken::no_deadline();
-        let result = run_command_cancellable("true", &[], None, &token, None);
+        let cancel = CancellationToken::no_deadline();
+        let result = run_command_cancellable("true", &[], None, &cancel, None);
         assert!(result.is_ok());
     }
 
@@ -481,8 +481,8 @@ mod tests {
 
     #[test]
     fn cancellable_missing_program_returns_command_missing() {
-        let token = CancellationToken::no_deadline();
-        let err = run_command_cancellable("nonexistent_binary_xyz_99999", &[], None, &token, None)
+        let cancel = CancellationToken::no_deadline();
+        let err = run_command_cancellable("nonexistent_binary_xyz_99999", &[], None, &cancel, None)
             .expect_err("should fail");
         assert!(
             matches!(err, crate::error::FwError::CommandMissing { .. }),
@@ -492,9 +492,9 @@ mod tests {
 
     #[test]
     fn cancellable_captures_output_from_successful_command() {
-        let token = CancellationToken::no_deadline();
+        let cancel = CancellationToken::no_deadline();
         let output =
-            run_command_cancellable("echo", &["test_output".to_owned()], None, &token, None)
+            run_command_cancellable("echo", &["test_output".to_owned()], None, &cancel, None)
                 .expect("echo should succeed");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -505,8 +505,8 @@ mod tests {
 
     #[test]
     fn cancellable_nonzero_exit_returns_error() {
-        let token = CancellationToken::no_deadline();
-        let err = run_command_cancellable("false", &[], None, &token, None)
+        let cancel = CancellationToken::no_deadline();
+        let err = run_command_cancellable("false", &[], None, &cancel, None)
             .expect_err("false should fail");
         assert!(
             !matches!(err, crate::error::FwError::Cancelled(_)),
@@ -539,8 +539,8 @@ mod tests {
     #[test]
     fn cancellable_with_cwd_succeeds() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let token = CancellationToken::no_deadline();
-        let output = run_command_cancellable("pwd", &[], Some(dir.path()), &token, None)
+        let cancel = CancellationToken::no_deadline();
+        let output = run_command_cancellable("pwd", &[], Some(dir.path()), &cancel, None)
             .expect("pwd should succeed");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -558,8 +558,8 @@ mod tests {
     #[test]
     fn cancellable_with_hard_timeout_none_and_no_deadline() {
         // Both safety nets disabled — should still work for fast commands.
-        let token = CancellationToken::no_deadline();
-        let output = run_command_cancellable("echo", &["ok".to_owned()], None, &token, None)
+        let cancel = CancellationToken::no_deadline();
+        let output = run_command_cancellable("echo", &["ok".to_owned()], None, &cancel, None)
             .expect("should succeed");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("ok"));

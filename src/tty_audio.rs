@@ -2011,7 +2011,10 @@ mod tests {
                 assert_eq!(max_version, 2);
                 assert_eq!(supported_codecs.len(), 1);
             }
-            _ => panic!("expected Handshake variant"),
+            other => assert!(
+                matches!(other, TtyControlFrame::Handshake { .. }),
+                "expected Handshake variant"
+            ),
         }
     }
 
@@ -2032,7 +2035,10 @@ mod tests {
                 assert_eq!(negotiated_version, 1);
                 assert_eq!(negotiated_codec, "mulaw+zlib+b64");
             }
-            _ => panic!("expected HandshakeAck variant"),
+            other => assert!(
+                matches!(other, TtyControlFrame::HandshakeAck { .. }),
+                "expected HandshakeAck variant"
+            ),
         }
     }
 
@@ -2048,7 +2054,10 @@ mod tests {
             TtyControlFrame::RetransmitRequest { sequences } => {
                 assert_eq!(sequences, vec![3, 5, 7]);
             }
-            _ => panic!("expected RetransmitRequest variant"),
+            other => assert!(
+                matches!(other, TtyControlFrame::RetransmitRequest { .. }),
+                "expected RetransmitRequest variant"
+            ),
         }
     }
 
@@ -2064,7 +2073,10 @@ mod tests {
             TtyControlFrame::RetransmitResponse { sequences } => {
                 assert_eq!(sequences, vec![10, 11]);
             }
-            _ => panic!("expected RetransmitResponse variant"),
+            other => assert!(
+                matches!(other, TtyControlFrame::RetransmitResponse { .. }),
+                "expected RetransmitResponse variant"
+            ),
         }
     }
 
@@ -2075,8 +2087,13 @@ mod tests {
         let parsed: TtyControlFrame = serde_json::from_str(&json).expect("deserialize");
 
         match parsed {
-            TtyControlFrame::Ack { up_to_seq } => assert_eq!(up_to_seq, 42),
-            _ => panic!("expected Ack variant"),
+            TtyControlFrame::Ack { up_to_seq } => {
+                assert_eq!(up_to_seq, 42);
+            }
+            other => assert!(
+                matches!(other, TtyControlFrame::Ack { .. }),
+                "expected Ack variant"
+            ),
         }
     }
 
@@ -2092,7 +2109,10 @@ mod tests {
             TtyControlFrame::Backpressure { remaining_capacity } => {
                 assert_eq!(remaining_capacity, 100);
             }
-            _ => panic!("expected Backpressure variant"),
+            other => assert!(
+                matches!(other, TtyControlFrame::Backpressure { .. }),
+                "expected Backpressure variant"
+            ),
         }
     }
 
@@ -2465,7 +2485,10 @@ mod tests {
             TtyControlFrame::RetransmitRequest { sequences } => {
                 assert!(sequences.is_empty());
             }
-            _ => panic!("expected RetransmitRequest"),
+            other => assert!(
+                matches!(other, TtyControlFrame::RetransmitRequest { .. }),
+                "expected RetransmitRequest"
+            ),
         }
     }
 
@@ -2484,7 +2507,10 @@ mod tests {
             } => {
                 assert!(supported_codecs.is_empty());
             }
-            _ => panic!("expected Handshake"),
+            other => assert!(
+                matches!(other, TtyControlFrame::Handshake { .. }),
+                "expected Handshake"
+            ),
         }
     }
 
@@ -2499,7 +2525,10 @@ mod tests {
             TtyControlFrame::Backpressure { remaining_capacity } => {
                 assert_eq!(remaining_capacity, 0);
             }
-            _ => panic!("expected Backpressure"),
+            other => assert!(
+                matches!(other, TtyControlFrame::Backpressure { .. }),
+                "expected Backpressure"
+            ),
         }
     }
 
@@ -2509,8 +2538,10 @@ mod tests {
         let json = serde_json::to_string(&frame).expect("serialize");
         let parsed: TtyControlFrame = serde_json::from_str(&json).expect("deserialize");
         match parsed {
-            TtyControlFrame::Ack { up_to_seq } => assert_eq!(up_to_seq, 0),
-            _ => panic!("expected Ack"),
+            TtyControlFrame::Ack { up_to_seq } => {
+                assert_eq!(up_to_seq, 0);
+            }
+            other => assert!(matches!(other, TtyControlFrame::Ack { .. }), "expected Ack"),
         }
     }
 
@@ -3511,8 +3542,8 @@ mod tests {
 
         let output_str = String::from_utf8(output).expect("utf8");
         for (i, line) in output_str.lines().enumerate() {
-            let _: serde_json::Value = serde_json::from_str(line)
-                .unwrap_or_else(|e| panic!("line {i} is not valid JSON: {e}"));
+            let parsed = serde_json::from_str::<serde_json::Value>(line);
+            assert!(parsed.is_ok(), "line {i} is not valid JSON: {parsed:?}");
         }
     }
 
@@ -3557,7 +3588,10 @@ mod tests {
                 assert_eq!(max_version, SUPPORTED_PROTOCOL_VERSION);
                 assert!(supported_codecs.contains(&CODEC_MULAW_ZLIB_B64.to_owned()));
             }
-            other => panic!("expected Handshake, got {other:?}"),
+            other => assert!(
+                matches!(other, TtyControlFrame::Handshake { .. }),
+                "expected Handshake"
+            ),
         }
     }
 
@@ -4348,7 +4382,10 @@ mod tests {
                 assert_eq!(reason, SessionCloseReason::Normal);
                 assert_eq!(last_data_seq, Some(42));
             }
-            other => panic!("expected SessionClose, got: {other:?}"),
+            other => assert!(
+                matches!(other, TtyControlFrame::SessionClose { .. }),
+                "expected SessionClose"
+            ),
         }
     }
 
@@ -4368,7 +4405,10 @@ mod tests {
                 assert_eq!(reason, SessionCloseReason::Error);
                 assert!(last_data_seq.is_none());
             }
-            other => panic!("expected SessionClose, got: {other:?}"),
+            other => assert!(
+                matches!(other, TtyControlFrame::SessionClose { .. }),
+                "expected SessionClose"
+            ),
         }
     }
 
@@ -4847,7 +4887,10 @@ mod tests {
                 assert_eq!(segments[0].t, "hello world");
                 assert!(speculative);
             }
-            _ => panic!("expected TranscriptPartial"),
+            other => assert!(
+                matches!(other, TtyControlFrame::TranscriptPartial { .. }),
+                "expected TranscriptPartial"
+            ),
         }
     }
 

@@ -3299,7 +3299,7 @@ mod tests {
         let value = json!({"score": 42.5, "name": "test", "missing": null});
         match json_optional_float(&value, "score") {
             SqliteValue::Float(f) => assert!((f - 42.5).abs() < 1e-9),
-            other => panic!("expected Float, got {other:?}"),
+            other => assert!(matches!(other, SqliteValue::Float(_)), "expected Float"),
         }
         assert!(matches!(
             json_optional_float(&value, "name"),
@@ -3320,7 +3320,7 @@ mod tests {
         let value = json!({"name": "alice", "count": 5});
         match json_optional_text(&value, "name") {
             SqliteValue::Text(s) => assert_eq!(&*s, "alice"),
-            other => panic!("expected Text, got {other:?}"),
+            other => assert!(matches!(other, SqliteValue::Text(_)), "expected Text"),
         }
         assert!(matches!(
             json_optional_text(&value, "count"),
@@ -4786,10 +4786,9 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let state_root = dir.path().join("state");
         let _lock = SyncLock::acquire(&state_root, "test").expect("first acquire");
-        let err = match SyncLock::acquire(&state_root, "test") {
-            Err(e) => e,
-            Ok(_) => panic!("second acquire should fail"),
-        };
+        let second = SyncLock::acquire(&state_root, "test");
+        assert!(second.is_err(), "second acquire should fail");
+        let err = second.err().unwrap();
         let text = err.to_string();
         assert!(
             text.contains("sync lock held by pid"),
@@ -5395,8 +5394,8 @@ mod tests {
         // Tables should all exist.
         for table in ["runs", "segments", "events"] {
             let sql = format!("SELECT 1 FROM {table} LIMIT 1");
-            conn.query(&sql)
-                .unwrap_or_else(|_| panic!("table {table} should exist"));
+            let result = conn.query(&sql);
+            assert!(result.is_ok(), "table {table} should exist");
         }
     }
 
@@ -6223,7 +6222,13 @@ mod tests {
         let rows = conn.query("SELECT count(*) FROM runs").expect("query");
         let count = match rows[0].get(0) {
             Some(SqliteValue::Integer(n)) => *n,
-            _ => panic!("expected integer"),
+            other => {
+                assert!(
+                    matches!(other, Some(SqliteValue::Integer(_))),
+                    "expected integer, got {other:?}"
+                );
+                0
+            }
         };
         assert_eq!(count, 1, "should still have exactly 1 run after 2 imports");
     }
@@ -6609,7 +6614,13 @@ mod tests {
             .expect("query");
         let count = match rows[0].get(0) {
             Some(SqliteValue::Integer(n)) => *n,
-            _ => panic!("expected integer count"),
+            other => {
+                assert!(
+                    matches!(other, Some(SqliteValue::Integer(_))),
+                    "expected integer count, got {other:?}"
+                );
+                0
+            }
         };
         assert_eq!(count, 150, "DB should contain 150 events for this run");
 
@@ -6819,7 +6830,13 @@ mod tests {
             .expect("query");
         let count = match rows[0].get(0) {
             Some(SqliteValue::Integer(n)) => *n,
-            _ => panic!("expected integer count"),
+            other => {
+                assert!(
+                    matches!(other, Some(SqliteValue::Integer(_))),
+                    "expected integer count, got {other:?}"
+                );
+                0
+            }
         };
         assert_eq!(count, 60, "DB should contain 60 segments");
 
@@ -7061,11 +7078,17 @@ mod tests {
         let value = json!({"count": 42, "neg": -7});
         match json_optional_float(&value, "count") {
             SqliteValue::Float(f) => assert!((f - 42.0).abs() < f64::EPSILON),
-            other => panic!("expected Float(42.0), got {other:?}"),
+            other => assert!(
+                matches!(other, SqliteValue::Float(_)),
+                "expected Float(42.0), got {other:?}"
+            ),
         }
         match json_optional_float(&value, "neg") {
             SqliteValue::Float(f) => assert!((f - (-7.0)).abs() < f64::EPSILON),
-            other => panic!("expected Float(-7.0), got {other:?}"),
+            other => assert!(
+                matches!(other, SqliteValue::Float(_)),
+                "expected Float(-7.0), got {other:?}"
+            ),
         }
     }
 
@@ -10290,7 +10313,10 @@ mod tests {
                 msg.contains("checksum mismatch"),
                 "error should mention checksum mismatch, got: {msg}"
             ),
-            other => panic!("expected FwError::Storage, got: {other:?}"),
+            other => assert!(
+                matches!(other, FwError::Storage(_)),
+                "expected FwError::Storage, got: {other:?}"
+            ),
         }
     }
 
@@ -10334,7 +10360,10 @@ mod tests {
                 msg.contains("invalid sync cursor"),
                 "error should mention invalid sync cursor, got: {msg}"
             ),
-            other => panic!("expected FwError::Storage, got: {other:?}"),
+            other => assert!(
+                matches!(other, FwError::Storage(_)),
+                "expected FwError::Storage, got: {other:?}"
+            ),
         }
     }
 
@@ -10379,7 +10408,10 @@ mod tests {
                 msg.contains("missing export file"),
                 "error should mention missing file, got: {msg}"
             ),
-            other => panic!("expected FwError::Storage, got: {other:?}"),
+            other => assert!(
+                matches!(other, FwError::Storage(_)),
+                "expected FwError::Storage, got: {other:?}"
+            ),
         }
     }
 

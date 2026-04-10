@@ -1006,12 +1006,12 @@ mod tests {
         std::fs::write(&fake_input, "not audio").expect("write");
 
         // Token with no deadline should not cause cancellation.
-        let token = CancellationToken::no_deadline();
+        let cancel = CancellationToken::no_deadline();
         let result = normalize_to_wav_with_timeout(
             &fake_input,
             dir.path(),
             std::time::Duration::from_secs(5),
-            Some(&token),
+            Some(&cancel),
         );
         // The call should either succeed or fail due to ffmpeg — not panic.
         let _ = result;
@@ -1473,12 +1473,12 @@ mod tests {
         let input_wav = generate_sine_wav(dir.path(), "tone_cancel.wav");
         let work = tempfile::tempdir().expect("work_dir");
 
-        let token = CancellationToken::no_deadline();
+        let cancel = CancellationToken::no_deadline();
         let result = normalize_to_wav_with_timeout(
             &input_wav,
             work.path(),
             std::time::Duration::from_secs(30),
-            Some(&token),
+            Some(&cancel),
         )
         .expect("should succeed with no-deadline token");
 
