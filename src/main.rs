@@ -67,7 +67,13 @@ fn run() -> FwResult<()> {
         Command::Robot { command } => match command {
             RobotCommand::Run(args) => {
                 emit_robot_start(args.robot_summary())?;
-                let request = args.to_request()?;
+                let request = match args.to_request() {
+                    Ok(request) => request,
+                    Err(error) => {
+                        emit_robot_error(&error.to_string(), error.robot_error_code())?;
+                        return Err(error);
+                    }
+                };
 
                 let (event_tx, event_rx) = mpsc::channel();
                 let worker = std::thread::spawn(move || -> FwResult<_> {

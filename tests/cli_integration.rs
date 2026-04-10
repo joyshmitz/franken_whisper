@@ -680,6 +680,47 @@ fn robot_routing_history_extracts_decision_events() {
 }
 
 #[test]
+fn robot_run_invalid_request_emits_run_error() {
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_franken_whisper"))
+        .args(["robot", "run"])
+        .output()
+        .expect("robot command should execute");
+
+    assert!(
+        !output.status.success(),
+        "invalid request should return non-zero"
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.is_empty() && trimmed.starts_with('{')
+        })
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("line should be valid json: {error}; line={line}"))
+        })
+        .collect();
+
+    assert!(!lines.is_empty(), "expected NDJSON output");
+    assert_eq!(lines[0]["event"], "run_start");
+
+    let run_error = lines
+        .iter()
+        .find(|line| line["event"] == "run_error")
+        .expect("run_error envelope should be emitted");
+
+    assert_eq!(run_error["code"], "FW-ROBOT-REQUEST");
+    let message = run_error["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("--input") && message.contains("--stdin") && message.contains("--mic"),
+        "expected invalid request message, got: {message}"
+    );
+}
+
+#[test]
 fn robot_run_emits_cancelled_stage_before_terminal_run_error() {
     let dir = tempdir().expect("tempdir");
     let state_root = dir.path().join("state");
