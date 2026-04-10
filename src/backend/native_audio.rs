@@ -4,6 +4,7 @@
 //! energy-based speech-region extraction used by native backend runtimes.
 
 use std::fs;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -135,51 +136,88 @@ pub(crate) fn analyze_wav(
 }
 
 fn parse_pcm16_mono_wav(path: &Path) -> Result<WavPcm16Mono, String> {
-    let bytes = fs::read(path)
-        .map_err(|error| format!("failed to read wav `{}`: {error}", path.display()))?;
-    if bytes.len() < 44 {
-        return Err(format!("wav too small: {} bytes", bytes.len()));
+    let file_len = fs::metadata(path)
+        .map_err(|error| format!("failed to read wav `{}`: {error}", path.display()))?
+        .len() as usize;
+    if file_len < 44 {
+        return Err(format!("wav too small: {file_len} bytes"));
     }
-    if bytes.get(0..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") {
+
+    let file = fs::File::open(path)
+        .map_err(|error| format!("failed to read wav `{}`: {error}", path.display()))?;
+    let mut reader = BufReader::new(file);
+
+    let mut header = [0u8; 12];
+    reader
+        .read_exact(&mut header)
+        .map_err(|error| format!("failed to read wav header: {error}"))?;
+    if header.get(0..4) != Some(b"RIFF") || header.get(8..12) != Some(b"WAVE") {
         return Err("unsupported wav container; expected RIFF/WAVE".to_owned());
     }
 
-    let mut cursor = 12usize;
     let mut sample_rate_hz: Option<u32> = None;
     let mut channels: Option<u16> = None;
     let mut bits_per_sample: Option<u16> = None;
     let mut audio_format: Option<u16> = None;
-    let mut data: Option<Vec<u8>> = None;
+    let mut data_offset: Option<u64> = None;
+    let mut data_len: Option<u32> = None;
 
-    while cursor.saturating_add(8) <= bytes.len() {
-        let chunk_id = &bytes[cursor..cursor + 4];
+    loop {
+        let mut chunk_header = [0u8; 8];
+        match reader.read_exact(&mut chunk_header) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => {
+                return Err(format!("failed to read wav chunk header: {error}"));
+            }
+        }
+
+        let chunk_id = &chunk_header[0..4];
         let chunk_size = u32::from_le_bytes([
-            bytes[cursor + 4],
-            bytes[cursor + 5],
-            bytes[cursor + 6],
-            bytes[cursor + 7],
-        ]) as usize;
-        let data_start = cursor + 8;
-        let data_end_unclamped = data_start.saturating_add(chunk_size);
-        let data_end = data_end_unclamped.min(bytes.len());
+            chunk_header[4],
+            chunk_header[5],
+            chunk_header[6],
+            chunk_header[7],
+        ]);
+        let data_start = reader
+            .stream_position()
+            .map_err(|error| format!("failed to read wav chunk offset: {error}"))?;
 
         if chunk_id == b"fmt " {
-            if data_end.saturating_sub(data_start) < 16 {
+            if chunk_size < 16 {
                 return Err("invalid wav fmt chunk".to_owned());
             }
-            let fmt = &bytes[data_start..data_end];
+            let mut fmt = [0u8; 16];
+            reader
+                .read_exact(&mut fmt)
+                .map_err(|error| format!("failed to read wav fmt chunk: {error}"))?;
             audio_format = Some(u16::from_le_bytes([fmt[0], fmt[1]]));
             channels = Some(u16::from_le_bytes([fmt[2], fmt[3]]));
             sample_rate_hz = Some(u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]]));
             bits_per_sample = Some(u16::from_le_bytes([fmt[14], fmt[15]]));
+            if chunk_size > 16 {
+                reader
+                    .seek(SeekFrom::Current((chunk_size - 16) as i64))
+                    .map_err(|error| format!("failed to skip wav fmt padding: {error}"))?;
+            }
         } else if chunk_id == b"data" {
-            data = Some(bytes[data_start..data_end].to_vec());
+            data_offset = Some(data_start);
+            data_len = Some(chunk_size);
+            reader
+                .seek(SeekFrom::Current(chunk_size as i64))
+                .map_err(|error| format!("failed to skip wav data chunk: {error}"))?;
+        } else {
+            reader
+                .seek(SeekFrom::Current(chunk_size as i64))
+                .map_err(|error| format!("failed to skip wav chunk: {error}"))?;
         }
 
         // Chunks are word-aligned.
-        cursor = data_start
-            .saturating_add(chunk_size)
-            .saturating_add(chunk_size % 2);
+        if chunk_size % 2 == 1 {
+            reader
+                .seek(SeekFrom::Current(1))
+                .map_err(|error| format!("failed to skip wav padding: {error}"))?;
+        }
     }
 
     let sample_rate_hz = sample_rate_hz.ok_or_else(|| "missing wav fmt sample_rate".to_owned())?;
@@ -187,7 +225,8 @@ fn parse_pcm16_mono_wav(path: &Path) -> Result<WavPcm16Mono, String> {
     let bits_per_sample =
         bits_per_sample.ok_or_else(|| "missing wav fmt bits_per_sample".to_owned())?;
     let audio_format = audio_format.ok_or_else(|| "missing wav fmt audio_format".to_owned())?;
-    let data = data.ok_or_else(|| "missing wav data chunk".to_owned())?;
+    let data_offset = data_offset.ok_or_else(|| "missing wav data chunk".to_owned())?;
+    let mut data_len = data_len.ok_or_else(|| "missing wav data chunk".to_owned())?;
 
     if audio_format != 1 {
         return Err(format!(
@@ -208,10 +247,57 @@ fn parse_pcm16_mono_wav(path: &Path) -> Result<WavPcm16Mono, String> {
         return Err("invalid wav sample_rate 0".to_owned());
     }
 
-    let mut samples = Vec::with_capacity(data.len() / 2);
-    for pair in data.chunks_exact(2) {
-        samples.push(i16::from_le_bytes([pair[0], pair[1]]));
+    let available = (file_len as u64).saturating_sub(data_offset);
+    if available == 0 {
+        return Ok(WavPcm16Mono {
+            sample_rate_hz,
+            samples: Vec::new(),
+        });
     }
+    if data_len as u64 > available {
+        data_len = available as u32;
+    }
+
+    reader
+        .seek(SeekFrom::Start(data_offset))
+        .map_err(|error| format!("failed to seek wav data: {error}"))?;
+
+    let mut samples = Vec::with_capacity((data_len as usize) / 2);
+    let mut remaining = data_len as usize;
+    let mut buf = [0u8; 8192];
+    let mut leftover: Option<u8> = None;
+
+    while remaining > 0 {
+        let to_read = buf.len().min(remaining);
+        let read = reader
+            .read(&mut buf[..to_read])
+            .map_err(|error| format!("failed to read wav data: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        remaining = remaining.saturating_sub(read);
+
+        let mut start = 0usize;
+        if let Some(prev) = leftover.take() {
+            if read > 0 {
+                samples.push(i16::from_le_bytes([prev, buf[0]]));
+                start = 1;
+            } else {
+                leftover = Some(prev);
+            }
+        }
+
+        let chunk = &buf[start..read];
+        let mut iter = chunk.chunks_exact(2);
+        for pair in &mut iter {
+            samples.push(i16::from_le_bytes([pair[0], pair[1]]));
+        }
+        if let Some(remainder) = iter.remainder().first() {
+            leftover = Some(*remainder);
+        }
+    }
+
+    // If the data chunk is truncated, leftover bytes are ignored.
 
     Ok(WavPcm16Mono {
         sample_rate_hz,

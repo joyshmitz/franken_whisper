@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::audio;
 use crate::error::{FwError, FwResult};
-use crate::process::run_command;
+use crate::process::run_command_with_timeout;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TtyAudioFrame {
@@ -746,6 +747,8 @@ fn write_control_frame<W: Write>(writer: &mut W, frame: &TtyControlFrame) -> FwR
 }
 
 fn transcode_to_mulaw(input_audio: &Path, ulaw_path: &Path) -> FwResult<()> {
+    let ffmpeg_program = audio::resolve_ffmpeg_program(None)?;
+    let timeout = audio::ffmpeg_timeout();
     let args = vec![
         "-hide_banner".to_owned(),
         "-loglevel".to_owned(),
@@ -761,7 +764,7 @@ fn transcode_to_mulaw(input_audio: &Path, ulaw_path: &Path) -> FwResult<()> {
         "mulaw".to_owned(),
         ulaw_path.display().to_string(),
     ];
-    run_command("ffmpeg", &args, None)?;
+    run_command_with_timeout(&ffmpeg_program, &args, None, Some(timeout))?;
     Ok(())
 }
 
@@ -770,6 +773,8 @@ fn transcode_mulaw_to_wav(raw_ulaw: &Path, output_wav: &Path) -> FwResult<()> {
         fs::create_dir_all(parent)?;
     }
 
+    let ffmpeg_program = audio::resolve_ffmpeg_program(None)?;
+    let timeout = audio::ffmpeg_timeout();
     let args = vec![
         "-hide_banner".to_owned(),
         "-loglevel".to_owned(),
@@ -785,7 +790,7 @@ fn transcode_mulaw_to_wav(raw_ulaw: &Path, output_wav: &Path) -> FwResult<()> {
         raw_ulaw.display().to_string(),
         output_wav.display().to_string(),
     ];
-    run_command("ffmpeg", &args, None)?;
+    run_command_with_timeout(&ffmpeg_program, &args, None, Some(timeout))?;
     Ok(())
 }
 

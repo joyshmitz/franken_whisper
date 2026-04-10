@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -39,23 +40,19 @@ pub fn run_command_with_timeout(
         let mut child = command.spawn()?;
         let started_at = Instant::now();
 
-        let mut stdout_pipe = child.stdout.take().expect("stdout piped");
-        let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+        let stdout_pipe = child.stdout.take().expect("stdout piped");
+        let stderr_pipe = child.stderr.take().expect("stderr piped");
 
         let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
         let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
 
         thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let _ = stdout_pipe.read_to_end(&mut buf);
+            let buf = read_pipe_with_limit(stdout_pipe);
             let _ = stdout_tx.send(buf);
         });
 
         thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let _ = stderr_pipe.read_to_end(&mut buf);
+            let buf = read_pipe_with_limit(stderr_pipe);
             let _ = stderr_tx.send(buf);
         });
 
@@ -124,23 +121,19 @@ pub(crate) fn run_command_cancellable(
     let mut child = command.spawn()?;
     let started_at = Instant::now();
 
-    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
-    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stdout_pipe = child.stdout.take().expect("stdout piped");
+    let stderr_pipe = child.stderr.take().expect("stderr piped");
 
     let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
     let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
 
     thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf);
+        let buf = read_pipe_with_limit(stdout_pipe);
         let _ = stdout_tx.send(buf);
     });
 
     thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let _ = stderr_pipe.read_to_end(&mut buf);
+        let buf = read_pipe_with_limit(stderr_pipe);
         let _ = stderr_tx.send(buf);
     });
 
@@ -206,6 +199,29 @@ fn recv_pipe_output(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
 
 fn saturating_duration_ms(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
+fn read_pipe_with_limit<R: Read>(mut pipe: R) -> Vec<u8> {
+    let mut buf = [0u8; 8192];
+    let mut output = Vec::with_capacity(MAX_CAPTURED_OUTPUT_BYTES.min(buf.len()));
+
+    loop {
+        let read = match pipe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        if output.len() < MAX_CAPTURED_OUTPUT_BYTES {
+            let remaining = MAX_CAPTURED_OUTPUT_BYTES - output.len();
+            let take = remaining.min(read);
+            output.extend_from_slice(&buf[..take]);
+        }
+    }
+
+    output
 }
 
 #[cfg(test)]

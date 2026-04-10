@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -69,14 +69,25 @@ pub(crate) fn materialize_input_with_token(
             let target = work_dir.join(format!("stdin_input.{ext}"));
 
             let mut stdin = std::io::stdin().lock();
-            let mut buf = Vec::new();
-            stdin.read_to_end(&mut buf)?;
-            if buf.is_empty() {
+            let mut file = fs::File::create(&target)?;
+            let mut buf = [0u8; 8192];
+            let mut total = 0usize;
+            loop {
+                if let Some(tok) = token {
+                    tok.checkpoint()?;
+                }
+                let read = stdin.read(&mut buf)?;
+                if read == 0 {
+                    break;
+                }
+                file.write_all(&buf[..read])?;
+                total = total.saturating_add(read);
+            }
+            if total == 0 {
                 return Err(FwError::InvalidRequest(
                     "stdin input is empty; provide bytes or use --input/--mic".to_owned(),
                 ));
             }
-            fs::write(&target, buf)?;
             Ok(target)
         }
         InputSource::Microphone {
@@ -123,7 +134,7 @@ pub(crate) fn normalize_to_wav_with_timeout(
     if let Some(tok) = token {
         tok.checkpoint()?;
     }
-    match normalize_to_wav_with_builtin_decoder(input, &output) {
+    match normalize_to_wav_with_builtin_decoder(input, &output, token) {
         Ok(()) => {
             tracing::debug!(
                 stage = "normalize",
@@ -134,6 +145,9 @@ pub(crate) fn normalize_to_wav_with_timeout(
                 tok.checkpoint()?;
             }
             return Ok(output);
+        }
+        Err(error) if matches!(error, FwError::Cancelled(_)) => {
+            return Err(error);
         }
         Err(builtin_error) => {
             tracing::info!(
@@ -214,7 +228,7 @@ fn bool_env_enabled_from_raw(raw: Option<&str>, default_value: bool) -> bool {
     }
 }
 
-fn resolve_ffmpeg_program(work_dir: Option<&Path>) -> FwResult<String> {
+pub(crate) fn resolve_ffmpeg_program(work_dir: Option<&Path>) -> FwResult<String> {
     resolve_tool_program("ffmpeg", FFMPEG_BIN_ENV, work_dir)
 }
 
@@ -458,7 +472,14 @@ fn mark_executable_if_unix(path: &Path) -> FwResult<()> {
     Ok(())
 }
 
-fn normalize_to_wav_with_builtin_decoder(input: &Path, output: &Path) -> FwResult<()> {
+fn normalize_to_wav_with_builtin_decoder(
+    input: &Path,
+    output: &Path,
+    token: Option<&crate::orchestrator::CancellationToken>,
+) -> FwResult<()> {
+    if let Some(tok) = token {
+        tok.checkpoint()?;
+    }
     let file = fs::File::open(input)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -528,6 +549,9 @@ fn normalize_to_wav_with_builtin_decoder(input: &Path, output: &Path) -> FwResul
 
     let mut mono_samples = Vec::<f32>::new();
     loop {
+        if let Some(tok) = token {
+            tok.checkpoint()?;
+        }
         let packet = match probed.format.next_packet() {
             Ok(packet) => packet,
             Err(SymphoniaError::IoError(io_err))
@@ -570,11 +594,19 @@ fn normalize_to_wav_with_builtin_decoder(input: &Path, output: &Path) -> FwResul
         }
     }
 
+    if let Some(tok) = token {
+        tok.checkpoint()?;
+    }
+
     if mono_samples.is_empty() {
         return Err(FwError::Unsupported(format!(
             "built-in normalizer decoded no audio frames from `{}`; install ffmpeg for broader format support",
             input.display()
         )));
+    }
+
+    if let Some(tok) = token {
+        tok.checkpoint()?;
     }
 
     let normalized = resample_mono_linear(&mono_samples, sample_rate, 16_000);
@@ -754,7 +786,7 @@ fn microphone_defaults(
     }
 }
 
-fn ffmpeg_timeout() -> Duration {
+pub(crate) fn ffmpeg_timeout() -> Duration {
     duration_from_env(
         "FRANKEN_WHISPER_FFMPEG_TIMEOUT_MS",
         Duration::from_secs(180),
@@ -920,7 +952,7 @@ mod tests {
         let samples = vec![1_000i16; 8_000];
         write_test_wav(&input_wav, &samples, 8_000);
 
-        normalize_to_wav_with_builtin_decoder(&input_wav, &output_wav)
+        normalize_to_wav_with_builtin_decoder(&input_wav, &output_wav, None)
             .expect("built-in normalizer should decode wav");
 
         let reader = hound::WavReader::open(&output_wav).expect("normalized wav should open");

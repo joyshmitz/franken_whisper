@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Read as _, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read as _, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -1711,9 +1711,16 @@ fn sync_parent_dir(path: &Path) -> FwResult<()> {
 }
 
 fn sha256_file(path: &Path) -> FwResult<String> {
-    let bytes = fs::read(path)?;
+    let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -1976,24 +1983,35 @@ pub enum CompressionMode {
 }
 
 /// Gzip-compresses a JSONL file, writing the result to `output_path`.
-///
-/// The input file is read in its entirety, compressed, and written atomically.
 pub fn compress_jsonl(input_path: &Path, output_path: &Path) -> FwResult<()> {
-    let data = fs::read(input_path)?;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&data)?;
-    let compressed = encoder.finish()?;
-    atomic_write_bytes(output_path, &compressed)?;
+    let tmp = output_path.with_extension("tmp");
+    let input = fs::File::open(input_path)?;
+    let writer = BufWriter::new(fs::File::create(&tmp)?);
+
+    let mut encoder = GzEncoder::new(writer, Compression::default());
+    std::io::copy(&mut BufReader::new(input), &mut encoder)?;
+    let mut writer = encoder.finish()?;
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+
+    replace_file_atomically(&tmp, output_path)?;
+    sync_parent_dir(output_path)?;
     Ok(())
 }
 
 /// Decompresses a gzip-compressed JSONL file, writing the result to `output_path`.
 pub fn decompress_jsonl(input_path: &Path, output_path: &Path) -> FwResult<()> {
-    let compressed = fs::read(input_path)?;
-    let mut decoder = GzDecoder::new(&compressed[..]);
-    let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed)?;
-    atomic_write_bytes(output_path, &decompressed)?;
+    let tmp = output_path.with_extension("tmp");
+    let input = fs::File::open(input_path)?;
+    let mut decoder = GzDecoder::new(BufReader::new(input));
+    let mut writer = BufWriter::new(fs::File::create(&tmp)?);
+
+    std::io::copy(&mut decoder, &mut writer)?;
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+
+    replace_file_atomically(&tmp, output_path)?;
+    sync_parent_dir(output_path)?;
     Ok(())
 }
 
