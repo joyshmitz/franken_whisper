@@ -729,7 +729,11 @@ impl CorrectionTracker {
         })?;
 
         let drift = {
-            let partial = self.partials.get(&seq).expect("just found above");
+            let partial = self.partials.get(&seq).ok_or_else(|| {
+                FwError::Unsupported(format!(
+                    "speculation state desync: missing partial for seq {seq}"
+                ))
+            })?;
             CorrectionDrift::compute(&partial.segments, &quality_segments)
         };
 
@@ -748,7 +752,11 @@ impl CorrectionTracker {
 
         if needs_correction {
             // Retract the partial.
-            let partial = self.partials.get_mut(&seq).expect("just found above");
+            let partial = self.partials.get_mut(&seq).ok_or_else(|| {
+                FwError::Unsupported(format!(
+                    "speculation state desync: missing partial for seq {seq}"
+                ))
+            })?;
             partial.retract();
             let fast_segments = partial.segments.clone();
 
@@ -773,7 +781,11 @@ impl CorrectionTracker {
             Ok(CorrectionDecision::Correct { correction })
         } else {
             // Confirm the partial.
-            let partial = self.partials.get_mut(&seq).expect("just found above");
+            let partial = self.partials.get_mut(&seq).ok_or_else(|| {
+                FwError::Unsupported(format!(
+                    "speculation state desync: missing partial for seq {seq}"
+                ))
+            })?;
             partial.confirm();
             self.stats.confirmations_emitted += 1;
             self.window_to_seq.remove(&window_id);
