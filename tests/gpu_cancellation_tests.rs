@@ -684,6 +684,7 @@ fn evidence_ledger_builder_produces_valid_acceleration_entry() {
         .posterior(vec![0.9, 0.1]) // 90% confidence CPU is better
         .expected_loss("use_gpu", 0.8)
         .expected_loss("use_cpu", 0.1)
+        .expected_loss("fallback_to_cpu", 0.1)
         .chosen_expected_loss(0.1)
         .calibration_score(0.85)
         .fallback_active(true)
@@ -709,6 +710,7 @@ fn evidence_ledger_roundtrips_through_json() {
         .action("cancel_and_fallback")
         .posterior(vec![1.0])
         .expected_loss("cancel", 0.0)
+        .expected_loss("cancel_and_fallback", 0.0)
         .chosen_expected_loss(0.0)
         .calibration_score(1.0)
         .fallback_active(true)
@@ -974,6 +976,7 @@ fn acceleration_context_with_all_fields_populated() {
         .posterior(vec![0.85, 0.15])
         .expected_loss("use_gpu", 0.7)
         .expected_loss("use_cpu", 0.05)
+        .expected_loss("fallback_to_cpu", 0.05)
         .chosen_expected_loss(0.05)
         .calibration_score(0.9)
         .fallback_active(true)
