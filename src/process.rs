@@ -103,6 +103,7 @@ pub(crate) fn run_command_cancellable(
     token: &crate::orchestrator::CancellationToken,
     hard_timeout: Option<Duration>,
 ) -> FwResult<Output> {
+    token.checkpoint()?;
     if !command_exists(program) {
         return Err(FwError::CommandMissing {
             command: program.to_owned(),

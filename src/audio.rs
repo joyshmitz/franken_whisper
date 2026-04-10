@@ -530,6 +530,18 @@ fn normalize_to_wav_with_builtin_decoder(
                     input.display()
                 ))
             })?;
+        if sample_rate == 0 {
+            return Err(FwError::Unsupported(format!(
+                "built-in normalizer reported zero sample rate for `{}`",
+                input.display()
+            )));
+        }
+        if channel_count == 0 {
+            return Err(FwError::Unsupported(format!(
+                "built-in normalizer reported zero channels for `{}`",
+                input.display()
+            )));
+        }
         (
             track.id,
             track.codec_params.clone(),
