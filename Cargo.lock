@@ -1435,6 +1435,7 @@ dependencies = [
  "arc-swap",
  "bitflags 2.11.0",
  "crossterm",
+ "libc",
  "signal-hook 0.4.3",
  "unicode-display-width",
  "unicode-segmentation",

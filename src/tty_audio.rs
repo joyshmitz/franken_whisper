@@ -612,15 +612,27 @@ fn parse_audio_frames_for_decode<R: Read>(reader: &mut R) -> FwResult<Vec<TtyAud
     let mut handshake_seen = false;
     let mut audio_started = false;
     let mut negotiated_version = SUPPORTED_PROTOCOL_VERSION;
+    let mut legacy_protocol_version: Option<u32> = None;
 
     for entry in entries {
         match entry {
             FrameLine::Audio(frame) => {
-                if handshake_seen && frame.protocol_version != negotiated_version {
-                    return Err(FwError::InvalidRequest(format!(
-                        "frame protocol_version {} does not match negotiated version {} at seq {}",
-                        frame.protocol_version, negotiated_version, frame.seq
-                    )));
+                if handshake_seen {
+                    if frame.protocol_version != negotiated_version {
+                        return Err(FwError::InvalidRequest(format!(
+                            "frame protocol_version {} does not match negotiated version {} at seq {}",
+                            frame.protocol_version, negotiated_version, frame.seq
+                        )));
+                    }
+                } else if let Some(legacy_version) = legacy_protocol_version {
+                    if frame.protocol_version != legacy_version {
+                        return Err(FwError::InvalidRequest(format!(
+                            "frame protocol_version {} does not match legacy stream version {} at seq {}",
+                            frame.protocol_version, legacy_version, frame.seq
+                        )));
+                    }
+                } else {
+                    legacy_protocol_version = Some(frame.protocol_version);
                 }
                 audio_started = true;
                 frames.push(frame);
@@ -2285,6 +2297,22 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].seq, 0);
         assert_eq!(parsed[1].seq, 1);
+    }
+
+    #[test]
+    fn parse_audio_frames_for_decode_rejects_mixed_versions_without_handshake() {
+        let mut frame_v1 = make_frame(0, b"a");
+        frame_v1.protocol_version = MIN_PROTOCOL_VERSION;
+        let mut frame_v2 = make_frame(1, b"b");
+        frame_v2.protocol_version = SUPPORTED_PROTOCOL_VERSION;
+        let ndjson = frames_to_ndjson(&[frame_v1, frame_v2]);
+        let mut reader = ndjson.as_bytes();
+        let err =
+            parse_audio_frames_for_decode(&mut reader).expect_err("mixed versions should fail");
+        assert!(
+            err.to_string().contains("protocol_version"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
