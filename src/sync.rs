@@ -186,7 +186,11 @@ fn is_lock_stale(info: &LockInfo) -> bool {
     if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&info.created_at_rfc3339) {
         let age = Utc::now().signed_duration_since(created);
         if age.num_seconds() > LOCK_STALE_SECONDS {
-            return true;
+            tracing::warn!(
+                pid = info.pid,
+                age_seconds = age.num_seconds(),
+                "sync lock age exceeds stale threshold but process is alive; refusing to treat as stale"
+            );
         }
     }
 
@@ -3143,14 +3147,14 @@ mod tests {
     }
 
     #[test]
-    fn is_lock_stale_returns_true_for_ancient_timestamp() {
-        // Even if PID exists (current process), an ancient timestamp is stale.
+    fn is_lock_stale_returns_false_for_alive_pid_even_if_ancient() {
+        // Alive PID should keep lock even if timestamp is ancient.
         let info = LockInfo {
             pid: std::process::id(),
             created_at_rfc3339: "2000-01-01T00:00:00Z".to_owned(),
             operation: "test".to_owned(),
         };
-        assert!(is_lock_stale(&info));
+        assert!(!is_lock_stale(&info));
     }
 
     #[test]
@@ -5504,9 +5508,9 @@ mod tests {
     // ── Ninth-pass edge case tests ──
 
     #[test]
-    fn is_lock_stale_returns_true_for_alive_pid_with_aged_timestamp() {
+    fn is_lock_stale_returns_false_for_alive_pid_with_aged_timestamp() {
         // PID is alive (current process) but timestamp is >300 seconds old.
-        // The lock should be considered stale due to age.
+        // The lock should remain valid while the process is alive.
         let old_time = Utc::now() - chrono::Duration::seconds(LOCK_STALE_SECONDS + 60);
         let info = LockInfo {
             pid: std::process::id(),
@@ -5514,8 +5518,8 @@ mod tests {
             operation: "export".to_owned(),
         };
         assert!(
-            is_lock_stale(&info),
-            "should be stale: alive PID but old timestamp"
+            !is_lock_stale(&info),
+            "alive PID should keep lock even if timestamp is old"
         );
     }
 
@@ -5803,10 +5807,10 @@ mod tests {
         let locks_dir = state_root.join("locks");
         fs::create_dir_all(&locks_dir).expect("locks dir");
 
-        // Create a stale lock (old timestamp, current pid).
+        // Create a stale lock (old timestamp, dead pid).
         let old_time = Utc::now() - chrono::Duration::seconds(LOCK_STALE_SECONDS + 120);
         let stale_info = LockInfo {
-            pid: std::process::id(),
+            pid: u32::MAX - 1,
             created_at_rfc3339: old_time.to_rfc3339(),
             operation: "export".to_owned(),
         };
