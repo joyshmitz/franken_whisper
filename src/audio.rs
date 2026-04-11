@@ -63,9 +63,8 @@ pub(crate) fn materialize_input_with_token(
         InputSource::Stdin { hint_extension } => {
             let ext = hint_extension
                 .as_deref()
-                .map(|value| value.trim_start_matches('.'))
-                .filter(|value| !value.is_empty())
-                .unwrap_or("bin");
+                .and_then(sanitize_hint_extension)
+                .unwrap_or_else(|| "bin".to_owned());
             let target = work_dir.join(format!("stdin_input.{ext}"));
 
             let mut stdin = std::io::stdin().lock();
@@ -103,6 +102,21 @@ pub(crate) fn materialize_input_with_token(
             microphone_timeout(*seconds),
             work_dir,
         ),
+    }
+}
+
+fn sanitize_hint_extension(value: &str) -> Option<String> {
+    let trimmed = value.trim_start_matches('.').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        Some(trimmed.to_owned())
+    } else {
+        None
     }
 }
 
@@ -381,8 +395,19 @@ fn ffmpeg_bundle_source() -> FwResult<(&'static str, &'static str)> {
 }
 
 fn download_ffmpeg_bundle(url: &str, destination: &Path) -> FwResult<()> {
+    let has_curl = crate::process::command_exists("curl");
+    let has_wget = crate::process::command_exists("wget");
+    download_ffmpeg_bundle_with_tools(url, destination, has_curl, has_wget)
+}
+
+fn download_ffmpeg_bundle_with_tools(
+    url: &str,
+    destination: &Path,
+    has_curl: bool,
+    has_wget: bool,
+) -> FwResult<()> {
     let dest = destination.display().to_string();
-    if crate::process::command_exists("curl") {
+    if has_curl {
         let args = vec![
             "-fsSL".to_owned(),
             "--retry".to_owned(),
@@ -395,7 +420,7 @@ fn download_ffmpeg_bundle(url: &str, destination: &Path) -> FwResult<()> {
         return Ok(());
     }
 
-    if crate::process::command_exists("wget") {
+    if has_wget {
         let args = vec![
             "-q".to_owned(),
             "-O".to_owned(),
@@ -1264,6 +1289,35 @@ mod tests {
             .is_ok()
     }
 
+    #[test]
+    fn sanitize_hint_extension_accepts_simple_values() {
+        use super::sanitize_hint_extension;
+
+        assert_eq!(sanitize_hint_extension("wav").as_deref(), Some("wav"));
+        assert_eq!(sanitize_hint_extension(".mp3").as_deref(), Some("mp3"));
+        assert_eq!(sanitize_hint_extension("flac").as_deref(), Some("flac"));
+    }
+
+    #[test]
+    fn sanitize_hint_extension_rejects_invalid_characters() {
+        use super::sanitize_hint_extension;
+
+        assert!(sanitize_hint_extension("../secret").is_none());
+        assert!(sanitize_hint_extension("..\\evil").is_none());
+        assert!(sanitize_hint_extension("wav/../mp3").is_none());
+        assert!(sanitize_hint_extension("wav.txt").is_none());
+        assert!(sanitize_hint_extension("space name").is_none());
+    }
+
+    #[test]
+    fn sanitize_hint_extension_rejects_empty_or_whitespace() {
+        use super::sanitize_hint_extension;
+
+        assert!(sanitize_hint_extension("").is_none());
+        assert!(sanitize_hint_extension("   ").is_none());
+        assert!(sanitize_hint_extension(".").is_none());
+    }
+
     // ── materialize_input: additional edge cases ──
 
     #[test]
@@ -2054,15 +2108,18 @@ mod tests {
 
     #[test]
     fn download_ffmpeg_bundle_fails_when_no_curl_or_wget() {
-        use super::download_ffmpeg_bundle;
-        // Downloading from a non-routable URL with a bogus command environment
-        // should fail (either missing tools or timeout). We just verify no panic.
+        use super::download_ffmpeg_bundle_with_tools;
+        use crate::error::FwError;
+
+        // Ensure fast failure by simulating missing tools; avoids network waits.
         let dir = tempfile::tempdir().expect("tempdir");
         let dest = dir.path().join("bundle.tar.xz");
-        let result = download_ffmpeg_bundle("http://192.0.2.1/fake", &dest);
-        // Regardless of what's on PATH, this either errors or takes too long.
-        // We only care that it doesn't panic.
-        let _ = result;
+        let result =
+            download_ffmpeg_bundle_with_tools("http://192.0.2.1/fake", &dest, false, false);
+        assert!(
+            matches!(result, Err(FwError::CommandMissing { .. })),
+            "missing tools should surface CommandMissing error"
+        );
     }
 
     #[test]
