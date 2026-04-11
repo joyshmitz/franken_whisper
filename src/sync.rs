@@ -75,23 +75,19 @@ impl SyncLock {
         fs::create_dir_all(&locks_dir)?;
         let path = locks_dir.join("sync.lock");
 
-        if path.exists() {
-            let contents = fs::read_to_string(&path)?;
-            if let Ok(info) = serde_json::from_str::<LockInfo>(&contents) {
-                if is_lock_stale(&info) {
-                    archive_stale_lock(&path, "stale")?;
-                } else {
-                    return Err(FwError::Storage(format!(
-                        "sync lock held by pid {} since {}; \
-                         remove {} if the process is dead",
-                        info.pid,
-                        info.created_at_rfc3339,
-                        path.display()
-                    )));
-                }
+        if path.exists()
+            && let Some(info) = read_lock_info(&path)?
+        {
+            if is_lock_stale(&info) {
+                archive_stale_lock(&path, "stale")?;
             } else {
-                // Corrupt lock file — archive and proceed.
-                archive_stale_lock(&path, "corrupt")?;
+                return Err(FwError::Storage(format!(
+                    "sync lock held by pid {} since {}; \
+                     remove {} if the process is dead",
+                    info.pid,
+                    info.created_at_rfc3339,
+                    path.display()
+                )));
             }
         }
 
@@ -173,6 +169,31 @@ impl Drop for SyncLock {
 
 fn lock_info_matches(a: &LockInfo, b: &LockInfo) -> bool {
     a.pid == b.pid && a.created_at_rfc3339 == b.created_at_rfc3339 && a.operation == b.operation
+}
+
+fn read_lock_info(path: &Path) -> FwResult<Option<LockInfo>> {
+    let bytes = fs::read(path).map_err(|error| {
+        FwError::Storage(format!(
+            "failed to read sync lock {}: {error}",
+            path.display()
+        ))
+    })?;
+    let contents = match String::from_utf8(bytes) {
+        Ok(contents) => contents,
+        Err(_) => {
+            archive_stale_lock(path, "corrupt")?;
+            return Ok(None);
+        }
+    };
+
+    match serde_json::from_str::<LockInfo>(&contents) {
+        Ok(info) => Ok(Some(info)),
+        Err(_) => {
+            // Corrupt lock file — archive and proceed.
+            archive_stale_lock(path, "corrupt")?;
+            Ok(None)
+        }
+    }
 }
 
 fn is_lock_stale(info: &LockInfo) -> bool {
@@ -1762,7 +1783,8 @@ CREATE TABLE IF NOT EXISTS events (
 /// freshly created by `Connection::open`).
 fn verify_schema_exists(connection: &Connection) -> FwResult<()> {
     for table in &["runs", "segments", "events"] {
-        let sql = format!("SELECT 1 FROM {table} LIMIT 1");
+        let table_ident = sql_ident_sync(table);
+        let sql = format!("SELECT 1 FROM {table_ident} LIMIT 1");
         if connection.query(&sql).is_err() {
             return Err(FwError::Storage(format!(
                 "export requires an existing database with schema; \
@@ -2284,7 +2306,8 @@ fn resolve_jsonl_path(dir: &Path, stem: &str) -> PathBuf {
 
 /// Count the rows in a table via `SELECT COUNT(*)`.
 fn count_table(connection: &Connection, table: &str) -> FwResult<u64> {
-    let sql = format!("SELECT COUNT(*) FROM {table}");
+    let table_ident = sql_ident_sync(table);
+    let sql = format!("SELECT COUNT(*) FROM {table_ident}");
     let rows = connection
         .query(&sql)
         .map_err(|error| FwError::Storage(error.to_string()))?;
@@ -2871,6 +2894,25 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .any(|name| name.starts_with("sync.lock.corrupt."));
         assert!(archived, "corrupt lock should be archived");
+    }
+
+    #[test]
+    fn non_utf8_lock_is_archived_and_replaced() {
+        let dir = tempdir().expect("tempdir");
+        let state_root = dir.path().join("state");
+        let locks_dir = state_root.join("locks");
+        fs::create_dir_all(&locks_dir).expect("locks dir");
+        fs::write(locks_dir.join("sync.lock"), [0xff, 0xfe, 0xfd]).expect("write non-utf8 lock");
+
+        let lock = SyncLock::acquire(&state_root, "test").expect("acquire should recover");
+        lock.release().expect("release");
+
+        let archived = fs::read_dir(&locks_dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .any(|name| name.starts_with("sync.lock.corrupt."));
+        assert!(archived, "non-utf8 lock should be archived");
     }
 
     #[test]
