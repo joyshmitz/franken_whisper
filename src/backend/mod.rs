@@ -105,7 +105,12 @@ impl CalibrationState {
 
     /// Record a calibration observation.
     pub fn record(&mut self, predicted_probability: f64, success: bool) {
-        let clamped = predicted_probability.clamp(0.0, 1.0);
+        let predicted = if predicted_probability.is_finite() {
+            predicted_probability
+        } else {
+            0.5
+        };
+        let clamped = predicted.clamp(0.0, 1.0);
         let actual = if success { 1.0 } else { 0.0 };
         if self.observations.len() >= self.window_size {
             self.observations.pop_front();
@@ -3940,6 +3945,23 @@ mod tests {
             (log_cal - outcome.calibration_score).abs() < 1e-12,
             "routing_log calibration_score should match struct field"
         );
+    }
+
+    #[test]
+    fn calibration_state_sanitizes_non_finite_predictions() {
+        let mut state = CalibrationState::new(ROUTER_HISTORY_WINDOW);
+
+        state.record(f64::NAN, true);
+        let brier = state.brier_score().expect("brier score");
+        assert!(brier.is_finite(), "brier score should be finite");
+        assert!(
+            (brier - 0.25).abs() < 1e-9,
+            "NaN prediction should default to 0.5, got brier {brier}"
+        );
+
+        state.record(f64::INFINITY, false);
+        let brier = state.brier_score().expect("brier score");
+        assert!(brier.is_finite(), "brier score should remain finite");
     }
 
     #[test]
