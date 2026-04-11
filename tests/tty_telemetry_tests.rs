@@ -321,6 +321,7 @@ fn multiple_gaps_tracked_in_telemetry() {
 #[test]
 fn missing_frame_detection_generates_retransmit_candidates() {
     let report = DecodeReport {
+        protocol_version: 1,
         frames_decoded: 3,
         gaps: vec![SequenceGap {
             expected: 2,
@@ -635,6 +636,7 @@ fn telemetry_counters_combined_gap_integrity_duplicate() {
 #[test]
 fn retransmit_plan_telemetry_counters_match_report() {
     let report = DecodeReport {
+        protocol_version: 1,
         frames_decoded: 10,
         gaps: vec![
             SequenceGap {
@@ -734,22 +736,24 @@ fn emit_retransmit_loop_output_format_with_gaps() {
     // First two are retransmit_request
     for line in &lines[..2] {
         let frame: TtyControlFrame = serde_json::from_str(line).expect("parse");
-        match frame {
-            TtyControlFrame::RetransmitRequest { sequences } => {
-                assert_eq!(sequences, vec![1, 2]);
-            }
-            other => panic!("expected RetransmitRequest, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                &frame,
+                TtyControlFrame::RetransmitRequest { sequences } if sequences == &vec![1, 2]
+            ),
+            "expected RetransmitRequest, got {frame:?}"
+        );
     }
 
     // Last is retransmit_response
     let last: TtyControlFrame = serde_json::from_str(lines[2]).expect("parse");
-    match last {
-        TtyControlFrame::RetransmitResponse { sequences } => {
-            assert_eq!(sequences, vec![1, 2]);
-        }
-        other => panic!("expected RetransmitResponse, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &last,
+            TtyControlFrame::RetransmitResponse { sequences } if sequences == &vec![1, 2]
+        ),
+        "expected RetransmitResponse, got {last:?}"
+    );
 }
 
 #[test]
@@ -768,15 +772,16 @@ fn emit_retransmit_loop_ack_when_no_issues() {
 
     let text = String::from_utf8(out).expect("utf8");
     let parsed: TtyControlFrame = serde_json::from_str(text.trim()).expect("json");
-    match parsed {
-        TtyControlFrame::Ack { up_to_seq } => assert_eq!(up_to_seq, 2),
-        other => panic!("expected Ack, got {other:?}"),
-    }
+    assert!(
+        matches!(&parsed, TtyControlFrame::Ack { up_to_seq } if *up_to_seq == 2),
+        "expected Ack, got {parsed:?}"
+    );
 }
 
 #[test]
 fn retransmit_plan_ranges_are_collapsed_correctly() {
     let report = DecodeReport {
+        protocol_version: 1,
         frames_decoded: 10,
         gaps: vec![SequenceGap {
             expected: 1,

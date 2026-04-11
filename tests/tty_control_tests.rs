@@ -515,6 +515,7 @@ fn negotiate_version_picks_highest_compatible() {
 #[test]
 fn retransmit_candidates_from_gaps() {
     let report = DecodeReport {
+        protocol_version: 1,
         frames_decoded: 4,
         gaps: vec![
             SequenceGap {
@@ -539,6 +540,7 @@ fn retransmit_candidates_from_gaps() {
 #[test]
 fn retransmit_candidates_empty_when_no_gaps() {
     let report = DecodeReport {
+        protocol_version: 1,
         frames_decoded: 5,
         gaps: vec![],
         duplicates: vec![],
@@ -553,6 +555,7 @@ fn retransmit_candidates_empty_when_no_gaps() {
 #[test]
 fn retransmit_plan_merges_gaps_and_integrity_failures() {
     let report = DecodeReport {
+        protocol_version: 1,
         frames_decoded: 10,
         gaps: vec![SequenceGap {
             expected: 2,
@@ -589,6 +592,7 @@ fn retransmit_plan_merges_gaps_and_integrity_failures() {
 #[test]
 fn retransmit_plan_empty_when_no_issues() {
     let report = DecodeReport {
+        protocol_version: 1,
         frames_decoded: 3,
         gaps: vec![],
         duplicates: vec![],
@@ -642,20 +646,23 @@ fn emit_retransmit_loop_emits_requests_then_response() {
     );
     // First two should be retransmit requests
     for (i, frame) in control_frames.iter().enumerate().take(2) {
-        match frame {
-            TtyControlFrame::RetransmitRequest { sequences } => {
-                assert_eq!(sequences, &vec![1, 2]);
-            }
-            other => panic!("expected RetransmitRequest at index {i}, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                frame,
+                TtyControlFrame::RetransmitRequest { sequences } if sequences == &vec![1, 2]
+            ),
+            "expected RetransmitRequest at index {i}, got {frame:?}"
+        );
     }
     // Last should be retransmit response
-    match &control_frames[2] {
-        TtyControlFrame::RetransmitResponse { sequences } => {
-            assert_eq!(sequences, &vec![1, 2]);
-        }
-        other => panic!("expected RetransmitResponse, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &control_frames[2],
+            TtyControlFrame::RetransmitResponse { sequences } if sequences == &vec![1, 2]
+        ),
+        "expected RetransmitResponse, got {:?}",
+        &control_frames[2]
+    );
 }
 
 #[test]
@@ -670,10 +677,10 @@ fn emit_retransmit_loop_emits_ack_when_no_missing() {
 
     let text = String::from_utf8(out).expect("utf8");
     let parsed: TtyControlFrame = serde_json::from_str(text.trim()).expect("json");
-    match parsed {
-        TtyControlFrame::Ack { up_to_seq } => assert_eq!(up_to_seq, 1),
-        other => panic!("expected Ack, got {other:?}"),
-    }
+    assert!(
+        matches!(&parsed, TtyControlFrame::Ack { up_to_seq } if *up_to_seq == 1),
+        "expected Ack, got {parsed:?}"
+    );
 }
 
 #[test]
@@ -717,12 +724,14 @@ fn emit_retransmit_loop_with_integrity_failures() {
         .collect();
     // 1 request + 1 response
     assert_eq!(control_frames.len(), 2);
-    match &control_frames[0] {
-        TtyControlFrame::RetransmitRequest { sequences } => {
-            assert!(sequences.contains(&2), "should request corrupted seq 2");
-        }
-        other => panic!("expected RetransmitRequest, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &control_frames[0],
+            TtyControlFrame::RetransmitRequest { sequences } if sequences.contains(&2)
+        ),
+        "expected RetransmitRequest, got {:?}",
+        &control_frames[0]
+    );
 }
 
 // =========================================================================
@@ -909,18 +918,17 @@ fn control_frame_handshake_round_trips_through_json() {
     };
     let json = serde_json::to_string(&original).expect("serialize");
     let parsed: TtyControlFrame = serde_json::from_str(&json).expect("deserialize");
-    match parsed {
-        TtyControlFrame::Handshake {
-            min_version,
-            max_version,
-            supported_codecs,
-        } => {
-            assert_eq!(min_version, 1);
-            assert_eq!(max_version, 3);
-            assert_eq!(supported_codecs.len(), 2);
-        }
-        other => panic!("expected Handshake, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &parsed,
+            TtyControlFrame::Handshake {
+                min_version: 1,
+                max_version: 3,
+                supported_codecs,
+            } if supported_codecs.len() == 2
+        ),
+        "expected Handshake, got {parsed:?}"
+    );
 }
 
 #[test]
@@ -931,16 +939,16 @@ fn session_close_round_trips_through_json() {
     };
     let json = serde_json::to_string(&original).expect("serialize");
     let parsed: TtyControlFrame = serde_json::from_str(&json).expect("deserialize");
-    match parsed {
-        TtyControlFrame::SessionClose {
-            reason,
-            last_data_seq,
-        } => {
-            assert_eq!(reason, SessionCloseReason::Timeout);
-            assert_eq!(last_data_seq, Some(100));
-        }
-        other => panic!("expected SessionClose, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &parsed,
+            TtyControlFrame::SessionClose {
+                reason,
+                last_data_seq,
+            } if *reason == SessionCloseReason::Timeout && *last_data_seq == Some(100)
+        ),
+        "expected SessionClose, got {parsed:?}"
+    );
 }
 
 #[test]

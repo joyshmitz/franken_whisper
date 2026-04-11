@@ -33,11 +33,12 @@ pub struct TtyAudioFrame {
     pub payload_sha256: Option<String>,
 }
 
-const SUPPORTED_PROTOCOL_VERSION: u32 = 1;
-const CODEC_MULAW_ZLIB_B64: &str = "mulaw+zlib+b64";
-
+const MIN_PROTOCOL_VERSION: u32 = 1;
 /// Protocol version that adds transcript correction frames.
 pub const TRANSCRIPT_PROTOCOL_VERSION: u32 = 2;
+const SUPPORTED_PROTOCOL_VERSION: u32 = TRANSCRIPT_PROTOCOL_VERSION;
+const DEFAULT_PROTOCOL_VERSION: u32 = MIN_PROTOCOL_VERSION;
+const CODEC_MULAW_ZLIB_B64: &str = "mulaw+zlib+b64";
 
 /// Wire-efficient transcript segment for TTY protocol.
 /// Field names are deliberately short to minimize bandwidth.
@@ -195,11 +196,12 @@ enum FrameLine {
 }
 
 fn default_protocol_version() -> u32 {
-    SUPPORTED_PROTOCOL_VERSION
+    DEFAULT_PROTOCOL_VERSION
 }
 
 #[derive(Debug, Clone)]
 pub struct DecodeReport {
+    pub protocol_version: u32,
     pub frames_decoded: u64,
     pub gaps: Vec<SequenceGap>,
     pub duplicates: Vec<u64>,
@@ -253,7 +255,7 @@ pub fn encode_to_writer<W: Write>(
     let chunk_size = mulaw_chunk_size(chunk_ms);
 
     let handshake = TtyControlFrame::Handshake {
-        min_version: SUPPORTED_PROTOCOL_VERSION,
+        min_version: MIN_PROTOCOL_VERSION,
         max_version: SUPPORTED_PROTOCOL_VERSION,
         supported_codecs: vec![CODEC_MULAW_ZLIB_B64.to_owned()],
     };
@@ -323,6 +325,10 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
             "no tty-audio frames were provided on stdin".to_owned(),
         ));
     }
+    let protocol_version = frames
+        .first()
+        .map(|frame| frame.protocol_version)
+        .unwrap_or(DEFAULT_PROTOCOL_VERSION);
 
     // Sort frames by sequence number so that retransmitted and out-of-order frames
     // are placed in their correct chronological position before decoding.
@@ -460,6 +466,7 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
     }
 
     let report = DecodeReport {
+        protocol_version,
         frames_decoded,
         gaps,
         duplicates,
@@ -473,10 +480,10 @@ pub fn decode_frames_to_raw_with_policy<R: Read>(
 }
 
 fn validate_audio_frame_metadata(frame: &TtyAudioFrame) -> FwResult<()> {
-    if frame.protocol_version != SUPPORTED_PROTOCOL_VERSION {
+    if !(MIN_PROTOCOL_VERSION..=SUPPORTED_PROTOCOL_VERSION).contains(&frame.protocol_version) {
         return Err(FwError::InvalidRequest(format!(
-            "unsupported tty-audio protocol_version {} at seq {} (supported: {})",
-            frame.protocol_version, frame.seq, SUPPORTED_PROTOCOL_VERSION
+            "unsupported tty-audio protocol_version {} at seq {} (supported: {}-{})",
+            frame.protocol_version, frame.seq, MIN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSION
         )));
     }
     if frame.codec != CODEC_MULAW_ZLIB_B64 {
@@ -560,7 +567,7 @@ pub fn retransmit_plan_from_report(report: &DecodeReport) -> RetransmitPlan {
     let requested_ranges = collapse_sequences_to_ranges(&requested_sequences);
 
     RetransmitPlan {
-        protocol_version: SUPPORTED_PROTOCOL_VERSION,
+        protocol_version: report.protocol_version,
         requested_sequences,
         requested_ranges,
         gap_count: report.gaps.len(),
@@ -636,7 +643,7 @@ fn parse_audio_frames_for_decode<R: Read>(reader: &mut R) -> FwResult<Vec<TtyAud
                     }
 
                     let negotiated = negotiate_version(
-                        SUPPORTED_PROTOCOL_VERSION,
+                        MIN_PROTOCOL_VERSION,
                         SUPPORTED_PROTOCOL_VERSION,
                         min_version,
                         max_version,
@@ -961,7 +968,7 @@ pub fn stream_mic_to_ndjson<S: MicAudioSource, W: Write>(
 
     // Emit protocol handshake.
     let handshake = TtyControlFrame::Handshake {
-        min_version: SUPPORTED_PROTOCOL_VERSION,
+        min_version: MIN_PROTOCOL_VERSION,
         max_version: SUPPORTED_PROTOCOL_VERSION,
         supported_codecs: vec![CODEC_MULAW_ZLIB_B64.to_owned()],
     };
@@ -1710,12 +1717,13 @@ mod tests {
     use base64::engine::general_purpose::STANDARD_NO_PAD;
 
     use super::{
-        CODEC_MULAW_ZLIB_B64, DecodeRecoveryPolicy, SUPPORTED_PROTOCOL_VERSION,
-        TranscriptSegmentCompact, TtyAudioFrame, compress_chunk, crc32_of, decode_frames_to_raw,
-        decode_frames_to_raw_with_policy, decompress_chunk, emit_control_frame_to_writer,
-        emit_retransmit_loop_from_reader, emit_tty_transcript_partial, emit_tty_transcript_retract,
-        mulaw_chunk_size, parse_audio_frames_for_decode, parse_frame_line, parse_frames,
-        retransmit_plan_from_reader, sha256_hex,
+        CODEC_MULAW_ZLIB_B64, DEFAULT_PROTOCOL_VERSION, DecodeRecoveryPolicy, MIN_PROTOCOL_VERSION,
+        SUPPORTED_PROTOCOL_VERSION, TranscriptSegmentCompact, TtyAudioFrame, compress_chunk,
+        crc32_of, decode_frames_to_raw, decode_frames_to_raw_with_policy, decompress_chunk,
+        emit_control_frame_to_writer, emit_retransmit_loop_from_reader,
+        emit_tty_transcript_partial, emit_tty_transcript_retract, mulaw_chunk_size,
+        parse_audio_frames_for_decode, parse_frame_line, parse_frames, retransmit_plan_from_reader,
+        sha256_hex,
     };
 
     fn make_frame(seq: u64, data: &[u8]) -> TtyAudioFrame {
@@ -1782,7 +1790,7 @@ mod tests {
         let json = r#"{"seq":0,"codec":"mulaw+zlib+b64","sample_rate_hz":8000,"channels":1,"payload_b64":"abc"}"#;
         let frame: TtyAudioFrame = serde_json::from_str(json).expect("should deserialize");
         assert!(frame.crc32.is_none());
-        assert_eq!(frame.protocol_version, SUPPORTED_PROTOCOL_VERSION);
+        assert_eq!(frame.protocol_version, DEFAULT_PROTOCOL_VERSION);
     }
 
     #[test]
@@ -1994,8 +2002,8 @@ mod tests {
     #[test]
     fn handshake_frame_serializes_and_deserializes() {
         let frame = TtyControlFrame::Handshake {
-            min_version: 1,
-            max_version: 2,
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
             supported_codecs: vec!["mulaw+zlib+b64".to_owned()],
         };
         let json = serde_json::to_string(&frame).expect("serialize");
@@ -2007,8 +2015,8 @@ mod tests {
                 max_version,
                 supported_codecs,
             } => {
-                assert_eq!(min_version, 1);
-                assert_eq!(max_version, 2);
+                assert_eq!(min_version, MIN_PROTOCOL_VERSION);
+                assert_eq!(max_version, SUPPORTED_PROTOCOL_VERSION);
                 assert_eq!(supported_codecs.len(), 1);
             }
             other => assert!(
@@ -2147,6 +2155,7 @@ mod tests {
     #[test]
     fn retransmit_candidates_from_gaps() {
         let report = super::DecodeReport {
+            protocol_version: DEFAULT_PROTOCOL_VERSION,
             frames_decoded: 5,
             gaps: vec![
                 super::SequenceGap {
@@ -2172,6 +2181,7 @@ mod tests {
     #[test]
     fn retransmit_candidates_empty_when_no_gaps() {
         let report = super::DecodeReport {
+            protocol_version: DEFAULT_PROTOCOL_VERSION,
             frames_decoded: 3,
             gaps: vec![],
             duplicates: vec![],
@@ -2188,8 +2198,8 @@ mod tests {
     #[test]
     fn decode_accepts_handshake_and_interleaved_control_frames() {
         let handshake = serde_json::to_string(&TtyControlFrame::Handshake {
-            min_version: 1,
-            max_version: 1,
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
             supported_codecs: vec![CODEC_MULAW_ZLIB_B64.to_owned()],
         })
         .expect("serialize handshake");
@@ -2225,8 +2235,8 @@ mod tests {
     #[test]
     fn decode_rejects_duplicate_handshake() {
         let handshake = serde_json::to_string(&TtyControlFrame::Handshake {
-            min_version: 1,
-            max_version: 1,
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
             supported_codecs: vec![CODEC_MULAW_ZLIB_B64.to_owned()],
         })
         .expect("serialize handshake");
@@ -2241,8 +2251,8 @@ mod tests {
     #[test]
     fn decode_rejects_handshake_without_supported_codec() {
         let handshake = serde_json::to_string(&TtyControlFrame::Handshake {
-            min_version: 1,
-            max_version: 1,
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
             supported_codecs: vec!["pcm16".to_owned()],
         })
         .expect("serialize handshake");
@@ -2355,6 +2365,7 @@ mod tests {
     #[test]
     fn retransmit_plan_merges_gap_and_integrity_sequences_into_ranges() {
         let report = super::DecodeReport {
+            protocol_version: DEFAULT_PROTOCOL_VERSION,
             frames_decoded: 6,
             gaps: vec![
                 super::SequenceGap {
@@ -2374,7 +2385,7 @@ mod tests {
         };
 
         let plan = retransmit_plan_from_report(&report);
-        assert_eq!(plan.protocol_version, 1);
+        assert_eq!(plan.protocol_version, DEFAULT_PROTOCOL_VERSION);
         assert_eq!(plan.requested_sequences, vec![1, 2, 3, 6, 7, 8]);
         assert_eq!(
             plan.requested_ranges,
@@ -2428,6 +2439,7 @@ mod tests {
     #[test]
     fn decode_report_construction_and_field_access() {
         let report = super::DecodeReport {
+            protocol_version: DEFAULT_PROTOCOL_VERSION,
             frames_decoded: 10,
             gaps: vec![super::SequenceGap {
                 expected: 2,
@@ -2495,8 +2507,8 @@ mod tests {
     #[test]
     fn control_frame_handshake_empty_codecs() {
         let frame = TtyControlFrame::Handshake {
-            min_version: 1,
-            max_version: 1,
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
             supported_codecs: vec![],
         };
         let json = serde_json::to_string(&frame).expect("serialize");
@@ -2595,10 +2607,7 @@ mod tests {
 
     #[test]
     fn default_protocol_version_is_supported() {
-        assert_eq!(
-            super::default_protocol_version(),
-            SUPPORTED_PROTOCOL_VERSION
-        );
+        assert_eq!(super::default_protocol_version(), DEFAULT_PROTOCOL_VERSION);
     }
 
     #[test]
@@ -3584,7 +3593,7 @@ mod tests {
                 max_version,
                 supported_codecs,
             } => {
-                assert_eq!(min_version, SUPPORTED_PROTOCOL_VERSION);
+                assert_eq!(min_version, MIN_PROTOCOL_VERSION);
                 assert_eq!(max_version, SUPPORTED_PROTOCOL_VERSION);
                 assert!(supported_codecs.contains(&CODEC_MULAW_ZLIB_B64.to_owned()));
             }
@@ -3901,8 +3910,8 @@ mod tests {
         use super::TtyControlFrame;
 
         let handshake = serde_json::to_string(&TtyControlFrame::Handshake {
-            min_version: 1,
-            max_version: 1,
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
             supported_codecs: vec![CODEC_MULAW_ZLIB_B64.to_owned()],
         })
         .expect("serialize handshake");
@@ -3928,8 +3937,8 @@ mod tests {
         use super::TtyControlFrame;
 
         let handshake = serde_json::to_string(&TtyControlFrame::Handshake {
-            min_version: 1,
-            max_version: 1,
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
             supported_codecs: vec![CODEC_MULAW_ZLIB_B64.to_owned()],
         })
         .expect("serialize handshake");
@@ -4265,8 +4274,8 @@ mod tests {
     fn abr_emit_critical_frame_with_fec_perfect_link() {
         let abr = AdaptiveBitrateController::new(64_000);
         let handshake = TtyControlFrame::Handshake {
-            min_version: 1,
-            max_version: 1,
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
             supported_codecs: vec![CODEC_MULAW_ZLIB_B64.to_owned()],
         };
         let mut out = Vec::new();

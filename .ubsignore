@@ -1,0 +1,4 @@
+# UBS ignore list: test-only helpers use panic/unwrap/serde expect for assertions.
+# These are safe in tests and cause UBS false positives.
+tests/tty_control_tests.rs
+tests/tty_telemetry_tests.rs
