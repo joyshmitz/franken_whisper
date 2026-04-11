@@ -1828,6 +1828,13 @@ async fn execute_backend(
     } else {
         None
     };
+    let adaptive_prediction = backend_order.as_ref().map(|order| {
+        let top_backend = order[0];
+        let predicted_success = backend::router_state_snapshot()
+            .map(|state| state.metrics_for(top_backend).success_rate)
+            .unwrap_or(0.5);
+        (top_backend, predicted_success)
+    });
 
     // Checkpoint: between normalize -> backend
     checkpoint_or_emit("backend", pcx, log)?;
@@ -1918,6 +1925,11 @@ async fn execute_backend(
             "native_fallback_error": execution.native_fallback_error.clone(),
         }),
     );
+    if let Some((top_backend, predicted_success)) = adaptive_prediction {
+        let top_succeeded = execution.result.backend == top_backend;
+        backend::record_adaptive_prediction(top_succeeded);
+        backend::record_calibration_observation(predicted_success, top_succeeded);
+    }
 
     let backend_output_sha256 = match sha256_json_value(&execution.result.raw_output) {
         Ok(hash) => Some(hash),
