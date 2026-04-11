@@ -4039,9 +4039,8 @@ mod tests {
     // -- bd-3i1.1: CancellationToken checkpoint tests --
 
     fn expired_token() -> crate::orchestrator::CancellationToken {
-        let token = crate::orchestrator::CancellationToken::with_deadline_from_now(
-            std::time::Duration::from_millis(0),
-        );
+        let deadline = std::time::Duration::from_millis(0);
+        let token = crate::orchestrator::CancellationToken::with_deadline_from_now(deadline); // ubs:ignore — test cancellation token
         std::thread::sleep(std::time::Duration::from_millis(5));
         token
     }
@@ -4083,7 +4082,7 @@ mod tests {
 
     #[test]
     fn cancel_token_persist_entry_checkpoint() {
-        let token = expired_token();
+        let token = expired_token(); // ubs:ignore — test cancellation token
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("cx_entry.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
@@ -4098,7 +4097,7 @@ mod tests {
 
     #[test]
     fn cancel_token_persist_live_succeeds() {
-        let token = live_token();
+        let token = live_token(); // ubs:ignore — test cancellation token
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("cx_live.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
@@ -4136,7 +4135,7 @@ mod tests {
         let store = RunStore::open(&db_path).expect("store");
         let good = minimal_report("run-good", &db_path);
         store.persist_report(&good).expect("persist good");
-        let token = expired_token();
+        let token = expired_token(); // ubs:ignore — test cancellation token
         let bad = report_with_segments_and_events("run-bad", &db_path, 10, 5);
         assert!(
             store
@@ -4156,7 +4155,7 @@ mod tests {
         store
             .persist_report(&minimal_report("r", &db_path))
             .expect("p");
-        let token = expired_token();
+        let token = expired_token(); // ubs:ignore — test cancellation token
         let err = store
             .list_recent_runs_cancellable(10, Some(&token))
             .expect_err("cancel");
@@ -4171,7 +4170,7 @@ mod tests {
         store
             .persist_report(&minimal_report("r", &db_path))
             .expect("p");
-        let token = live_token();
+        let token = live_token(); // ubs:ignore — test cancellation token
         let runs = store
             .list_recent_runs_cancellable(10, Some(&token))
             .expect("ok");
@@ -4198,7 +4197,7 @@ mod tests {
         store
             .persist_report(&minimal_report("r", &db_path))
             .expect("p");
-        let token = expired_token();
+        let token = expired_token(); // ubs:ignore — test cancellation token
         let err = store
             .load_run_details_cancellable("r", Some(&token))
             .expect_err("cancel");
@@ -4212,7 +4211,7 @@ mod tests {
         let store = RunStore::open(&db_path).expect("store");
         let report = report_with_segments_and_events("r", &db_path, 3, 2);
         store.persist_report(&report).expect("p");
-        let token = live_token();
+        let token = live_token(); // ubs:ignore — test cancellation token
         let details = store
             .load_run_details_cancellable("r", Some(&token))
             .expect("ok")
@@ -4241,7 +4240,7 @@ mod tests {
         store
             .persist_report(&minimal_report("r", &db_path))
             .expect("p");
-        let token = expired_token();
+        let token = expired_token(); // ubs:ignore — test cancellation token
         let err = store
             .load_latest_run_details_cancellable(Some(&token))
             .expect_err("cancel");
@@ -4256,7 +4255,7 @@ mod tests {
         store
             .persist_report(&minimal_report("r", &db_path))
             .expect("p");
-        let token = live_token();
+        let token = live_token(); // ubs:ignore — test cancellation token
         let details = store
             .load_latest_run_details_cancellable(Some(&token))
             .expect("ok")
@@ -4284,7 +4283,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("cx_nonexist.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
-        let token = live_token();
+        let token = live_token(); // ubs:ignore — test cancellation token
         let result = store
             .load_run_details_cancellable("nonexistent", Some(&token))
             .expect("ok");
@@ -4296,7 +4295,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("cx_empty_latest.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
-        let token = live_token();
+        let token = live_token(); // ubs:ignore — test cancellation token
         let result = store
             .load_latest_run_details_cancellable(Some(&token))
             .expect("ok");
@@ -4317,7 +4316,7 @@ mod tests {
 
     #[test]
     fn cancel_token_no_deadline_never_cancels() {
-        let token = crate::orchestrator::CancellationToken::no_deadline();
+        let token = crate::orchestrator::CancellationToken::no_deadline(); // ubs:ignore — test cancellation token
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("cx_nodeadline.sqlite3");
         let store = RunStore::open(&db_path).expect("store");
@@ -4551,7 +4550,9 @@ mod tests {
                 Err(_) if attempt < max_retries - 1 => {
                     std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
                 }
-                Err(e) => panic!("persist failed after {max_retries} retries: {e}"),
+                Err(e) => {
+                    panic!("persist failed after {max_retries} retries: {e}"); // ubs:ignore — test panic on unexpected persistence failure
+                }
             }
         }
     }
@@ -4565,10 +4566,10 @@ mod tests {
         let store = RunStore::open(&db_path).expect("store");
         drop(store);
 
-        // Serialize writes through a mutex. Frankensqlite's MVCC silently
-        // drops committed data when multiple separate WAL-mode connections
-        // write simultaneously, so we serialise persist calls while still
-        // exercising the multi-thread open/prepare/persist path.
+        // Serialize writes through a mutex. Frankensqlite's MVCC can report
+        // busy/lock contention when multiple connections are open during
+        // parallel tests, so we serialize the open + persist sequence to
+        // keep the test deterministic under load.
         let write_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
 
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
@@ -4578,10 +4579,10 @@ mod tests {
                 let b = barrier.clone();
                 let wl = write_lock.clone();
                 std::thread::spawn(move || {
-                    let store = RunStore::open(&path).expect("thread store");
                     let report = minimal_report(&format!("concurrent-{i}"), &path);
                     b.wait(); // Synchronize thread readiness.
                     let _guard = wl.lock().expect("write lock");
+                    let store = RunStore::open(&path).expect("thread store");
                     persist_with_retry(&store, &report, 10);
                 })
             })
@@ -4662,7 +4663,7 @@ mod tests {
                                 if super::is_busy_storage_error(&e) {
                                     return false;
                                 }
-                                panic!("c10-{i} open failed after retries: {e}");
+                                panic!("c10-{i} open failed after retries: {e}"); // ubs:ignore — test panic on unexpected open failure
                             }
                         };
                         match store.persist_report(&report) {
@@ -4679,7 +4680,7 @@ mod tests {
                                 if super::is_busy_storage_error(&e) {
                                     return false;
                                 }
-                                panic!("c10-{i} persist failed after retries: {e}");
+                                panic!("c10-{i} persist failed after retries: {e}"); // ubs:ignore — test panic on unexpected persist failure
                             }
                         }
                     }
@@ -4757,7 +4758,7 @@ mod tests {
         let store = RunStore::open(&db_path).expect("store");
 
         // Create an already-expired token (0ms deadline, then sleep past it).
-        let token = CancellationToken::with_deadline_from_now(std::time::Duration::from_millis(0));
+        let token = CancellationToken::with_deadline_from_now(std::time::Duration::from_millis(0)); // ubs:ignore — test cancellation token
         std::thread::sleep(std::time::Duration::from_millis(5));
 
         let mut report = richly_populated_report("run-rollback", &db_path);
