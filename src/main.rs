@@ -102,13 +102,14 @@ fn run(cli: Cli) -> FwResult<()> {
                     emit_robot_stage(&streamed.run_id, &streamed.event)?;
                 }
 
-                let join_outcome = worker
-                    .join()
-                    .map_err(|_| FwError::Unsupported("robot worker thread panicked".to_owned()))?;
-
-                match join_outcome {
-                    Ok(report) => emit_robot_complete(&report),
-                    Err(error) => {
+                match worker.join() {
+                    Ok(Ok(report)) => emit_robot_complete(&report),
+                    Ok(Err(error)) => {
+                        emit_robot_error(&error.to_string(), error.robot_error_code())?;
+                        Err(error)
+                    }
+                    Err(_) => {
+                        let error = FwError::Unsupported("robot worker thread panicked".to_owned());
                         emit_robot_error(&error.to_string(), error.robot_error_code())?;
                         Err(error)
                     }
