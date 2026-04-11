@@ -271,7 +271,24 @@ fn pid_is_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn pid_is_alive(pid: u32) -> bool {
-    pid == std::process::id()
+    if pid == std::process::id() {
+        return true;
+    }
+
+    let filter = format!("PID eq {pid}");
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let needle = format!("\"{pid}\"");
+            stdout.contains(&needle)
+        }
+        Ok(_) => true,
+        Err(_) => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
