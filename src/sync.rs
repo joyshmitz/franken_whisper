@@ -186,13 +186,23 @@ fn is_lock_stale(info: &LockInfo) -> bool {
 
         #[cfg(not(target_os = "linux"))]
         {
-            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&info.created_at_rfc3339) {
-                let age = Utc::now().signed_duration_since(created);
-                if age.num_seconds() > LOCK_STALE_SECONDS {
+            match chrono::DateTime::parse_from_rfc3339(&info.created_at_rfc3339) {
+                Ok(created) => {
+                    let age = Utc::now().signed_duration_since(created);
+                    if age.num_seconds() > LOCK_STALE_SECONDS {
+                        tracing::warn!(
+                            pid = info.pid,
+                            age_seconds = age.num_seconds(),
+                            "sync lock age exceeds stale threshold and pid liveness is unknown; treating as stale"
+                        );
+                        return true;
+                    }
+                }
+                Err(error) => {
                     tracing::warn!(
                         pid = info.pid,
-                        age_seconds = age.num_seconds(),
-                        "sync lock age exceeds stale threshold and pid liveness is unknown; treating as stale"
+                        error = %error,
+                        "sync lock timestamp invalid; treating as stale"
                     );
                     return true;
                 }
@@ -203,13 +213,22 @@ fn is_lock_stale(info: &LockInfo) -> bool {
     }
 
     // Check age
-    if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&info.created_at_rfc3339) {
-        let age = Utc::now().signed_duration_since(created);
-        if age.num_seconds() > LOCK_STALE_SECONDS {
+    match chrono::DateTime::parse_from_rfc3339(&info.created_at_rfc3339) {
+        Ok(created) => {
+            let age = Utc::now().signed_duration_since(created);
+            if age.num_seconds() > LOCK_STALE_SECONDS {
+                tracing::warn!(
+                    pid = info.pid,
+                    age_seconds = age.num_seconds(),
+                    "sync lock age exceeds stale threshold but process is alive; refusing to treat as stale"
+                );
+            }
+        }
+        Err(error) => {
             tracing::warn!(
                 pid = info.pid,
-                age_seconds = age.num_seconds(),
-                "sync lock age exceeds stale threshold but process is alive; refusing to treat as stale"
+                error = %error,
+                "sync lock timestamp invalid; leaving lock in place"
             );
         }
     }
