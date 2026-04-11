@@ -487,15 +487,20 @@ pub fn check_ffmpeg() -> DependencyCheck {
 #[must_use]
 pub fn check_database(db_path: &Path) -> DependencyCheck {
     let mut issues = Vec::new();
-    let parent_path = db_path.parent().unwrap_or_else(|| Path::new(""));
-    let parent_exists = parent_path.exists() || parent_path == Path::new("");
+    let raw_parent = db_path.parent().unwrap_or_else(|| Path::new(""));
+    let parent_path = if raw_parent == Path::new("") {
+        Path::new(".")
+    } else {
+        raw_parent
+    };
+    let parent_exists = parent_path.exists();
     if !parent_exists {
         issues.push(format!(
             "database parent directory does not exist: {}",
             parent_path.display()
         ));
     }
-    if parent_exists && parent_path != Path::new("") {
+    if parent_exists {
         match std::fs::metadata(parent_path) {
             Ok(metadata) if metadata.permissions().readonly() => {
                 issues.push(format!(
