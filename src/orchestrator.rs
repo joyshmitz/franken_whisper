@@ -3382,7 +3382,7 @@ fn silhouette_score(
 
 /// Resolve the effective target speaker count from [`SpeakerConstraints`].
 ///
-/// Priority: `num_speakers` > `max_speakers` > inferred from `(min + max) / 2`.
+/// Priority: `num_speakers` > `max_speakers`.
 /// Returns `None` when no upper bound is specified.
 fn resolve_speaker_target(constraints: Option<&crate::model::SpeakerConstraints>) -> Option<usize> {
     let sc = constraints?;
@@ -3482,13 +3482,17 @@ fn diarize_segments(
                 0.0
             };
 
-            let words: Vec<&str> = seg.text.split_whitespace().collect();
-            let word_count_norm = words.len() as f64 / max_word_count;
-            let avg_word_len = if words.is_empty() {
+            let mut word_count = 0usize;
+            let mut total_chars = 0usize;
+            for word in seg.text.split_whitespace() {
+                word_count += 1;
+                total_chars += word.len();
+            }
+            let word_count_norm = word_count as f64 / max_word_count;
+            let avg_word_len = if word_count == 0 {
                 0.0
             } else {
-                let total_chars: usize = words.iter().map(|w| w.len()).sum();
-                (total_chars as f64 / words.len() as f64) / 12.0
+                (total_chars as f64 / word_count as f64) / 12.0
             };
             let text_len_norm = seg.text.len() as f64 / max_text_len;
 
@@ -3528,11 +3532,17 @@ fn diarize_segments(
         }
 
         if best_sim >= similarity_threshold {
-            let cid =
-                best_cluster.expect("best_cluster is always Some when centroids is non-empty");
-            assignments.push(cid);
-            cluster_members[cid].push(emb.clone());
-            centroids[cid] = SpeakerEmbedding::centroid(&cluster_members[cid]);
+            if let Some(cid) = best_cluster {
+                assignments.push(cid);
+                cluster_members[cid].push(emb.clone());
+                centroids[cid] = SpeakerEmbedding::centroid(&cluster_members[cid]);
+            } else {
+                // Defensive fallback: should not happen unless centroids bookkeeping diverges.
+                let new_id = centroids.len();
+                centroids.push(emb.clone());
+                cluster_members.push(vec![emb.clone()]);
+                assignments.push(new_id);
+            }
         } else {
             let new_id = centroids.len();
             centroids.push(emb.clone());
