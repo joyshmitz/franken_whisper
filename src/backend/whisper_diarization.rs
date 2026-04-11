@@ -230,24 +230,65 @@ fn script_path() -> PathBuf {
 }
 
 fn parse_srt_segments(content: &str) -> Vec<TranscriptionSegment> {
-    content
-        .split("\n\n")
-        .filter_map(|block| parse_srt_block(block.trim()))
-        .collect()
+    let mut segments = Vec::new();
+    let mut block_lines: Vec<String> = Vec::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            if !block_lines.is_empty() {
+                let block = block_lines.join("\n");
+                if let Some(segment) = parse_srt_block(block.trim()) {
+                    segments.push(segment);
+                }
+                block_lines.clear();
+            }
+            continue;
+        }
+        block_lines.push(line.to_owned());
+    }
+
+    if !block_lines.is_empty() {
+        let block = block_lines.join("\n");
+        if let Some(segment) = parse_srt_block(block.trim()) {
+            segments.push(segment);
+        }
+    }
+
+    segments
 }
 
 fn parse_srt_block(block: &str) -> Option<TranscriptionSegment> {
     let lines: Vec<&str> = block.lines().collect();
-    if lines.len() < 3 {
+    if lines.is_empty() {
         return None;
     }
 
-    let timing_line = lines[1];
-    let mut timing = timing_line.split("-->").map(str::trim);
-    let start = timing.next().and_then(parse_srt_time);
-    let end = timing.next().and_then(parse_srt_time);
+    let (start, end, text) =
+        if let Some(timing_idx) = lines.iter().position(|line| line.contains("-->")) {
+            if timing_idx + 1 >= lines.len() {
+                return None;
+            }
 
-    let text = lines[2..].join(" ").trim().to_owned();
+            let timing_line = lines[timing_idx];
+            let mut timing = timing_line.split("-->").map(str::trim);
+            let start = timing.next().and_then(parse_srt_time);
+            let end = timing.next().and_then(parse_srt_time);
+            let text = lines[(timing_idx + 1)..].join(" ");
+            (start, end, text)
+        } else {
+            if lines.len() < 3 {
+                return None;
+            }
+            let index_line = lines[0].trim();
+            if index_line.is_empty() || !index_line.chars().all(|ch| ch.is_ascii_digit()) {
+                return None;
+            }
+            let text = lines[2..].join(" ");
+            (None, None, text)
+        };
+
+    let text = text.trim().to_owned();
     if text.is_empty() {
         return None;
     }
@@ -843,6 +884,31 @@ corrupted\n\n\
         assert_eq!(segments[0].text, "hello");
         assert_eq!(segments[1].text, "world");
         assert_eq!(segments[2].text, "foo");
+    }
+
+    #[test]
+    fn parse_srt_segments_handles_crlf_and_blank_lines() {
+        use super::parse_srt_segments;
+        let content = "1\r\n00:00:01,000 --> 00:00:02,000\r\nhello\r\n\r\n\
+2\r\n00:00:02,000 --> 00:00:03,000\r\nworld\r\n\r\n   \r\n\
+3\r\n00:00:03,000 --> 00:00:04,000\r\nfoo\r\n";
+        let segments = parse_srt_segments(content);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].text, "hello");
+        assert_eq!(segments[1].text, "world");
+        assert_eq!(segments[2].text, "foo");
+    }
+
+    #[test]
+    fn parse_srt_segments_without_index_line() {
+        use super::parse_srt_segments;
+        let content = "\
+00:00:01,000 --> 00:00:02,000\nhello\n\n\
+00:00:02,000 --> 00:00:03,000\nworld";
+        let segments = parse_srt_segments(content);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "hello");
+        assert_eq!(segments[1].text, "world");
     }
 
     #[test]
