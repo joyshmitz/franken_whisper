@@ -632,7 +632,9 @@ fn load_cursor(path: &Path) -> FwResult<Option<SyncCursor>> {
 
 /// Persist the cursor as a pretty-printed JSON file.
 fn save_cursor(path: &Path, cursor: &SyncCursor) -> FwResult<()> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(cursor)?;
@@ -933,7 +935,9 @@ fn import_inner(
     validate_checksums(&manifest, input_dir)?;
 
     // Open DB and ensure schema exists
-    if let Some(parent) = db_path.parent() {
+    if let Some(parent) = db_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         fs::create_dir_all(parent)?;
     }
     let connection = Connection::open(db_path.display().to_string())

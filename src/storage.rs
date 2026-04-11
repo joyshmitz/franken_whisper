@@ -54,7 +54,9 @@ impl std::fmt::Debug for RunStore {
 
 impl RunStore {
     pub fn open(db_path: &Path) -> FwResult<Self> {
-        if let Some(parent) = db_path.parent() {
+        if let Some(parent) = db_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
             fs::create_dir_all(parent)?;
         }
 

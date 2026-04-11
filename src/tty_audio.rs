@@ -787,10 +787,19 @@ fn transcode_to_mulaw(input_audio: &Path, ulaw_path: &Path) -> FwResult<()> {
     Ok(())
 }
 
-fn transcode_mulaw_to_wav(raw_ulaw: &Path, output_wav: &Path) -> FwResult<()> {
-    if let Some(parent) = output_wav.parent() {
-        fs::create_dir_all(parent)?;
+fn ensure_parent_dir(path: &Path) -> FwResult<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
     }
+    fs::create_dir_all(parent)?;
+    Ok(())
+}
+
+fn transcode_mulaw_to_wav(raw_ulaw: &Path, output_wav: &Path) -> FwResult<()> {
+    ensure_parent_dir(output_wav)?;
 
     let ffmpeg_program = audio::resolve_ffmpeg_program(None)?;
     let timeout = audio::ffmpeg_timeout();
@@ -1724,6 +1733,8 @@ pub fn emit_tty_transcript_correct(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use crate::error::{FwError, FwResult};
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -1733,9 +1744,9 @@ mod tests {
         SUPPORTED_PROTOCOL_VERSION, TranscriptSegmentCompact, TtyAudioFrame, compress_chunk,
         crc32_of, decode_frames_to_raw, decode_frames_to_raw_with_policy, decompress_chunk,
         emit_control_frame_to_writer, emit_retransmit_loop_from_reader,
-        emit_tty_transcript_partial, emit_tty_transcript_retract, mulaw_chunk_size,
-        parse_audio_frames_for_decode, parse_frame_line, parse_frames, retransmit_plan_from_reader,
-        sha256_hex,
+        emit_tty_transcript_partial, emit_tty_transcript_retract, ensure_parent_dir,
+        mulaw_chunk_size, parse_audio_frames_for_decode, parse_frame_line, parse_frames,
+        retransmit_plan_from_reader, sha256_hex,
     };
 
     fn make_frame(seq: u64, data: &[u8]) -> TtyAudioFrame {
@@ -1774,6 +1785,12 @@ mod tests {
         let compressed = compress_chunk(data).expect("compression should work");
         let decompressed = decompress_chunk(&compressed).expect("decompression should work");
         assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn ensure_parent_dir_ignores_empty_parent() {
+        let path = Path::new("out.wav");
+        ensure_parent_dir(path).expect("empty parent should be ignored");
     }
 
     #[test]
