@@ -15,6 +15,60 @@ pub fn run_command(program: &str, args: &[String], cwd: Option<&Path>) -> FwResu
     run_command_with_timeout(program, args, cwd, None)
 }
 
+fn render_command_for_log(program: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        return program.to_owned();
+    }
+
+    let mut rendered = Vec::with_capacity(args.len() + 1);
+    rendered.push(program.to_owned());
+
+    let mut redact_next = false;
+    for arg in args {
+        if redact_next {
+            rendered.push("***".to_owned());
+            redact_next = false;
+            continue;
+        }
+
+        if let Some((flag, _value)) = arg.split_once('=')
+            && is_sensitive_flag(flag)
+        {
+            rendered.push(format!("{flag}=***"));
+            continue;
+        }
+
+        if is_sensitive_flag(arg) {
+            rendered.push(arg.clone());
+            redact_next = true;
+            continue;
+        }
+
+        rendered.push(arg.clone());
+    }
+
+    rendered.join(" ")
+}
+
+fn is_sensitive_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--hf-token"
+            | "--hf_token"
+            | "--api-key"
+            | "--api_key"
+            | "--access-token"
+            | "--access_token"
+            | "--auth-token"
+            | "--auth_token"
+            | "--password"
+            | "--pass"
+            | "--secret"
+            | "--secret-key"
+            | "--secret_key"
+    )
+}
+
 pub fn run_command_with_timeout(
     program: &str,
     args: &[String],
@@ -27,7 +81,7 @@ pub fn run_command_with_timeout(
         });
     }
 
-    let rendered = format!("{} {}", program, args.join(" "));
+    let rendered = render_command_for_log(program, args);
     let mut command = Command::new(program);
     command.args(args);
     command.stdout(Stdio::piped());
@@ -110,7 +164,7 @@ pub(crate) fn run_command_cancellable(
         });
     }
 
-    let rendered = format!("{} {}", program, args.join(" "));
+    let rendered = render_command_for_log(program, args);
     let mut command = Command::new(program);
     command.args(args);
     command.stdout(Stdio::piped());
@@ -231,7 +285,7 @@ mod tests {
 
     use crate::orchestrator::CancellationToken;
 
-    use super::run_command_cancellable;
+    use super::{render_command_for_log, run_command_cancellable};
 
     #[test]
     fn cancellable_completes_fast_command() {
@@ -369,6 +423,31 @@ mod tests {
         assert!(
             stdout.contains(dir.path().to_str().unwrap()),
             "expected cwd in stdout, got: {stdout}"
+        );
+    }
+
+    #[test]
+    fn render_command_for_log_redacts_sensitive_flags() {
+        let args = vec![
+            "--hf-token".to_owned(),
+            "hf_secret_123".to_owned(),
+            "--api-key=secret_api_key".to_owned(),
+            "--token-threshold".to_owned(),
+            "0.1".to_owned(),
+            "positional".to_owned(),
+        ];
+        let rendered = render_command_for_log("prog", &args);
+        assert!(rendered.contains("--hf-token ***"));
+        assert!(rendered.contains("--api-key=***"));
+        assert!(rendered.contains("--token-threshold 0.1"));
+        assert!(rendered.contains("positional"));
+        assert!(
+            !rendered.contains("hf_secret_123"),
+            "hf token should be redacted"
+        );
+        assert!(
+            !rendered.contains("secret_api_key"),
+            "api key should be redacted"
         );
     }
 
