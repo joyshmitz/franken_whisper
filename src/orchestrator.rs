@@ -1585,7 +1585,7 @@ async fn run_pipeline_body(
 
         let persist_report = report.clone();
         let persist_db = request.db_path.clone();
-        let persist_token = pcx.stage_token(stage_budgets.persist_ms);
+        let persist_token = pcx.stage_token(stage_budgets.persist_ms); // ubs:ignore — cancellation token is not a secret
         if let Err(error) = run_stage_with_budget("persist", stage_budgets.persist_ms, move || {
             let store = RunStore::open(&persist_db)?;
             store.persist_report_cancellable(&persist_report, Some(&persist_token))
@@ -1645,7 +1645,7 @@ async fn execute_ingest(
 
     let ingest_input = request.input.clone();
     let ingest_dir = run_tmp_dir.path().to_path_buf();
-    let ingest_token = pcx.stage_token(stage_budgets.ingest_ms);
+    let ingest_token = pcx.stage_token(stage_budgets.ingest_ms); // ubs:ignore — cancellation token is not a secret
     let input_path = match run_stage_with_budget("ingest", stage_budgets.ingest_ms, move || {
         audio::materialize_input_with_token(&ingest_input, &ingest_dir, Some(&ingest_token))
     })
@@ -1700,7 +1700,7 @@ async fn execute_normalize(
     let normalize_input = input_path.clone();
     let normalize_dir = run_tmp_dir.path().to_path_buf();
     let normalize_budget_ms = stage_budgets.normalize_ms;
-    let normalize_token = pcx.stage_token(normalize_budget_ms);
+    let normalize_token = pcx.stage_token(normalize_budget_ms); // ubs:ignore — cancellation token is not a secret
     let normalized_wav = match run_stage_with_budget("normalize", normalize_budget_ms, move || {
         audio::normalize_to_wav_with_timeout(
             &normalize_input,
@@ -1847,7 +1847,7 @@ async fn execute_backend(
     let backend_wav = normalized_wav.clone();
     let backend_dir = run_tmp_dir.path().to_path_buf();
     let backend_budget_ms = stage_budgets.backend_ms;
-    let cancel_token = pcx.stage_token(backend_budget_ms);
+    let cancel_token = pcx.stage_token(backend_budget_ms); // ubs:ignore — cancellation token is not a secret
     let execution = match run_stage_with_budget("backend", backend_budget_ms, move || {
         let tok = Some(&cancel_token);
         if let Some(order) = backend_order {
@@ -1981,7 +1981,7 @@ async fn execute_accelerate(
     );
 
     let acceleration_budget_ms = stage_budgets.acceleration_ms;
-    let acceleration_token = pcx.stage_token(acceleration_budget_ms);
+    let acceleration_token = pcx.stage_token(acceleration_budget_ms); // ubs:ignore — cancellation token is not a secret
     let (updated_result, acceleration) =
         match run_stage_with_budget("acceleration", acceleration_budget_ms, move || {
             let mut local = result;
@@ -2250,7 +2250,7 @@ async fn execute_align(
     );
 
     let align_budget_ms = stage_budgets.align_ms;
-    let align_token = pcx.stage_token(align_budget_ms);
+    let align_token = pcx.stage_token(align_budget_ms); // ubs:ignore — cancellation token is not a secret
     let audio_duration = inter.normalized_duration;
 
     let (updated_result, report) =
@@ -2729,7 +2729,7 @@ async fn execute_vad(
 
     let vad_wav = normalized_wav.clone();
     let vad_budget_ms = stage_budgets.vad_ms;
-    let vad_token = pcx.stage_token(vad_budget_ms);
+    let vad_token = pcx.stage_token(vad_budget_ms); // ubs:ignore — cancellation token is not a secret
     let config_for_run = vad_config.clone();
 
     let report = match run_stage_with_budget("vad", vad_budget_ms, move || {
@@ -2910,7 +2910,7 @@ async fn execute_separate(
 
     let sep_wav = normalized_wav.clone();
     let sep_budget_ms = stage_budgets.separate_ms;
-    let sep_token = pcx.stage_token(sep_budget_ms);
+    let sep_token = pcx.stage_token(sep_budget_ms); // ubs:ignore — cancellation token is not a secret
 
     let report = match run_stage_with_budget("separate", sep_budget_ms, move || {
         source_separate(&sep_wav, &sep_token)
@@ -3174,7 +3174,7 @@ async fn execute_punctuate(
     );
 
     let punct_budget_ms = stage_budgets.punctuate_ms;
-    let punct_token = pcx.stage_token(punct_budget_ms);
+    let punct_token = pcx.stage_token(punct_budget_ms); // ubs:ignore — cancellation token is not a secret
 
     let (updated_result, report) =
         match run_stage_with_budget("punctuate", punct_budget_ms, move || {
@@ -3667,7 +3667,7 @@ async fn execute_diarize(
     );
 
     let diarize_budget_ms = stage_budgets.diarize_ms;
-    let diarize_token = pcx.stage_token(diarize_budget_ms);
+    let diarize_token = pcx.stage_token(diarize_budget_ms); // ubs:ignore — cancellation token is not a secret
     let audio_duration = inter.normalized_duration;
     let speaker_constraints = request.backend_params.speaker_constraints.clone();
 
@@ -4658,12 +4658,14 @@ mod tests {
             }));
         let error = result.expect_err("stage should time out");
 
-        match &error {
-            FwError::StageTimeout { stage, budget_ms } => {
-                assert_eq!(stage, "backend");
-                assert_eq!(budget_ms, &1);
-            }
-            other => panic!("expected StageTimeout, got {other:?}"),
+        if let FwError::StageTimeout { stage, budget_ms } = &error {
+            assert_eq!(stage, "backend");
+            assert_eq!(budget_ms, &1);
+        } else {
+            assert!(
+                matches!(error, FwError::StageTimeout { .. }),
+                "expected StageTimeout, got {error:?}"
+            );
         }
 
         assert_eq!(stage_failure_code("backend", &error), "backend.timeout");
@@ -4890,14 +4892,14 @@ mod tests {
     #[test]
     fn cancellation_token_no_deadline_always_passes() {
         let pcx = PipelineCx::new(None);
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
         assert!(token.checkpoint().is_ok());
     }
 
     #[test]
     fn cancellation_token_future_deadline_passes() {
         let pcx = PipelineCx::new(Some(60_000)); // 60 seconds
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
         assert!(token.checkpoint().is_ok());
     }
 
@@ -4905,7 +4907,7 @@ mod tests {
     fn cancellation_token_expired_deadline_fails() {
         let pcx = PipelineCx::new(Some(1)); // 1ms
         std::thread::sleep(Duration::from_millis(10));
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
         let result = token.checkpoint();
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -4918,7 +4920,7 @@ mod tests {
     #[test]
     fn cancellation_token_is_copy_and_send() {
         let pcx = PipelineCx::new(Some(60_000));
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
 
         // Token is Copy — can be used multiple times.
         let t2 = token;
@@ -4934,7 +4936,7 @@ mod tests {
     #[test]
     fn stage_token_respects_stage_budget() {
         let pcx = PipelineCx::new(None);
-        let token = pcx.stage_token(1); // 1ms stage budget
+        let token = pcx.stage_token(1); // ubs:ignore — cancellation token is not a secret
         std::thread::sleep(Duration::from_millis(10));
         let result = token.checkpoint();
         assert!(result.is_err());
@@ -4943,7 +4945,7 @@ mod tests {
     #[test]
     fn stage_token_respects_pipeline_deadline() {
         let pcx = PipelineCx::new(Some(1)); // pipeline deadline
-        let token = pcx.stage_token(60_000); // longer stage budget
+        let token = pcx.stage_token(60_000); // ubs:ignore — cancellation token is not a secret
         std::thread::sleep(Duration::from_millis(10));
         let result = token.checkpoint();
         assert!(result.is_err());
@@ -4956,7 +4958,7 @@ mod tests {
 
         // Both should fail.
         let pcx_result = pcx.checkpoint();
-        let token_result = pcx.cancellation_token().checkpoint();
+        let token_result = pcx.cancellation_token().checkpoint(); // ubs:ignore — cancellation token is not a secret
 
         assert!(pcx_result.is_err());
         assert!(token_result.is_err());
@@ -5581,7 +5583,7 @@ mod tests {
     #[test]
     fn cancellation_token_from_pipeline_cx_inherits_deadline() {
         let pcx = PipelineCx::new(Some(60_000));
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
         // Far future deadline — checkpoint should succeed.
         assert!(token.checkpoint().is_ok());
     }
@@ -5589,7 +5591,7 @@ mod tests {
     #[test]
     fn cancellation_token_from_no_deadline_pcx() {
         let pcx = PipelineCx::new(None);
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
         assert!(token.checkpoint().is_ok());
     }
 
@@ -5597,7 +5599,7 @@ mod tests {
     fn cancellation_token_from_expired_pcx() {
         let pcx = PipelineCx::new(Some(0));
         std::thread::sleep(Duration::from_millis(5));
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
         assert!(token.checkpoint().is_err());
     }
 
@@ -5863,14 +5865,14 @@ mod tests {
     #[test]
     fn cancellation_token_with_deadline_from_now_passes_before_deadline() {
         use super::CancellationToken;
-        let token = CancellationToken::with_deadline_from_now(Duration::from_secs(60));
+        let token = CancellationToken::with_deadline_from_now(Duration::from_secs(60)); // ubs:ignore — cancellation token is not a secret
         assert!(token.checkpoint().is_ok());
     }
 
     #[test]
     fn cancellation_token_no_deadline_never_cancels() {
         use super::CancellationToken;
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         assert!(token.checkpoint().is_ok());
         // Still passes after a sleep
         std::thread::sleep(Duration::from_millis(5));
@@ -5970,7 +5972,7 @@ mod tests {
     #[test]
     fn cancellation_token_with_zero_deadline_fails_after_sleep() {
         use super::CancellationToken;
-        let token = CancellationToken::with_deadline_from_now(std::time::Duration::from_millis(0));
+        let token = CancellationToken::with_deadline_from_now(std::time::Duration::from_millis(0)); // ubs:ignore — cancellation token is not a secret
         std::thread::sleep(std::time::Duration::from_millis(5));
         let result = token.checkpoint();
         assert!(
@@ -6175,7 +6177,7 @@ mod tests {
         // A PipelineCx with a short timeout should produce a CancellationToken
         // that also reports cancelled after the deadline passes.
         let pcx = PipelineCx::new(Some(1)); // 1ms deadline
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
 
         // After sleeping past deadline, both should report cancelled
         std::thread::sleep(Duration::from_millis(10));
@@ -6189,7 +6191,7 @@ mod tests {
     #[test]
     fn cx_cancellation_token_no_deadline_never_cancels() {
         let pcx = PipelineCx::new(None);
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
 
         assert!(
             pcx.checkpoint().is_ok(),
@@ -6205,7 +6207,7 @@ mod tests {
     fn cx_cancellation_token_inherits_budget() {
         // When PipelineCx has a deadline, the CancellationToken should reflect it
         let pcx = PipelineCx::new(Some(60_000)); // 60s
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
 
         // Both should be OK within budget
         assert!(pcx.checkpoint().is_ok());
@@ -6215,7 +6217,7 @@ mod tests {
     #[test]
     fn cx_materialize_input_respects_cancellation() {
         // materialize_input_with_token should fail immediately when given expired token
-        let token = super::CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        let token = super::CancellationToken::with_deadline_from_now(Duration::from_millis(0)); // ubs:ignore — cancellation token is not a secret
         std::thread::sleep(Duration::from_millis(5));
 
         let dir = tempdir().unwrap();
@@ -6235,7 +6237,7 @@ mod tests {
     #[test]
     fn cx_accelerate_respects_cancellation() {
         // apply_with_token should return early when given expired token
-        let token = super::CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        let token = super::CancellationToken::with_deadline_from_now(Duration::from_millis(0)); // ubs:ignore — cancellation token is not a secret
         std::thread::sleep(Duration::from_millis(5));
 
         let mut result = TranscriptionResult {
@@ -6269,7 +6271,7 @@ mod tests {
     #[test]
     fn cx_persist_report_respects_cancellation() {
         // persist_report_cancellable should fail when given expired token
-        let token = super::CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        let token = super::CancellationToken::with_deadline_from_now(Duration::from_millis(0)); // ubs:ignore — cancellation token is not a secret
         std::thread::sleep(Duration::from_millis(5));
 
         let dir = tempdir().unwrap();
@@ -6480,11 +6482,11 @@ mod tests {
         // Verify the orchestrator can create stage-budgeted tokens for all stages.
         let pcx = PipelineCx::new(Some(300_000));
 
-        let ingest_token = pcx.stage_token(5_000);
-        let normalize_token = pcx.stage_token(10_000);
-        let backend_token = pcx.stage_token(15_000);
-        let acceleration_token = pcx.stage_token(20_000);
-        let persist_token = pcx.stage_token(25_000);
+        let ingest_token = pcx.stage_token(5_000); // ubs:ignore — cancellation token is not a secret
+        let normalize_token = pcx.stage_token(10_000); // ubs:ignore — cancellation token is not a secret
+        let backend_token = pcx.stage_token(15_000); // ubs:ignore — cancellation token is not a secret
+        let acceleration_token = pcx.stage_token(20_000); // ubs:ignore — cancellation token is not a secret
+        let persist_token = pcx.stage_token(25_000); // ubs:ignore — cancellation token is not a secret
 
         // All tokens should be valid (not cancelled) for a far-future deadline
         assert!(
@@ -7368,7 +7370,7 @@ mod tests {
 
     #[test]
     fn ctc_align_empty_segments() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig::default();
         let mut segments: Vec<TranscriptionSegment> = vec![];
         let report = ctc_forced_align(&mut segments, Some(10.0), &config, &token).unwrap();
@@ -7380,7 +7382,7 @@ mod tests {
 
     #[test]
     fn ctc_align_single_segment_fills_duration() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig::default();
         let mut segments = vec![make_segment(0.0, 10.0, "hello world")];
         let report = ctc_forced_align(&mut segments, Some(10.0), &config, &token).unwrap();
@@ -7401,7 +7403,7 @@ mod tests {
 
     #[test]
     fn ctc_align_proportional_distribution() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig {
             max_drift_sec: 10.0, // large drift tolerance for this test
             min_segment_duration_sec: 0.01,
@@ -7441,7 +7443,7 @@ mod tests {
 
     #[test]
     fn ctc_align_drift_guardrail_falls_back() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig {
             max_drift_sec: 0.1, // very tight tolerance
             min_segment_duration_sec: 0.01,
@@ -7477,7 +7479,7 @@ mod tests {
 
     #[test]
     fn ctc_align_min_duration_guardrail() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig {
             max_drift_sec: 100.0,          // allow everything
             min_segment_duration_sec: 5.0, // very high minimum
@@ -7495,7 +7497,7 @@ mod tests {
 
     #[test]
     fn ctc_align_no_duration_available() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig::default();
         let mut segments = vec![make_segment_no_timestamps("hello world")];
         let report = ctc_forced_align(&mut segments, None, &config, &token).unwrap();
@@ -7509,7 +7511,7 @@ mod tests {
 
     #[test]
     fn ctc_align_zero_duration() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig::default();
         let mut segments = vec![make_segment(0.0, 0.0, "test")];
         let report = ctc_forced_align(&mut segments, Some(0.0), &config, &token).unwrap();
@@ -7522,7 +7524,7 @@ mod tests {
 
     #[test]
     fn ctc_align_negative_duration() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig::default();
         let mut segments = vec![make_segment(0.0, 1.0, "test")];
         let report = ctc_forced_align(&mut segments, Some(-1.0), &config, &token).unwrap();
@@ -7535,7 +7537,7 @@ mod tests {
 
     #[test]
     fn ctc_align_infers_duration_from_last_segment() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig {
             max_drift_sec: 10.0,
             min_segment_duration_sec: 0.01,
@@ -7558,7 +7560,7 @@ mod tests {
 
     #[test]
     fn ctc_align_deterministic_across_calls() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig::default();
 
         let mk = || {
@@ -7588,7 +7590,7 @@ mod tests {
 
     #[test]
     fn ctc_align_preserves_non_timestamp_fields() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig {
             max_drift_sec: 10.0,
             min_segment_duration_sec: 0.01,
@@ -7609,7 +7611,7 @@ mod tests {
     #[test]
     fn ctc_align_cancellation_aborts_early() {
         // Create a token with an already-expired deadline.
-        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0)); // ubs:ignore — cancellation token is not a secret
         // Give it a moment to be past deadline.
         std::thread::sleep(Duration::from_millis(5));
 
@@ -7629,7 +7631,7 @@ mod tests {
 
     #[test]
     fn ctc_align_whitespace_only_text_treated_as_one_char() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig {
             max_drift_sec: 100.0,
             min_segment_duration_sec: 0.001,
@@ -7653,7 +7655,7 @@ mod tests {
 
     #[test]
     fn ctc_align_many_segments() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig {
             max_drift_sec: 100.0,
             min_segment_duration_sec: 0.001,
@@ -7686,7 +7688,7 @@ mod tests {
 
     #[test]
     fn ctc_align_contiguous_output() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig {
             max_drift_sec: 100.0,
             min_segment_duration_sec: 0.001,
@@ -7774,7 +7776,7 @@ mod tests {
 
     #[test]
     fn ctc_align_segments_without_timestamps_fallback_on_no_duration() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig::default();
         let mut segments = vec![
             make_segment_no_timestamps("hello"),
@@ -7788,7 +7790,7 @@ mod tests {
 
     #[test]
     fn ctc_align_mixed_drift_some_correct_some_fallback() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig {
             max_drift_sec: 0.3,
             min_segment_duration_sec: 0.01,
@@ -7808,7 +7810,7 @@ mod tests {
 
     #[test]
     fn ctc_align_three_segments_varied_lengths() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig {
             max_drift_sec: 10.0,
             min_segment_duration_sec: 0.01,
@@ -8069,7 +8071,7 @@ mod tests {
         samples.extend(vec![7_000i16; 16_000]);
         write_pcm16_mono_wav_for_vad(&path, 16_000, &samples);
 
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = VadConfig::default();
         let report = vad_energy_detect(&path, &config, &token).unwrap();
 
@@ -8089,7 +8091,7 @@ mod tests {
         }
         std::fs::write(&path, &data).unwrap();
 
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = VadConfig::default();
         let report = vad_energy_detect(&path, &config, &token).unwrap();
 
@@ -8113,7 +8115,7 @@ mod tests {
         data.extend(vec![0u8; 3200]);
         std::fs::write(&path, &data).unwrap();
 
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = VadConfig::default();
         let report = vad_energy_detect(&path, &config, &token).unwrap();
 
@@ -8133,7 +8135,7 @@ mod tests {
         }
         std::fs::write(&path, &data).unwrap();
 
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = VadConfig::default();
         let report = vad_energy_detect(&path, &config, &token).unwrap();
 
@@ -8153,7 +8155,7 @@ mod tests {
         let data = vec![0u8; 44];
         std::fs::write(&path, &data).unwrap();
 
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = VadConfig::default();
         let report = vad_energy_detect(&path, &config, &token).unwrap();
 
@@ -8169,7 +8171,7 @@ mod tests {
         data.extend(vec![0u8; 3200]);
         std::fs::write(&path, &data).unwrap();
 
-        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0)); // ubs:ignore — cancellation token is not a secret
         std::thread::sleep(Duration::from_millis(5));
 
         let config = VadConfig::default();
@@ -8190,7 +8192,7 @@ mod tests {
         }
         std::fs::write(&path, &data).unwrap();
 
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = VadConfig::default();
         let report = vad_energy_detect(&path, &config, &token).unwrap();
 
@@ -8208,7 +8210,7 @@ mod tests {
 
     #[test]
     fn vad_energy_detect_missing_file() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = VadConfig::default();
         let result = vad_energy_detect(
             &PathBuf::from("/tmp/nonexistent_vad_test.wav"),
@@ -8261,7 +8263,7 @@ mod tests {
         let path = dir.path().join("test.wav");
         std::fs::write(&path, b"fake audio").unwrap();
 
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let report = source_separate(&path, &token).unwrap();
 
         // Invalid WAV → fallback path: assumes vocal content present.
@@ -8280,7 +8282,7 @@ mod tests {
         let path = dir.path().join("cancel_sep.wav");
         std::fs::write(&path, b"fake audio").unwrap();
 
-        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0)); // ubs:ignore — cancellation token is not a secret
         std::thread::sleep(Duration::from_millis(5));
 
         let result = source_separate(&path, &token);
@@ -8303,7 +8305,7 @@ mod tests {
             .collect();
         write_pcm16_mono_wav_for_vad(&path, sample_rate, &samples);
 
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let report = source_separate(&path, &token).unwrap();
 
         assert!(report.vocal_isolated, "speech signal should be detected");
@@ -8326,7 +8328,7 @@ mod tests {
         let samples = vec![0i16; sample_rate as usize];
         write_pcm16_mono_wav_for_vad(&path, sample_rate, &samples);
 
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let report = source_separate(&path, &token).unwrap();
 
         // Silence should yield no active regions and low/zero coverage.
@@ -8345,7 +8347,7 @@ mod tests {
 
     #[test]
     fn source_separate_missing_file_fallback() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let result =
             source_separate(std::path::Path::new("/nonexistent/audio.wav"), &token).unwrap();
 
@@ -8393,7 +8395,7 @@ mod tests {
 
     #[test]
     fn punctuate_empty_segments() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments: Vec<TranscriptionSegment> = vec![];
         let report = punctuate_segments(&mut segments, &token).unwrap();
         assert_eq!(report.segments_total, 0);
@@ -8402,7 +8404,7 @@ mod tests {
 
     #[test]
     fn punctuate_capitalizes_first_letter() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 1.0, "hello world")];
         let report = punctuate_segments(&mut segments, &token).unwrap();
         assert_eq!(report.segments_modified, 1);
@@ -8415,7 +8417,7 @@ mod tests {
 
     #[test]
     fn punctuate_adds_period_at_end() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 1.0, "hello world")];
         let _report = punctuate_segments(&mut segments, &token).unwrap();
         assert!(
@@ -8427,7 +8429,7 @@ mod tests {
 
     #[test]
     fn punctuate_does_not_double_period() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 1.0, "Hello world.")];
         let report = punctuate_segments(&mut segments, &token).unwrap();
         assert!(
@@ -8446,7 +8448,7 @@ mod tests {
 
     #[test]
     fn punctuate_capitalizes_after_sentence_end() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 5.0, "hello. world")];
         let _report = punctuate_segments(&mut segments, &token).unwrap();
         assert!(
@@ -8458,7 +8460,7 @@ mod tests {
 
     #[test]
     fn punctuate_preserves_existing_punctuation() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 1.0, "Is this a question?")];
         let _report = punctuate_segments(&mut segments, &token).unwrap();
         assert!(
@@ -8470,7 +8472,7 @@ mod tests {
 
     #[test]
     fn punctuate_terminal_comma_still_gets_period() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 1.0, "hello,")];
         let report = punctuate_segments(&mut segments, &token).unwrap();
         assert_eq!(report.segments_modified, 1);
@@ -8479,7 +8481,7 @@ mod tests {
 
     #[test]
     fn punctuate_terminal_semicolon_still_gets_period() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 1.0, "hello;")];
         let report = punctuate_segments(&mut segments, &token).unwrap();
         assert_eq!(report.segments_modified, 1);
@@ -8488,7 +8490,7 @@ mod tests {
 
     #[test]
     fn punctuate_handles_exclamation() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 1.0, "wow!")];
         let _report = punctuate_segments(&mut segments, &token).unwrap();
         assert!(
@@ -8505,7 +8507,7 @@ mod tests {
 
     #[test]
     fn punctuate_skips_empty_text() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 1.0, "  ")];
         let report = punctuate_segments(&mut segments, &token).unwrap();
         assert_eq!(report.segments_total, 1);
@@ -8514,7 +8516,7 @@ mod tests {
 
     #[test]
     fn punctuate_cancellation() {
-        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0)); // ubs:ignore — cancellation token is not a secret
         std::thread::sleep(Duration::from_millis(5));
 
         let mut segments = vec![make_segment(0.0, 1.0, "hello")];
@@ -8525,7 +8527,7 @@ mod tests {
 
     #[test]
     fn punctuate_multiple_segments() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![
             make_segment(0.0, 2.0, "hello world"),
             make_segment(2.0, 4.0, "this is a test"),
@@ -8587,7 +8589,7 @@ mod tests {
 
     #[test]
     fn diarize_empty_segments() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments: Vec<TranscriptionSegment> = vec![];
         let report = diarize_segments(&mut segments, Some(10.0), None, &token).unwrap();
         assert_eq!(report.segments_total, 0);
@@ -8597,7 +8599,7 @@ mod tests {
 
     #[test]
     fn diarize_single_segment_gets_speaker_label() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 5.0, "hello world")];
         let report = diarize_segments(&mut segments, Some(5.0), None, &token).unwrap();
 
@@ -8609,7 +8611,7 @@ mod tests {
 
     #[test]
     fn diarize_multiple_segments_assigns_speakers() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![
             make_segment(0.0, 3.0, "hello"),
             make_segment(3.0, 6.0, "world"),
@@ -8629,7 +8631,7 @@ mod tests {
 
     #[test]
     fn diarize_preserves_non_speaker_fields() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![TranscriptionSegment {
             start_sec: Some(0.0),
             end_sec: Some(5.0),
@@ -8647,7 +8649,7 @@ mod tests {
 
     #[test]
     fn diarize_cancellation() {
-        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
+        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0)); // ubs:ignore — cancellation token is not a secret
         std::thread::sleep(Duration::from_millis(5));
 
         let mut segments = vec![
@@ -8661,7 +8663,7 @@ mod tests {
 
     #[test]
     fn diarize_no_duration_infers_from_segments() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![
             make_segment(0.0, 5.0, "hello"),
             make_segment(5.0, 10.0, "world"),
@@ -8673,7 +8675,7 @@ mod tests {
 
     #[test]
     fn diarize_segments_without_timestamps() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![
             make_segment_no_timestamps("hello"),
             make_segment_no_timestamps("world"),
@@ -8751,7 +8753,7 @@ mod tests {
 
     #[test]
     fn diarize_report_includes_heuristic_note() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 1.0, "test")];
         let report = diarize_segments(&mut segments, Some(1.0), None, &token).unwrap();
         assert!(
@@ -8813,7 +8815,7 @@ mod tests {
     fn composition_punctuate_then_diarize_segments_flow() {
         // Verify segments can flow through punctuate → diarize without
         // VAD or Separate having run.
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![
             make_segment(0.0, 3.0, "hello world"),
             make_segment(3.0, 6.0, "this is a test"),
@@ -8846,7 +8848,7 @@ mod tests {
     #[test]
     fn composition_diarize_without_punctuate_preserves_text() {
         // Diarize alone should not alter segment text.
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![
             make_segment(0.0, 2.0, "raw text here"),
             make_segment(2.0, 4.0, "more raw text"),
@@ -8864,7 +8866,7 @@ mod tests {
     #[test]
     fn composition_align_then_punctuate_then_diarize_full_chain() {
         // Full optional post-backend chain: Align → Punctuate → Diarize.
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig::default();
         let mut segments = vec![
             make_segment(0.0, 4.0, "first segment of speech"),
@@ -8937,7 +8939,7 @@ mod tests {
     #[test]
     fn composition_vad_segments_unaffected_by_downstream() {
         // VAD produces regions; downstream stages should not interfere.
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = VadConfig::default();
         let dir = tempdir().unwrap();
         let path = dir.path().join("silence.wav");
@@ -8955,7 +8957,7 @@ mod tests {
     #[test]
     fn composition_source_separate_does_not_need_vad() {
         // Source separation should work even when VAD has not run.
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let report =
             source_separate(std::path::Path::new("/nonexistent/audio.wav"), &token).unwrap();
         // Should fallback gracefully.
@@ -9230,7 +9232,7 @@ mod tests {
                 stages
                     .iter()
                     .position(|x| x == s)
-                    .unwrap_or_else(|| panic!("{s:?} missing from default stages"))
+                    .expect("{s:?} missing from default stages")
             })
             .collect();
         for window in positions.windows(2) {
@@ -9781,7 +9783,7 @@ mod tests {
         // at each stage boundary.
         let pcx_no_cancel = PipelineCx::new(None);
         for stage in config.stages() {
-            let token = pcx_no_cancel.cancellation_token();
+            let token = pcx_no_cancel.cancellation_token(); // ubs:ignore — cancellation token is not a secret
             assert!(
                 !token.is_cancelled(),
                 "token should not be cancelled at stage {stage}"
@@ -9795,7 +9797,7 @@ mod tests {
         // Verify that a cancelled token is detected at every stage boundary.
         let pcx_cancel = PipelineCx::new(Some(0));
         for stage in config.stages() {
-            let token = pcx_cancel.cancellation_token();
+            let token = pcx_cancel.cancellation_token(); // ubs:ignore — cancellation token is not a secret
             assert!(
                 token.is_cancelled(),
                 "token should be cancelled at stage {stage}"
@@ -9896,7 +9898,7 @@ mod tests {
             let _ = harness.simulate_pipeline(&config);
 
             // The cancellation token should now be expired.
-            let token = harness.pcx.cancellation_token();
+            let token = harness.pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
             assert!(
                 token.is_cancelled(),
                 "token should be cancelled after trigger stage {trigger_stage}"
@@ -9916,7 +9918,7 @@ mod tests {
 
     #[test]
     fn punctuate_segments_multibyte_unicode_first_char() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![
             make_segment(0.0, 1.0, "über cool"),
             make_segment(1.0, 2.0, "élan vital"),
@@ -9944,7 +9946,7 @@ mod tests {
 
     #[test]
     fn diarize_segments_zero_duration_does_not_panic() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![
             make_segment(0.0, 1.0, "hello"),
             make_segment(1.0, 2.0, "world"),
@@ -10038,7 +10040,7 @@ mod tests {
     fn diarize_turn_taking_detects_speaker_changes() {
         // Two groups of segments separated by a large time gap should be
         // assigned to different speakers due to the inter-segment gap feature.
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![
             make_segment(0.0, 2.0, "speaker one talks here"),
             make_segment(2.0, 4.0, "speaker one keeps going"),
@@ -10153,7 +10155,7 @@ mod tests {
 
     #[test]
     fn diarize_report_includes_silhouette_score() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         // Two well-separated groups → should have score.
         let mut segments = vec![
             make_segment(0.0, 2.0, "speaker one talks here"),
@@ -10177,7 +10179,7 @@ mod tests {
 
     #[test]
     fn diarize_single_segment_silhouette_is_none() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 2.0, "single segment only")];
         let report = diarize_segments(&mut segments, Some(5.0), None, &token).unwrap();
         assert!(
@@ -10270,7 +10272,7 @@ mod tests {
 
     #[test]
     fn ctc_forced_align_multibyte_segment_text() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = AlignConfig::default();
         let mut segments = vec![
             make_segment(0.0, 3.0, "日本語のテスト"),
@@ -10350,7 +10352,7 @@ mod tests {
                 confidence: None,
             },
         ];
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let report = punctuate_segments(&mut segments, &token).unwrap();
 
         assert_eq!(report.segments_total, 3);
@@ -10374,17 +10376,17 @@ mod tests {
         let mut pcx = PipelineCx::new(None);
 
         // Initially no deadline → checkpoint passes.
-        let token1 = pcx.cancellation_token();
+        let token1 = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
         assert!(token1.checkpoint().is_ok());
 
         // cancel_now() → checkpoint fails.
         pcx.cancel_now();
-        let token2 = pcx.cancellation_token();
+        let token2 = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
         assert!(token2.checkpoint().is_err(), "should fail after cancel_now");
 
         // uncancel() → new token passes again.
         pcx.uncancel();
-        let token3 = pcx.cancellation_token();
+        let token3 = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
         assert!(token3.checkpoint().is_ok(), "should pass after uncancel");
     }
 
@@ -10407,7 +10409,7 @@ mod tests {
         }
         std::fs::write(&path, &data).unwrap();
 
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let config = VadConfig {
             rms_threshold: 0.01,
             frame_samples,
@@ -10515,7 +10517,7 @@ mod tests {
     #[test]
     fn cancellation_token_with_no_deadline_always_passes() {
         let pcx = PipelineCx::new(None);
-        let token = pcx.cancellation_token();
+        let token = pcx.cancellation_token(); // ubs:ignore — cancellation token is not a secret
         // Should pass many times.
         for _ in 0..100 {
             assert!(token.checkpoint().is_ok());
@@ -10707,7 +10709,7 @@ mod tests {
         // Rule 4 in punctuate_segments capitalizes after sentence-ending
         // punctuation.  Existing tests cover period (`.`), but not `?`
         // within a segment.  Verify `? w` → `? W`.
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 3.0, "is it done? well maybe")];
         let report = punctuate_segments(&mut segments, &token).unwrap();
         assert_eq!(report.segments_modified, 1);
@@ -10735,7 +10737,7 @@ mod tests {
 
     #[test]
     fn punctuate_does_not_capitalize_after_abbreviation() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 3.0, "dr. smith said hello")];
         let _report = punctuate_segments(&mut segments, &token).unwrap();
         assert!(
@@ -10755,7 +10757,7 @@ mod tests {
 
     #[test]
     fn punctuate_does_not_capitalize_after_decimal() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 2.0, "the value is 3.14 radians")];
         let _report = punctuate_segments(&mut segments, &token).unwrap();
         assert!(
@@ -10774,7 +10776,7 @@ mod tests {
 
     #[test]
     fn punctuate_does_not_capitalize_after_ellipsis() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 3.0, "well... anyway let us continue")];
         let _report = punctuate_segments(&mut segments, &token).unwrap();
         assert!(
@@ -10786,7 +10788,7 @@ mod tests {
 
     #[test]
     fn punctuate_normalizes_multiple_spaces() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 2.0, "hello   world   today")];
         let _report = punctuate_segments(&mut segments, &token).unwrap();
         assert!(
@@ -10803,7 +10805,7 @@ mod tests {
 
     #[test]
     fn punctuate_abbreviation_mid_sentence_preserves_context() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 5.0, "talk to mr. jones about the plan")];
         let _report = punctuate_segments(&mut segments, &token).unwrap();
         // "jones" after "mr." should not be capitalized by the period rule.
@@ -10824,7 +10826,7 @@ mod tests {
 
     #[test]
     fn punctuate_real_sentence_end_still_capitalizes() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![make_segment(0.0, 5.0, "this is done. now start again")];
         let _report = punctuate_segments(&mut segments, &token).unwrap();
         assert!(
@@ -11343,7 +11345,7 @@ mod tests {
     #[test]
     fn diarize_respects_num_speakers_constraint() {
         use crate::model::SpeakerConstraints;
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         // Create segments with very different characteristics so the
         // unconstrained diarizer produces more than 2 clusters.
         let mut segments = vec![
@@ -11399,7 +11401,7 @@ mod tests {
     #[test]
     fn diarize_respects_max_speakers_constraint() {
         use crate::model::SpeakerConstraints;
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments = vec![
             make_segment(0.0, 1.0, "short"),
             make_segment(5.0, 8.0, "this is a very long segment with many words"),
@@ -11424,7 +11426,7 @@ mod tests {
     #[test]
     fn diarize_notes_min_speakers_deficit() {
         use crate::model::SpeakerConstraints;
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         // A single segment can only produce 1 speaker — min_speakers=3
         // should produce a note.
         let mut segments = vec![make_segment(0.0, 5.0, "only one speaker here")];
@@ -11446,7 +11448,7 @@ mod tests {
 
     #[test]
     fn diarize_constraint_none_same_as_empty_default() {
-        let token = CancellationToken::no_deadline();
+        let token = CancellationToken::no_deadline(); // ubs:ignore — cancellation token is not a secret
         let mut segments1 = vec![
             make_segment(0.0, 2.0, "hello world"),
             make_segment(2.0, 4.0, "goodbye world"),

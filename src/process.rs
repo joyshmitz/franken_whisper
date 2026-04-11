@@ -94,8 +94,16 @@ pub fn run_command_with_timeout(
         let mut child = command.spawn()?;
         let started_at = Instant::now();
 
-        let stdout_pipe = child.stdout.take().expect("stdout piped");
-        let stderr_pipe = child.stderr.take().expect("stderr piped");
+        let stdout_pipe = child.stdout.take().ok_or_else(|| {
+            FwError::Io(std::io::Error::other(format!(
+                "failed to capture stdout for `{rendered}`"
+            )))
+        })?;
+        let stderr_pipe = child.stderr.take().ok_or_else(|| {
+            FwError::Io(std::io::Error::other(format!(
+                "failed to capture stderr for `{rendered}`"
+            )))
+        })?;
 
         let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
         let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
@@ -176,8 +184,16 @@ pub(crate) fn run_command_cancellable(
     let mut child = command.spawn()?;
     let started_at = Instant::now();
 
-    let stdout_pipe = child.stdout.take().expect("stdout piped");
-    let stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stdout_pipe = child.stdout.take().ok_or_else(|| {
+        FwError::Io(std::io::Error::other(format!(
+            "failed to capture stdout for `{rendered}`"
+        )))
+    })?;
+    let stderr_pipe = child.stderr.take().ok_or_else(|| {
+        FwError::Io(std::io::Error::other(format!(
+            "failed to capture stderr for `{rendered}`"
+        )))
+    })?;
 
     let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
     let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
