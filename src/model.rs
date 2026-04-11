@@ -173,6 +173,8 @@ pub struct BackendParams {
     /// Enable Flash Attention 2 (insanely-fast).
     pub flash_attention: Option<bool>,
     /// Explicit HuggingFace token override for insanely-fast diarization.
+    /// Never serialized to avoid leaking secrets in JSON output or persistence.
+    #[serde(skip_serializing)]
     pub insanely_fast_hf_token: Option<String>,
     /// Explicit transcript artifact path override for insanely-fast output.
     pub insanely_fast_transcript_path: Option<PathBuf>,
@@ -1225,19 +1227,30 @@ mod tests {
         assert!(json["ffmpeg_format"].is_null());
         assert!(json["ffmpeg_source"].is_null());
         let deserialized: InputSource = serde_json::from_value(json).unwrap();
-        match deserialized {
-            InputSource::Microphone {
-                seconds,
-                device,
-                ffmpeg_format,
-                ffmpeg_source,
-            } => {
-                assert_eq!(seconds, 10);
-                assert!(device.is_none());
-                assert!(ffmpeg_format.is_none());
-                assert!(ffmpeg_source.is_none());
-            }
-            other => panic!("expected Microphone, got {other:?}"),
+        let input = deserialized;
+        assert!(
+            matches!(
+                &input,
+                InputSource::Microphone {
+                    seconds: _,
+                    device: _,
+                    ffmpeg_format: _,
+                    ffmpeg_source: _
+                }
+            ),
+            "expected Microphone, got {input:?}"
+        );
+        if let InputSource::Microphone {
+            seconds,
+            device,
+            ffmpeg_format,
+            ffmpeg_source,
+        } = input
+        {
+            assert_eq!(seconds, 10);
+            assert!(device.is_none());
+            assert!(ffmpeg_format.is_none());
+            assert!(ffmpeg_source.is_none());
         }
     }
 
@@ -1372,6 +1385,14 @@ mod tests {
             ..BackendParams::default()
         };
         let json = serde_json::to_string(&params).unwrap();
+        assert!(
+            !json.contains("hf_example_token"),
+            "hf token should be redacted from serialized params"
+        );
+        assert!(
+            !json.contains("insanely_fast_hf_token"),
+            "hf token field should be omitted from serialized params"
+        );
         let parsed: BackendParams = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.output_formats.len(), 3);
         assert_eq!(parsed.output_formats[0], OutputFormat::Srt);
@@ -1436,9 +1457,9 @@ mod tests {
         assert!(parsed.diarization_config.is_some());
         assert_eq!(parsed.gpu_device.as_deref(), Some("cuda:0"));
         assert_eq!(parsed.flash_attention, Some(true));
-        assert_eq!(
-            parsed.insanely_fast_hf_token.as_deref(),
-            Some("hf_example_token")
+        assert!(
+            parsed.insanely_fast_hf_token.is_none(),
+            "hf token should not round-trip through serialized params"
         );
         assert_eq!(
             parsed.insanely_fast_transcript_path.as_deref(),
@@ -1696,9 +1717,15 @@ mod tests {
             };
             let json = serde_json::to_string(&source).unwrap();
             let parsed: InputSource = serde_json::from_str(&json).unwrap();
-            match parsed {
-                InputSource::File { path } => assert_eq!(path, PathBuf::from(p), "path: {p}"),
-                other => panic!("expected File variant, got {other:?}"),
+            let input = parsed;
+            assert!(
+                matches!(&input, InputSource::File { .. }),
+                "expected File variant, got {input:?}"
+            );
+            if let InputSource::File { path } = input {
+                assert_eq!(path, PathBuf::from(p), "path: {p}");
+            } else {
+                return;
             }
         }
     }
@@ -1902,9 +1929,14 @@ mod tests {
             };
             let json = serde_json::to_string(&source).unwrap();
             let parsed: InputSource = serde_json::from_str(&json).unwrap();
-            match parsed {
-                InputSource::Microphone { seconds: s, .. } => assert_eq!(s, seconds),
-                other => panic!("expected Microphone, got {other:?}"),
+            assert!(
+                matches!(&parsed, InputSource::Microphone { .. }),
+                "expected Microphone, got {parsed:?}"
+            );
+            if let InputSource::Microphone { seconds: s, .. } = parsed {
+                assert_eq!(s, seconds);
+            } else {
+                return;
             }
         }
     }
@@ -2015,9 +2047,12 @@ mod tests {
         };
         let json = serde_json::to_string(&source).unwrap();
         let parsed: InputSource = serde_json::from_str(&json).unwrap();
-        match parsed {
-            InputSource::File { path } => assert_eq!(path, PathBuf::from("")),
-            other => panic!("expected File variant, got {other:?}"),
+        assert!(
+            matches!(&parsed, InputSource::File { .. }),
+            "expected File variant, got {parsed:?}"
+        );
+        if let InputSource::File { path } = parsed {
+            assert_eq!(path, PathBuf::from(""));
         }
     }
 

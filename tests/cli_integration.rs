@@ -353,21 +353,28 @@ fn run_transcribe_json_with_stub_env(
     );
 
     let stdout_text = String::from_utf8_lossy(&output.stdout);
-    let json_start = stdout_text.find('{').unwrap_or_else(|| {
-        panic!(
-            "json report parse failed: no JSON object in stdout\nstdout:\n{}\nstderr:\n{}",
-            stdout_text,
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
+    let json_start = stdout_text.find('{');
+    assert!(
+        json_start.is_some(),
+        "json report parse failed: no JSON object in stdout\nstdout:\n{}\nstderr:\n{}",
+        stdout_text,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_start = json_start.unwrap_or(0);
     let json_payload = &stdout_text[json_start..];
-    serde_json::from_str(json_payload).unwrap_or_else(|error| {
-        panic!(
-            "json report parse failed: {error}\nstdout:\n{}\nstderr:\n{}",
-            stdout_text,
-            String::from_utf8_lossy(&output.stderr)
-        )
-    })
+    let parsed = serde_json::from_str(json_payload);
+    assert!(
+        parsed.is_ok(),
+        "json report parse failed: {}\nstdout:\n{}\nstderr:\n{}",
+        parsed
+            .as_ref()
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default(),
+        stdout_text,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parsed.unwrap()
 }
 
 #[test]
@@ -596,8 +603,17 @@ fn robot_report_produces_valid_ndjson() {
 
     // Every line must be valid JSON
     for (index, line) in buf.iter().enumerate() {
-        let parsed: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|error| panic!("line {index} invalid JSON: {error}"));
+        let parsed_result: Result<serde_json::Value, _> = serde_json::from_str(line);
+        assert!(
+            parsed_result.is_ok(),
+            "line {index} invalid JSON: {}",
+            parsed_result
+                .as_ref()
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default()
+        );
+        let parsed = parsed_result.unwrap();
         assert!(
             parsed.get("event").is_some(),
             "line {index} missing 'event' field"
@@ -619,16 +635,25 @@ fn robot_routing_history_args_parse_correctly() {
         "--limit",
         "5",
     ]);
-    match cli.command {
-        Command::Robot {
-            command: franken_whisper::cli::RobotCommand::RoutingHistory(args),
-        } => {
-            assert_eq!(args.db, PathBuf::from("/tmp/test.sqlite3"));
-            assert_eq!(args.run_id.as_deref(), Some("run-abc"));
-            assert_eq!(args.limit, 5);
-        }
-        _ => panic!("expected Robot RoutingHistory"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(
+            &command,
+            Command::Robot {
+                command: franken_whisper::cli::RobotCommand::RoutingHistory(_)
+            }
+        ),
+        "expected Robot RoutingHistory"
+    );
+    let Command::Robot {
+        command: franken_whisper::cli::RobotCommand::RoutingHistory(args),
+    } = command
+    else {
+        return;
+    };
+    assert_eq!(args.db, PathBuf::from("/tmp/test.sqlite3"));
+    assert_eq!(args.run_id.as_deref(), Some("run-abc"));
+    assert_eq!(args.limit, 5);
 }
 
 #[test]
@@ -699,8 +724,17 @@ fn robot_run_invalid_request_emits_run_error() {
             !trimmed.is_empty() && trimmed.starts_with('{')
         })
         .map(|line| {
-            serde_json::from_str(line)
-                .unwrap_or_else(|error| panic!("line should be valid json: {error}; line={line}"))
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
+            assert!(
+                parsed.is_ok(),
+                "line should be valid json: {}; line={line}",
+                parsed
+                    .as_ref()
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default()
+            );
+            parsed.unwrap()
         })
         .collect();
 
@@ -762,8 +796,17 @@ fn robot_run_emits_cancelled_stage_before_terminal_run_error() {
     let parsed: Vec<serde_json::Value> = lines
         .iter()
         .map(|line| {
-            serde_json::from_str(line)
-                .unwrap_or_else(|error| panic!("line should be valid json: {error}; line={line}"))
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
+            assert!(
+                parsed.is_ok(),
+                "line should be valid json: {}; line={line}",
+                parsed
+                    .as_ref()
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default()
+            );
+            parsed.unwrap()
         })
         .collect();
 
@@ -836,8 +879,17 @@ fn robot_run_normalize_stage_timeout_maps_to_timeout_error_code() {
             !trimmed.is_empty() && trimmed.starts_with('{')
         })
         .map(|line| {
-            serde_json::from_str(line)
-                .unwrap_or_else(|error| panic!("line should be valid json: {error}; line={line}"))
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
+            assert!(
+                parsed.is_ok(),
+                "line should be valid json: {}; line={line}",
+                parsed
+                    .as_ref()
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default()
+            );
+            parsed.unwrap()
         })
         .collect();
 
@@ -889,8 +941,17 @@ fn robot_budget_stage_reflects_env_overrides_and_invalid_fallbacks() {
             !trimmed.is_empty() && trimmed.starts_with('{')
         })
         .map(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .unwrap_or_else(|error| panic!("line should parse as json: {error}; line={line}"))
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
+            assert!(
+                parsed.is_ok(),
+                "line should parse as json: {}; line={line}",
+                parsed
+                    .as_ref()
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default()
+            );
+            parsed.unwrap()
         })
         .find(|line| line["event"] == "stage" && line["code"] == "orchestration.budgets")
         .expect("orchestration budget stage should be present");
@@ -1102,17 +1163,20 @@ fn transcribe_args_parses_hf_token_override_for_insanely_fast() {
         "hf_cli_token",
     ]);
 
-    match cli.command {
-        Command::Transcribe(args) => {
-            assert_eq!(args.hf_token.as_deref(), Some("hf_cli_token"));
-            let request = args.to_request().expect("valid request");
-            assert_eq!(
-                request.backend_params.insanely_fast_hf_token.as_deref(),
-                Some("hf_cli_token")
-            );
-        }
-        _ => panic!("expected transcribe command"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(&command, Command::Transcribe(_)),
+        "expected transcribe command"
+    );
+    let Command::Transcribe(args) = command else {
+        return;
+    };
+    assert_eq!(args.hf_token.as_deref(), Some("hf_cli_token"));
+    let request = args.to_request().expect("valid request");
+    assert_eq!(
+        request.backend_params.insanely_fast_hf_token.as_deref(),
+        Some("hf_cli_token")
+    );
 }
 
 #[test]
@@ -1130,23 +1194,26 @@ fn transcribe_args_parses_insanely_fast_transcript_path_override() {
         "artifacts/ifw-output.json",
     ]);
 
-    match cli.command {
-        Command::Transcribe(args) => {
-            assert_eq!(
-                args.transcript_path.as_deref(),
-                Some(PathBuf::from("artifacts/ifw-output.json").as_path())
-            );
-            let request = args.to_request().expect("valid request");
-            assert_eq!(
-                request
-                    .backend_params
-                    .insanely_fast_transcript_path
-                    .as_deref(),
-                Some(PathBuf::from("artifacts/ifw-output.json").as_path())
-            );
-        }
-        _ => panic!("expected transcribe command"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(&command, Command::Transcribe(_)),
+        "expected transcribe command"
+    );
+    let Command::Transcribe(args) = command else {
+        return;
+    };
+    assert_eq!(
+        args.transcript_path.as_deref(),
+        Some(PathBuf::from("artifacts/ifw-output.json").as_path())
+    );
+    let request = args.to_request().expect("valid request");
+    assert_eq!(
+        request
+            .backend_params
+            .insanely_fast_transcript_path
+            .as_deref(),
+        Some(PathBuf::from("artifacts/ifw-output.json").as_path())
+    );
 }
 
 #[test]
@@ -1154,13 +1221,16 @@ fn runs_command_accepts_json_output_format() {
     use clap::Parser as _;
 
     let cli = Cli::parse_from(["franken_whisper", "runs", "--format", "json"]);
-    match cli.command {
-        Command::Runs(args) => {
-            assert_eq!(args.format, RunsOutputFormat::Json);
-            assert_eq!(args.limit, 20);
-        }
-        _ => panic!("expected runs command"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(&command, Command::Runs(_)),
+        "expected runs command"
+    );
+    let Command::Runs(args) = command else {
+        return;
+    };
+    assert_eq!(args.format, RunsOutputFormat::Json);
+    assert_eq!(args.limit, 20);
 }
 
 #[test]
@@ -1168,12 +1238,15 @@ fn runs_command_defaults_to_plain_output_format() {
     use clap::Parser as _;
 
     let cli = Cli::parse_from(["franken_whisper", "runs"]);
-    match cli.command {
-        Command::Runs(args) => {
-            assert_eq!(args.format, RunsOutputFormat::Plain);
-        }
-        _ => panic!("expected runs command"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(&command, Command::Runs(_)),
+        "expected runs command"
+    );
+    let Command::Runs(args) = command else {
+        return;
+    };
+    assert_eq!(args.format, RunsOutputFormat::Plain);
 }
 
 #[test]
@@ -1181,12 +1254,15 @@ fn runs_command_accepts_ndjson_output_format() {
     use clap::Parser as _;
 
     let cli = Cli::parse_from(["franken_whisper", "runs", "--format", "ndjson"]);
-    match cli.command {
-        Command::Runs(args) => {
-            assert_eq!(args.format, RunsOutputFormat::Ndjson);
-        }
-        _ => panic!("expected runs command"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(&command, Command::Runs(_)),
+        "expected runs command"
+    );
+    let Command::Runs(args) = command else {
+        return;
+    };
+    assert_eq!(args.format, RunsOutputFormat::Ndjson);
 }
 
 #[test]
@@ -1200,14 +1276,23 @@ fn tty_audio_decode_defaults_to_fail_closed_recovery() {
         "--output",
         "out.wav",
     ]);
-    match cli.command {
-        Command::TtyAudio {
-            command: TtyAudioCommand::Decode { recovery, .. },
-        } => {
-            assert_eq!(recovery, TtyAudioRecoveryPolicy::FailClosed);
-        }
-        _ => panic!("expected tty-audio decode command"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(
+            &command,
+            Command::TtyAudio {
+                command: TtyAudioCommand::Decode { .. }
+            }
+        ),
+        "expected tty-audio decode command"
+    );
+    let Command::TtyAudio {
+        command: TtyAudioCommand::Decode { recovery, .. },
+    } = command
+    else {
+        return;
+    };
+    assert_eq!(recovery, TtyAudioRecoveryPolicy::FailClosed);
 }
 
 #[test]
@@ -1223,14 +1308,23 @@ fn tty_audio_decode_accepts_skip_missing_recovery() {
         "--recovery",
         "skip_missing",
     ]);
-    match cli.command {
-        Command::TtyAudio {
-            command: TtyAudioCommand::Decode { recovery, .. },
-        } => {
-            assert_eq!(recovery, TtyAudioRecoveryPolicy::SkipMissing);
-        }
-        _ => panic!("expected tty-audio decode command"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(
+            &command,
+            Command::TtyAudio {
+                command: TtyAudioCommand::Decode { .. }
+            }
+        ),
+        "expected tty-audio decode command"
+    );
+    let Command::TtyAudio {
+        command: TtyAudioCommand::Decode { recovery, .. },
+    } = command
+    else {
+        return;
+    };
+    assert_eq!(recovery, TtyAudioRecoveryPolicy::SkipMissing);
 }
 
 #[test]
@@ -1238,14 +1332,23 @@ fn tty_audio_retransmit_plan_defaults_to_skip_missing_recovery() {
     use clap::Parser as _;
 
     let cli = Cli::parse_from(["franken_whisper", "tty-audio", "retransmit-plan"]);
-    match cli.command {
-        Command::TtyAudio {
-            command: TtyAudioCommand::RetransmitPlan { recovery },
-        } => {
-            assert_eq!(recovery, TtyAudioRecoveryPolicy::SkipMissing);
-        }
-        _ => panic!("expected tty-audio retransmit-plan command"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(
+            &command,
+            Command::TtyAudio {
+                command: TtyAudioCommand::RetransmitPlan { .. }
+            }
+        ),
+        "expected tty-audio retransmit-plan command"
+    );
+    let Command::TtyAudio {
+        command: TtyAudioCommand::RetransmitPlan { recovery },
+    } = command
+    else {
+        return;
+    };
+    assert_eq!(recovery, TtyAudioRecoveryPolicy::SkipMissing);
 }
 
 #[test]
@@ -1260,17 +1363,28 @@ fn tty_audio_control_ack_parses_expected_fields() {
         "--up-to-seq",
         "12",
     ]);
-    match cli.command {
-        Command::TtyAudio {
-            command:
-                TtyAudioCommand::Control {
-                    command: TtyAudioControlCommand::Ack { up_to_seq },
-                },
-        } => {
-            assert_eq!(up_to_seq, 12);
-        }
-        _ => panic!("expected tty-audio control ack command"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(
+            &command,
+            Command::TtyAudio {
+                command: TtyAudioCommand::Control {
+                    command: TtyAudioControlCommand::Ack { .. }
+                }
+            }
+        ),
+        "expected tty-audio control ack command"
+    );
+    let Command::TtyAudio {
+        command:
+            TtyAudioCommand::Control {
+                command: TtyAudioControlCommand::Ack { up_to_seq },
+            },
+    } = command
+    else {
+        return;
+    };
+    assert_eq!(up_to_seq, 12);
 }
 
 #[test]
@@ -1278,18 +1392,29 @@ fn tty_audio_control_retransmit_loop_defaults_are_deterministic() {
     use clap::Parser as _;
 
     let cli = Cli::parse_from(["franken_whisper", "tty-audio", "control", "retransmit-loop"]);
-    match cli.command {
-        Command::TtyAudio {
-            command:
-                TtyAudioCommand::Control {
-                    command: TtyAudioControlCommand::RetransmitLoop { recovery, rounds },
-                },
-        } => {
-            assert_eq!(recovery, TtyAudioRecoveryPolicy::SkipMissing);
-            assert_eq!(rounds, 1);
-        }
-        _ => panic!("expected tty-audio control retransmit-loop command"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(
+            &command,
+            Command::TtyAudio {
+                command: TtyAudioCommand::Control {
+                    command: TtyAudioControlCommand::RetransmitLoop { .. }
+                }
+            }
+        ),
+        "expected tty-audio control retransmit-loop command"
+    );
+    let Command::TtyAudio {
+        command:
+            TtyAudioCommand::Control {
+                command: TtyAudioControlCommand::RetransmitLoop { recovery, rounds },
+            },
+    } = command
+    else {
+        return;
+    };
+    assert_eq!(recovery, TtyAudioRecoveryPolicy::SkipMissing);
+    assert_eq!(rounds, 1);
 }
 
 #[test]
@@ -1589,6 +1714,14 @@ fn extract_chunk_level_segments_without_words() {
 fn backend_params_default_round_trips_through_json() {
     let params = BackendParams::default();
     let json_str = serde_json::to_string(&params).expect("serialize");
+    assert!(
+        !json_str.contains("hf_example_token"),
+        "hf token should be redacted from serialized params"
+    );
+    assert!(
+        !json_str.contains("insanely_fast_hf_token"),
+        "hf token field should be omitted from serialized params"
+    );
     let parsed: BackendParams = serde_json::from_str(&json_str).expect("deserialize");
     assert!(parsed.output_formats.is_empty());
     assert!(parsed.timestamp_level.is_none());
@@ -1650,6 +1783,14 @@ fn backend_params_populated_round_trips_through_json() {
         ..BackendParams::default()
     };
     let json_str = serde_json::to_string(&params).expect("serialize");
+    assert!(
+        !json_str.contains("hf_example_token"),
+        "hf token should be redacted from serialized params"
+    );
+    assert!(
+        !json_str.contains("insanely_fast_hf_token"),
+        "hf token field should be omitted from serialized params"
+    );
     let parsed: BackendParams = serde_json::from_str(&json_str).expect("deserialize");
     assert_eq!(parsed.output_formats.len(), 3);
     assert_eq!(parsed.timestamp_level, Some(TimestampLevel::Word));
@@ -1661,9 +1802,9 @@ fn backend_params_populated_round_trips_through_json() {
     );
     assert!(parsed.diarization_config.as_ref().unwrap().no_stem);
     assert_eq!(parsed.batch_size, Some(16));
-    assert_eq!(
-        parsed.insanely_fast_hf_token.as_deref(),
-        Some("hf_example_token")
+    assert!(
+        parsed.insanely_fast_hf_token.is_none(),
+        "hf token should not round-trip through serialized params"
     );
     assert_eq!(
         parsed.insanely_fast_transcript_path.as_deref(),
@@ -2308,19 +2449,23 @@ fn transcribe_happy_path_stage_sequence_contract_is_stable() {
     );
 
     let code_index = |code: &str| -> usize {
-        events
-            .iter()
-            .position(|event| event["code"] == code)
-            .unwrap_or_else(|| panic!("expected event code `{code}` in {events:?}"))
+        let position = events.iter().position(|event| event["code"] == code);
+        assert!(
+            position.is_some(),
+            "expected event code `{code}` in {events:?}"
+        );
+        position.unwrap()
     };
     let code_index_any = |codes: &[&str]| -> usize {
-        events
-            .iter()
-            .position(|event| {
-                let code = event["code"].as_str().unwrap_or_default();
-                codes.contains(&code)
-            })
-            .unwrap_or_else(|| panic!("expected any code {codes:?} in {events:?}"))
+        let position = events.iter().position(|event| {
+            let code = event["code"].as_str().unwrap_or_default();
+            codes.contains(&code)
+        });
+        assert!(
+            position.is_some(),
+            "expected any code {codes:?} in {events:?}"
+        );
+        position.unwrap()
     };
 
     let ingest_start = code_index("ingest.start");
@@ -2742,19 +2887,32 @@ fn transcribe_args_maps_mic_line_in_envelope_into_request() {
     };
 
     let request = args.to_request().expect("valid mic request");
-    match request.input {
-        InputSource::Microphone {
-            seconds,
-            device,
-            ffmpeg_format,
-            ffmpeg_source,
-        } => {
-            assert_eq!(seconds, 42);
-            assert_eq!(device.as_deref(), Some("hw:2,0"));
-            assert_eq!(ffmpeg_format.as_deref(), Some("alsa"));
-            assert_eq!(ffmpeg_source.as_deref(), Some("hw:2,0"));
-        }
-        other => panic!("expected microphone input source, got {other:?}"),
+    let input = request.input;
+    assert!(
+        matches!(
+            &input,
+            InputSource::Microphone {
+                seconds: _,
+                device: _,
+                ffmpeg_format: _,
+                ffmpeg_source: _
+            }
+        ),
+        "expected microphone input source, got {input:?}"
+    );
+    if let InputSource::Microphone {
+        seconds,
+        device,
+        ffmpeg_format,
+        ffmpeg_source,
+    } = input
+    {
+        assert_eq!(seconds, 42);
+        assert_eq!(device.as_deref(), Some("hw:2,0"));
+        assert_eq!(ffmpeg_format.as_deref(), Some("alsa"));
+        assert_eq!(ffmpeg_source.as_deref(), Some("hw:2,0"));
+    } else {
+        return;
     }
     assert_eq!(request.backend, BackendKind::WhisperCpp);
     assert!(!request.persist);
@@ -3135,36 +3293,52 @@ fn robot_health_args_parse_correctly() {
         "--db",
         "/tmp/health_test.sqlite3",
     ]);
-    match cli.command {
-        Command::Robot { command } => match command {
-            franken_whisper::cli::RobotCommand::Health(args) => {
-                assert_eq!(
-                    args.db,
-                    std::path::PathBuf::from("/tmp/health_test.sqlite3")
-                );
+    let command = cli.command;
+    assert!(
+        matches!(
+            &command,
+            Command::Robot {
+                command: franken_whisper::cli::RobotCommand::Health(_)
             }
-            other => panic!("expected Health, got {other:?}"),
-        },
-        other => panic!("expected Robot, got {other:?}"),
-    }
+        ),
+        "expected Robot Health"
+    );
+    let Command::Robot {
+        command: franken_whisper::cli::RobotCommand::Health(args),
+    } = command
+    else {
+        return;
+    };
+    assert_eq!(
+        args.db,
+        std::path::PathBuf::from("/tmp/health_test.sqlite3")
+    );
 }
 
 #[test]
 fn robot_health_default_db_path() {
     use clap::Parser;
     let cli = Cli::parse_from(["franken_whisper", "robot", "health"]);
-    match cli.command {
-        Command::Robot { command } => match command {
-            franken_whisper::cli::RobotCommand::Health(args) => {
-                assert_eq!(
-                    args.db,
-                    std::path::PathBuf::from(".franken_whisper/storage.sqlite3")
-                );
+    let command = cli.command;
+    assert!(
+        matches!(
+            &command,
+            Command::Robot {
+                command: franken_whisper::cli::RobotCommand::Health(_)
             }
-            other => panic!("expected Health, got {other:?}"),
-        },
-        other => panic!("expected Robot, got {other:?}"),
-    }
+        ),
+        "expected Robot Health"
+    );
+    let Command::Robot {
+        command: franken_whisper::cli::RobotCommand::Health(args),
+    } = command
+    else {
+        return;
+    };
+    assert_eq!(
+        args.db,
+        std::path::PathBuf::from(".franken_whisper/storage.sqlite3")
+    );
 }
 
 #[test]
@@ -3210,12 +3384,16 @@ fn robot_health_produces_valid_ndjson_event() {
 fn robot_backends_args_parse_correctly() {
     use clap::Parser;
     let cli = Cli::parse_from(["franken_whisper", "robot", "backends"]);
-    match cli.command {
-        Command::Robot {
-            command: franken_whisper::cli::RobotCommand::Backends,
-        } => {}
-        other => panic!("expected Robot Backends, got {other:?}"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(
+            &command,
+            Command::Robot {
+                command: franken_whisper::cli::RobotCommand::Backends
+            }
+        ),
+        "expected Robot Backends"
+    );
 }
 
 #[test]
@@ -3300,12 +3478,16 @@ fn robot_backends_discovery_serializes_to_valid_ndjson() {
 fn robot_schema_args_parse_correctly() {
     use clap::Parser;
     let cli = Cli::parse_from(["franken_whisper", "robot", "schema"]);
-    match cli.command {
-        Command::Robot {
-            command: franken_whisper::cli::RobotCommand::Schema,
-        } => {}
-        other => panic!("expected Robot Schema, got {other:?}"),
-    }
+    let command = cli.command;
+    assert!(
+        matches!(
+            &command,
+            Command::Robot {
+                command: franken_whisper::cli::RobotCommand::Schema
+            }
+        ),
+        "expected Robot Schema"
+    );
 }
 
 #[test]
