@@ -405,6 +405,7 @@ impl PipelineCx {
     pub(crate) fn uncancel(&mut self) {
         self.deadline = None;
     }
+
     pub(crate) fn record_evidence_values(&mut self, entries: &[Value]) {
         self.evidence.extend(entries.iter().cloned());
     }
@@ -427,6 +428,23 @@ impl PipelineCx {
         CancellationToken {
             deadline: self.deadline,
         }
+    }
+
+    /// Produce a cancellation token that respects the per-stage budget.
+    ///
+    /// The resulting token will cancel at the earlier of the pipeline deadline
+    /// (if any) and the stage budget relative to now.
+    pub(crate) fn stage_token(&self, stage_budget_ms: u64) -> CancellationToken {
+        let now = Utc::now();
+        let clamped = stage_budget_ms.min(i64::MAX as u64);
+        let stage_deadline = now
+            .checked_add_signed(chrono::Duration::milliseconds(clamped as i64))
+            .unwrap_or(chrono::DateTime::<Utc>::MAX_UTC);
+        let deadline = match self.deadline {
+            Some(pipeline_deadline) => Some(pipeline_deadline.min(stage_deadline)),
+            None => Some(stage_deadline),
+        };
+        CancellationToken { deadline }
     }
 
     /// Register a cleanup action to be run when the pipeline shuts down.
@@ -1567,7 +1585,7 @@ async fn run_pipeline_body(
 
         let persist_report = report.clone();
         let persist_db = request.db_path.clone();
-        let persist_token = pcx.cancellation_token();
+        let persist_token = pcx.stage_token(stage_budgets.persist_ms);
         if let Err(error) = run_stage_with_budget("persist", stage_budgets.persist_ms, move || {
             let store = RunStore::open(&persist_db)?;
             store.persist_report_cancellable(&persist_report, Some(&persist_token))
@@ -1627,7 +1645,7 @@ async fn execute_ingest(
 
     let ingest_input = request.input.clone();
     let ingest_dir = run_tmp_dir.path().to_path_buf();
-    let ingest_token = pcx.cancellation_token();
+    let ingest_token = pcx.stage_token(stage_budgets.ingest_ms);
     let input_path = match run_stage_with_budget("ingest", stage_budgets.ingest_ms, move || {
         audio::materialize_input_with_token(&ingest_input, &ingest_dir, Some(&ingest_token))
     })
@@ -1682,7 +1700,7 @@ async fn execute_normalize(
     let normalize_input = input_path.clone();
     let normalize_dir = run_tmp_dir.path().to_path_buf();
     let normalize_budget_ms = stage_budgets.normalize_ms;
-    let normalize_token = pcx.cancellation_token();
+    let normalize_token = pcx.stage_token(normalize_budget_ms);
     let normalized_wav = match run_stage_with_budget("normalize", normalize_budget_ms, move || {
         audio::normalize_to_wav_with_timeout(
             &normalize_input,
@@ -1829,7 +1847,7 @@ async fn execute_backend(
     let backend_wav = normalized_wav.clone();
     let backend_dir = run_tmp_dir.path().to_path_buf();
     let backend_budget_ms = stage_budgets.backend_ms;
-    let cancel_token = pcx.cancellation_token();
+    let cancel_token = pcx.stage_token(backend_budget_ms);
     let execution = match run_stage_with_budget("backend", backend_budget_ms, move || {
         let tok = Some(&cancel_token);
         if let Some(order) = backend_order {
@@ -1963,7 +1981,7 @@ async fn execute_accelerate(
     );
 
     let acceleration_budget_ms = stage_budgets.acceleration_ms;
-    let acceleration_token = pcx.cancellation_token();
+    let acceleration_token = pcx.stage_token(acceleration_budget_ms);
     let (updated_result, acceleration) =
         match run_stage_with_budget("acceleration", acceleration_budget_ms, move || {
             let mut local = result;
@@ -2232,7 +2250,7 @@ async fn execute_align(
     );
 
     let align_budget_ms = stage_budgets.align_ms;
-    let align_token = pcx.cancellation_token();
+    let align_token = pcx.stage_token(align_budget_ms);
     let audio_duration = inter.normalized_duration;
 
     let (updated_result, report) =
@@ -2710,8 +2728,8 @@ async fn execute_vad(
     );
 
     let vad_wav = normalized_wav.clone();
-    let vad_token = pcx.cancellation_token();
     let vad_budget_ms = stage_budgets.vad_ms;
+    let vad_token = pcx.stage_token(vad_budget_ms);
     let config_for_run = vad_config.clone();
 
     let report = match run_stage_with_budget("vad", vad_budget_ms, move || {
@@ -2891,8 +2909,8 @@ async fn execute_separate(
     );
 
     let sep_wav = normalized_wav.clone();
-    let sep_token = pcx.cancellation_token();
     let sep_budget_ms = stage_budgets.separate_ms;
+    let sep_token = pcx.stage_token(sep_budget_ms);
 
     let report = match run_stage_with_budget("separate", sep_budget_ms, move || {
         source_separate(&sep_wav, &sep_token)
@@ -3156,7 +3174,7 @@ async fn execute_punctuate(
     );
 
     let punct_budget_ms = stage_budgets.punctuate_ms;
-    let punct_token = pcx.cancellation_token();
+    let punct_token = pcx.stage_token(punct_budget_ms);
 
     let (updated_result, report) =
         match run_stage_with_budget("punctuate", punct_budget_ms, move || {
@@ -3649,7 +3667,7 @@ async fn execute_diarize(
     );
 
     let diarize_budget_ms = stage_budgets.diarize_ms;
-    let diarize_token = pcx.cancellation_token();
+    let diarize_token = pcx.stage_token(diarize_budget_ms);
     let audio_duration = inter.normalized_duration;
     let speaker_constraints = request.backend_params.speaker_constraints.clone();
 
@@ -4911,6 +4929,24 @@ mod tests {
         let handle = std::thread::spawn(move || t2.checkpoint());
         let result = handle.join().expect("thread should not panic");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn stage_token_respects_stage_budget() {
+        let pcx = PipelineCx::new(None);
+        let token = pcx.stage_token(1); // 1ms stage budget
+        std::thread::sleep(Duration::from_millis(10));
+        let result = token.checkpoint();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stage_token_respects_pipeline_deadline() {
+        let pcx = PipelineCx::new(Some(1)); // pipeline deadline
+        let token = pcx.stage_token(60_000); // longer stage budget
+        std::thread::sleep(Duration::from_millis(10));
+        let result = token.checkpoint();
+        assert!(result.is_err());
     }
 
     #[test]
@@ -6440,17 +6476,15 @@ mod tests {
     }
 
     #[test]
-    fn cx_all_stages_receive_cancellation_token() {
-        // Verify the orchestrator creates tokens for all 5 stages:
-        // ingest, normalize, backend, accelerate, persist
-        // We verify this by checking PipelineCx can produce multiple tokens
+    fn cx_all_stages_receive_stage_tokens() {
+        // Verify the orchestrator can create stage-budgeted tokens for all stages.
         let pcx = PipelineCx::new(Some(300_000));
 
-        let ingest_token = pcx.cancellation_token();
-        let normalize_token = pcx.cancellation_token();
-        let backend_token = pcx.cancellation_token();
-        let acceleration_token = pcx.cancellation_token();
-        let persist_token = pcx.cancellation_token();
+        let ingest_token = pcx.stage_token(5_000);
+        let normalize_token = pcx.stage_token(10_000);
+        let backend_token = pcx.stage_token(15_000);
+        let acceleration_token = pcx.stage_token(20_000);
+        let persist_token = pcx.stage_token(25_000);
 
         // All tokens should be valid (not cancelled) for a far-future deadline
         assert!(
