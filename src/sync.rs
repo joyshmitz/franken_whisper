@@ -179,7 +179,27 @@ fn is_lock_stale(info: &LockInfo) -> bool {
     // Check if PID is still alive
     let pid_alive = pid_is_alive(info.pid);
     if !pid_alive {
-        return true;
+        #[cfg(target_os = "linux")]
+        {
+            return true;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&info.created_at_rfc3339) {
+                let age = Utc::now().signed_duration_since(created);
+                if age.num_seconds() > LOCK_STALE_SECONDS {
+                    tracing::warn!(
+                        pid = info.pid,
+                        age_seconds = age.num_seconds(),
+                        "sync lock age exceeds stale threshold and pid liveness is unknown; treating as stale"
+                    );
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 
     // Check age
@@ -209,9 +229,21 @@ fn pid_is_alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
-#[cfg(not(target_os = "linux"))]
-fn pid_is_alive(_pid: u32) -> bool {
-    true
+#[cfg(all(unix, not(target_os = "linux")))]
+fn pid_is_alive(pid: u32) -> bool {
+    match std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+    {
+        Ok(status) => status.success(),
+        Err(_) => pid == std::process::id(),
+    }
+}
+
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> bool {
+    pid == std::process::id()
 }
 
 // ---------------------------------------------------------------------------
