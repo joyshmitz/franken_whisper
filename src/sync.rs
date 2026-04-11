@@ -65,6 +65,8 @@ struct LockInfo {
 pub struct SyncLock {
     path: PathBuf,
     released: bool,
+    info: LockInfo,
+    payload: String,
 }
 
 impl SyncLock {
@@ -98,6 +100,7 @@ impl SyncLock {
             created_at_rfc3339: Utc::now().to_rfc3339(),
             operation: operation.to_owned(),
         };
+        let payload = serde_json::to_string_pretty(&info)?;
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -108,12 +111,14 @@ impl SyncLock {
                     path.display()
                 ))
             })?;
-        file.write_all(serde_json::to_string_pretty(&info)?.as_bytes())?;
+        file.write_all(payload.as_bytes())?;
         file.sync_all()?;
 
         Ok(Self {
             path,
             released: false,
+            info,
+            payload,
         })
     }
 
@@ -126,7 +131,34 @@ impl SyncLock {
             return Ok(());
         }
         if self.path.exists() {
-            fs::remove_file(&self.path)?;
+            match fs::read_to_string(&self.path) {
+                Ok(contents) => {
+                    if contents == self.payload {
+                        fs::remove_file(&self.path)?;
+                    } else if let Ok(current) = serde_json::from_str::<LockInfo>(&contents) {
+                        if lock_info_matches(&self.info, &current) {
+                            fs::remove_file(&self.path)?;
+                        } else {
+                            tracing::warn!(
+                                lock_path = %self.path.display(),
+                                "sync lock contents changed; skipping removal"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            lock_path = %self.path.display(),
+                            "sync lock contents unreadable; skipping removal"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        lock_path = %self.path.display(),
+                        error = %error,
+                        "failed to read sync lock; skipping removal"
+                    );
+                }
+            }
         }
         self.released = true;
         Ok(())
@@ -135,11 +167,12 @@ impl SyncLock {
 
 impl Drop for SyncLock {
     fn drop(&mut self) {
-        if !self.released && self.path.exists() {
-            let _ = fs::remove_file(&self.path);
-            self.released = true;
-        }
+        let _ = self.release_inner();
     }
+}
+
+fn lock_info_matches(a: &LockInfo, b: &LockInfo) -> bool {
+    a.pid == b.pid && a.created_at_rfc3339 == b.created_at_rfc3339 && a.operation == b.operation
 }
 
 fn is_lock_stale(info: &LockInfo) -> bool {
@@ -4645,6 +4678,32 @@ mod tests {
         let lock = SyncLock::acquire(&state_root, "test").expect("acquire");
         lock.release().expect("explicit release");
         // Drop happens here — should not panic even though already released.
+    }
+
+    #[test]
+    fn release_skips_lock_if_contents_changed() {
+        let dir = tempdir().expect("tempdir");
+        let state_root = dir.path().join("state");
+        let lock = SyncLock::acquire(&state_root, "test").expect("acquire");
+        let lock_path = state_root.join("locks").join("sync.lock");
+
+        let other = LockInfo {
+            pid: 9999,
+            created_at_rfc3339: "2026-01-01T00:00:00Z".to_owned(),
+            operation: "import".to_owned(),
+        };
+        fs::write(
+            &lock_path,
+            serde_json::to_string_pretty(&other).expect("serialize"),
+        )
+        .expect("overwrite lock");
+
+        lock.release().expect("release should succeed");
+
+        let contents = fs::read_to_string(&lock_path).expect("lock should remain");
+        let parsed: LockInfo = serde_json::from_str(&contents).expect("parse lock JSON");
+        assert_eq!(parsed.pid, 9999);
+        assert_eq!(parsed.operation, "import");
     }
 
     #[test]

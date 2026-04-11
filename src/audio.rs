@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
@@ -364,8 +364,10 @@ fn ensure_local_ffmpeg_bundle(work_dir: Option<&Path>) -> FwResult<()> {
 
     let extracted_ffmpeg = find_file_named(&extract_path, &platform_tool_name("ffmpeg"))
         .ok_or_else(|| FwError::Unsupported("ffmpeg bundle missing ffmpeg binary".to_owned()))?;
+    validate_extracted_binary(&extracted_ffmpeg, "ffmpeg")?;
     let extracted_ffprobe = find_file_named(&extract_path, &platform_tool_name("ffprobe"))
         .ok_or_else(|| FwError::Unsupported("ffmpeg bundle missing ffprobe binary".to_owned()))?;
+    validate_extracted_binary(&extracted_ffprobe, "ffprobe")?;
 
     fs::copy(&extracted_ffmpeg, &ffmpeg_path)?;
     fs::copy(&extracted_ffprobe, &ffprobe_path)?;
@@ -447,7 +449,50 @@ fn extract_ffmpeg_bundle(archive_path: &Path, destination: &Path) -> FwResult<()
         args[0] = "-xzf".to_owned();
     }
 
+    validate_tar_entries(archive_path)?;
     run_command_with_timeout("tar", &args, None, Some(DOWNLOAD_TIMEOUT))?;
+    Ok(())
+}
+
+fn validate_tar_entries(archive_path: &Path) -> FwResult<()> {
+    let archive = archive_path.display().to_string();
+    let args = vec!["-tf".to_owned(), archive];
+    let output = run_command_with_timeout("tar", &args, None, Some(DOWNLOAD_TIMEOUT))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !validate_tar_entry_path(trimmed) {
+            return Err(FwError::Unsupported(format!(
+                "ffmpeg bundle contains unsafe path entry: {trimmed}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_tar_entry_path(entry: &str) -> bool {
+    let path = Path::new(entry);
+    if path.is_absolute() {
+        return false;
+    }
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return false;
+        }
+    }
+    true
+}
+
+fn validate_extracted_binary(path: &Path, label: &str) -> FwResult<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(FwError::Unsupported(format!(
+            "ffmpeg bundle entry for {label} is not a regular file"
+        )));
+    }
     Ok(())
 }
 
@@ -2040,6 +2085,38 @@ mod tests {
 
         let found = find_file_named(dir.path(), "ffmpeg");
         assert_eq!(found, Some(target));
+    }
+
+    #[test]
+    fn validate_tar_entry_path_accepts_normal_entries() {
+        use super::validate_tar_entry_path;
+        assert!(validate_tar_entry_path("ffmpeg"));
+        assert!(validate_tar_entry_path("dir/ffmpeg"));
+        assert!(validate_tar_entry_path("./dir/ffprobe"));
+    }
+
+    #[test]
+    fn validate_tar_entry_path_rejects_parent_dir() {
+        use super::validate_tar_entry_path;
+        assert!(!validate_tar_entry_path("../ffmpeg"));
+        assert!(!validate_tar_entry_path("dir/../ffprobe"));
+    }
+
+    #[test]
+    fn validate_tar_entry_path_rejects_absolute_paths() {
+        use super::validate_tar_entry_path;
+        assert!(!validate_tar_entry_path("/usr/bin/ffmpeg"));
+    }
+
+    #[test]
+    fn validate_extracted_binary_rejects_directories() {
+        use super::validate_extracted_binary;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = validate_extracted_binary(dir.path(), "ffmpeg").expect_err("should reject dir");
+        assert!(
+            err.to_string().contains("not a regular file"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(unix)]
