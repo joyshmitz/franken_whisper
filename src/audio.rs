@@ -11,6 +11,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::default::{get_codecs, get_probe};
+use tempfile::Builder;
 
 use crate::error::{FwError, FwResult};
 use crate::model::InputSource;
@@ -354,18 +355,16 @@ fn ensure_local_ffmpeg_bundle(work_dir: Option<&Path>) -> FwResult<()> {
         download_ffmpeg_bundle(bundle_url, &archive_path)?;
     }
 
-    let extract_dir = std::env::temp_dir().join(format!(
-        "extract_{}_{}",
-        std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    tracing::debug!(extract_dir = %extract_dir.display(), "extracting ffmpeg bundle");
-    fs::create_dir_all(&extract_dir)?;
-    extract_ffmpeg_bundle(&archive_path, &extract_dir)?;
+    let extract_dir = Builder::new()
+        .prefix("franken_whisper_ffmpeg_extract_")
+        .tempdir()?;
+    let extract_path = extract_dir.path().to_path_buf();
+    tracing::debug!(extract_dir = %extract_path.display(), "extracting ffmpeg bundle");
+    extract_ffmpeg_bundle(&archive_path, &extract_path)?;
 
-    let extracted_ffmpeg = find_file_named(&extract_dir, &platform_tool_name("ffmpeg"))
+    let extracted_ffmpeg = find_file_named(&extract_path, &platform_tool_name("ffmpeg"))
         .ok_or_else(|| FwError::Unsupported("ffmpeg bundle missing ffmpeg binary".to_owned()))?;
-    let extracted_ffprobe = find_file_named(&extract_dir, &platform_tool_name("ffprobe"))
+    let extracted_ffprobe = find_file_named(&extract_path, &platform_tool_name("ffprobe"))
         .ok_or_else(|| FwError::Unsupported("ffmpeg bundle missing ffprobe binary".to_owned()))?;
 
     fs::copy(&extracted_ffmpeg, &ffmpeg_path)?;
@@ -464,11 +463,29 @@ fn find_file_named(root: &Path, needle: &str) -> Option<PathBuf> {
                 Ok(entry) => entry,
                 Err(_) => continue,
             };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
             let path = entry.path();
-            if path.is_dir() {
+
+            if file_type.is_dir() {
                 stack.push(path);
                 continue;
             }
+
+            if file_type.is_symlink() {
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name == needle)
+                    && fs::metadata(&path).is_ok_and(|meta| meta.is_file())
+                {
+                    return Some(path);
+                }
+                continue;
+            }
+
             if path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -2020,6 +2037,25 @@ mod tests {
         std::fs::create_dir_all(&nested).expect("mkdir");
         let target = nested.join("ffmpeg");
         std::fs::write(&target, b"binary").expect("write");
+
+        let found = find_file_named(dir.path(), "ffmpeg");
+        assert_eq!(found, Some(target));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_file_named_skips_symlink_dirs() {
+        use super::find_file_named;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        let target = nested.join("ffmpeg");
+        std::fs::write(&target, b"binary").expect("write");
+
+        let loop_link = dir.path().join("loop");
+        symlink(dir.path(), &loop_link).expect("symlink");
 
         let found = find_file_named(dir.path(), "ffmpeg");
         assert_eq!(found, Some(target));
