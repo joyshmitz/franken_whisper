@@ -502,6 +502,12 @@ pub fn check_database(db_path: &Path) -> DependencyCheck {
     }
     if parent_exists {
         match std::fs::metadata(parent_path) {
+            Ok(metadata) if !metadata.is_dir() => {
+                issues.push(format!(
+                    "database parent path is not a directory: {}",
+                    parent_path.display()
+                ));
+            }
             Ok(metadata) if metadata.permissions().readonly() => {
                 issues.push(format!(
                     "database parent directory is not writable: {}",
@@ -3559,6 +3565,30 @@ mod tests {
             super::check_database(std::path::Path::new("/nonexistent_dir_abc123/db.sqlite3"));
         assert!(!check.available, "nonexistent parent should be unavailable");
         assert!(!check.issues.is_empty(), "should report issues");
+    }
+
+    #[test]
+    fn check_database_with_parent_file_is_unavailable() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parent_file = dir.path().join("parent_file");
+        fs::write(&parent_file, "not a directory").expect("write");
+
+        let db_path = parent_file.join("db.sqlite3");
+        let check = super::check_database(&db_path);
+        assert!(
+            !check.available,
+            "parent file should not be treated as a writable directory"
+        );
+        assert!(
+            check
+                .issues
+                .iter()
+                .any(|issue| issue.contains("parent path is not a directory")),
+            "issue should mention parent path not being a directory: {:?}",
+            check.issues
+        );
     }
 
     #[test]
