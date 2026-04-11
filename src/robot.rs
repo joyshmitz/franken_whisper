@@ -463,24 +463,20 @@ pub struct HealthReport {
     pub overall_status: CheckStatus,
 }
 
-/// Check if ffmpeg is available on the system PATH.
+/// Check if ffmpeg is available via env override, PATH, or provisioned bundle.
 #[must_use]
 pub fn check_ffmpeg() -> DependencyCheck {
-    let available = crate::process::command_exists("ffmpeg");
-    let path = if available {
-        which::which("ffmpeg").ok().map(|p| p.display().to_string())
-    } else {
-        None
-    };
+    let path = crate::audio::locate_ffmpeg_program(None);
+    let available = path.is_some();
     let issues = if available {
         vec![]
     } else {
-        vec!["ffmpeg not found on PATH".to_owned()]
+        vec!["ffmpeg not found on PATH or provisioned bundle".to_owned()]
     };
     DependencyCheck {
         name: "ffmpeg".to_owned(),
         available,
-        path,
+        path: path.map(|p| p.display().to_string()),
         version: None,
         issues,
     }

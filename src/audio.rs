@@ -251,6 +251,23 @@ fn resolve_ffprobe_program(work_dir: Option<&Path>) -> FwResult<String> {
     resolve_tool_program("ffprobe", FFPROBE_BIN_ENV, work_dir)
 }
 
+pub(crate) fn locate_ffmpeg_program(work_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Some(explicit) = explicit_tool_path(FFMPEG_BIN_ENV) {
+        return Some(explicit);
+    }
+
+    if let Ok(path) = which::which("ffmpeg") {
+        return Some(path);
+    }
+
+    let provisioned = provisioned_tool_path("ffmpeg", work_dir);
+    if provisioned.is_file() {
+        return Some(provisioned);
+    }
+
+    None
+}
+
 fn resolve_tool_program(tool: &str, env_var: &str, work_dir: Option<&Path>) -> FwResult<String> {
     if let Some(explicit) = explicit_tool_path(env_var) {
         return Ok(explicit.display().to_string());
