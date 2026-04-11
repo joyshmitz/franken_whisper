@@ -286,8 +286,8 @@ fn pid_is_alive(pid: u32) -> bool {
             let needle = format!("\"{pid}\"");
             stdout.contains(&needle)
         }
-        Ok(_) => true,
-        Err(_) => true,
+        Ok(_) => false,
+        Err(_) => false,
     }
 }
 
