@@ -253,9 +253,18 @@ fn pid_is_alive(pid: u32) -> bool {
     match std::process::Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
-        .status()
+        .output()
     {
-        Ok(status) => status.success(),
+        Ok(output) => {
+            if output.status.success() {
+                return true;
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+            stderr.contains("operation not permitted")
+                || stderr.contains("permission denied")
+                || stderr.contains("not permitted")
+        }
         Err(_) => pid == std::process::id(),
     }
 }
