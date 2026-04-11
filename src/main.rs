@@ -24,13 +24,20 @@ fn main() {
         tracing::warn!("failed to install Ctrl+C handler: {e}");
     }
 
-    if let Err(error) = run() {
+    let cli = Cli::parse();
+    let is_robot = matches!(cli.command, Command::Robot { .. });
+
+    if let Err(error) = run(cli) {
         // If shutdown was triggered via Ctrl+C, exit with signal code.
         if ShutdownController::is_shutting_down() {
-            eprintln!("interrupted");
+            if !is_robot {
+                eprintln!("interrupted");
+            }
             std::process::exit(ShutdownController::signal_exit_code());
         }
-        eprintln!("error: {error}");
+        if !is_robot {
+            eprintln!("error: {error}");
+        }
         std::process::exit(1);
     }
 
@@ -41,9 +48,7 @@ fn main() {
     }
 }
 
-fn run() -> FwResult<()> {
-    let cli = Cli::parse();
-
+fn run(cli: Cli) -> FwResult<()> {
     match cli.command {
         Command::Transcribe(args) => {
             let request = args.to_request()?;
