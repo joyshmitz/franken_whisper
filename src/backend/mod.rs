@@ -3690,9 +3690,9 @@ impl ConcurrentTwoLaneExecutor {
         });
 
         let (primary_result, primary_latency_ms) =
-            primary_handle.join().unwrap_or_else(|_| (vec![], 0));
+            primary_handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
         let (secondary_result, secondary_latency_ms) =
-            secondary_handle.join().unwrap_or_else(|_| (vec![], 0));
+            secondary_handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
 
         let (selected, selection_reason) = self.select(
             &primary_result,
@@ -3743,12 +3743,12 @@ impl ConcurrentTwoLaneExecutor {
 
         // Wait for primary first (fast model) and emit immediately
         let (primary_result, primary_latency_ms) =
-            primary_handle.join().unwrap_or_else(|_| (vec![], 0));
+            primary_handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
         on_primary(&primary_result, primary_latency_ms);
 
         // Wait for secondary (quality model)
         let (secondary_result, secondary_latency_ms) =
-            secondary_handle.join().unwrap_or_else(|_| (vec![], 0));
+            secondary_handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
         on_compare(
             &primary_result,
             &secondary_result,

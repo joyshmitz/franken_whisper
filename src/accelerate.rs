@@ -137,6 +137,10 @@ fn apply_confidences(segments: &mut [TranscriptionSegment], values: &[f64]) {
 }
 
 fn normalize_cpu(values: &[f64]) -> Vec<f64> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+
     let safe_sum: f64 = values
         .iter()
         .copied()
