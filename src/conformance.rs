@@ -169,9 +169,7 @@ pub fn validate_segment_invariants_with_policy(
             return Err(conformance_err(index, "has empty speaker label"));
         }
 
-        if let Some(end) = segment.end_sec {
-            previous_end = Some(end);
-        }
+        previous_end = segment.end_sec;
     }
 
     Ok(())

@@ -745,7 +745,7 @@ fn append_decoded_audio_to_mono(
 
     for frame in interleaved.chunks(channel_count) {
         let sum: f32 = frame.iter().copied().sum();
-        destination.push(sum / channel_count as f32);
+        destination.push(sum / frame.len() as f32);
     }
 }
 
