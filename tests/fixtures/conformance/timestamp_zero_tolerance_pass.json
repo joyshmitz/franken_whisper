@@ -1,0 +1,44 @@
+{
+  "name": "timestamp_zero_tolerance_exact_match",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.0,
+    "require_text_exact": true,
+    "require_speaker_exact": true
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 0.75,
+      "text": "exact match",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.97
+    },
+    {
+      "start_sec": 0.75,
+      "end_sec": 1.5,
+      "text": "still exact",
+      "speaker": "SPEAKER_01",
+      "confidence": 0.92
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 0.75,
+      "text": "exact match",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.96
+    },
+    {
+      "start_sec": 0.75,
+      "end_sec": 1.5,
+      "text": "still exact",
+      "speaker": "SPEAKER_01",
+      "confidence": 0.91
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

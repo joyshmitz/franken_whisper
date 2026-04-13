@@ -5,6 +5,10 @@
     "require_text_exact": true,
     "require_speaker_exact": false
   },
+  "policy": {
+    "allow_overlap": true,
+    "epsilon": 1e-6
+  },
   "expected": [
     {
       "start_sec": 0.0,

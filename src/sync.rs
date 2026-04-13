@@ -382,7 +382,8 @@ fn export_table_runs(connection: &Connection, path: &Path) -> FwResult<u64> {
         )
         .map_err(|error| FwError::Storage(error.to_string()))?;
 
-    let mut file = fs::File::create(path)?;
+    let file = fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
     let mut count = 0u64;
 
     for row in rows {
@@ -400,11 +401,10 @@ fn export_table_runs(connection: &Connection, path: &Path) -> FwResult<u64> {
             "replay_json": value_to_json(row.get(10)),
             "acceleration_json": value_to_json(row.get(11)),
         });
-        writeln!(file, "{}", serde_json::to_string(&obj)?)?;
+        writeln!(writer, "{}", serde_json::to_string(&obj)?)?;
         count += 1;
     }
-    file.flush()?;
-    file.sync_all()?;
+    writer.flush()?;
 
     Ok(count)
 }
@@ -417,7 +417,8 @@ fn export_table_segments(connection: &Connection, path: &Path) -> FwResult<u64> 
         )
         .map_err(|error| FwError::Storage(error.to_string()))?;
 
-    let mut file = fs::File::create(path)?;
+    let file = fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
     let mut count = 0u64;
 
     for row in rows {
@@ -430,11 +431,10 @@ fn export_table_segments(connection: &Connection, path: &Path) -> FwResult<u64> 
             "text": value_to_json(row.get(5)),
             "confidence": value_to_json(row.get(6)),
         });
-        writeln!(file, "{}", serde_json::to_string(&obj)?)?;
+        writeln!(writer, "{}", serde_json::to_string(&obj)?)?;
         count += 1;
     }
-    file.flush()?;
-    file.sync_all()?;
+    writer.flush()?;
 
     Ok(count)
 }
@@ -447,7 +447,8 @@ fn export_table_events(connection: &Connection, path: &Path) -> FwResult<u64> {
         )
         .map_err(|error| FwError::Storage(error.to_string()))?;
 
-    let mut file = fs::File::create(path)?;
+    let file = fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
     let mut count = 0u64;
 
     for row in rows {
@@ -460,11 +461,10 @@ fn export_table_events(connection: &Connection, path: &Path) -> FwResult<u64> {
             "message": value_to_json(row.get(5)),
             "payload_json": value_to_json(row.get(6)),
         });
-        writeln!(file, "{}", serde_json::to_string(&obj)?)?;
+        writeln!(writer, "{}", serde_json::to_string(&obj)?)?;
         count += 1;
     }
-    file.flush()?;
-    file.sync_all()?;
+    writer.flush()?;
 
     Ok(count)
 }
@@ -930,6 +930,8 @@ fn import_inner(
 
     // Validate schema version (exact major match)
     validate_schema_version(&manifest)?;
+    // Validate export format version (exact major match)
+    validate_export_format_version(&manifest)?;
 
     // Validate checksums
     validate_checksums(&manifest, input_dir)?;
@@ -1710,6 +1712,20 @@ fn validate_schema_version(manifest: &SyncManifest) -> FwResult<()> {
     Ok(())
 }
 
+fn validate_export_format_version(manifest: &SyncManifest) -> FwResult<()> {
+    let expected_major = EXPORT_FORMAT_VERSION.split('.').next().unwrap_or("1");
+    let actual_major = manifest.export_format_version.split('.').next().unwrap_or("0");
+
+    if expected_major != actual_major {
+        return Err(FwError::Storage(format!(
+            "export format version mismatch: expected major {expected_major}, got {}",
+            manifest.export_format_version
+        )));
+    }
+
+    Ok(())
+}
+
 fn validate_checksums(manifest: &SyncManifest, input_dir: &Path) -> FwResult<()> {
     let checks = [
         ("runs.jsonl", &manifest.checksums.runs_jsonl_sha256),
@@ -2264,6 +2280,16 @@ pub fn validate_sync(db_path: &Path, jsonl_dir: &Path) -> FwResult<SyncValidatio
                     == json_str_or_empty(jsonl_value, "finished_at")
                 && value_to_string_sqlite(db_row.get(3))
                     == json_str_or_empty(jsonl_value, "backend")
+                && value_to_string_sqlite(db_row.get(4))
+                    == json_str_or_empty(jsonl_value, "input_path")
+                && value_to_string_sqlite(db_row.get(5))
+                    == json_str_or_empty(jsonl_value, "normalized_wav_path")
+                && value_to_string_sqlite(db_row.get(6))
+                    == json_str_or_empty(jsonl_value, "request_json")
+                && value_to_string_sqlite(db_row.get(7))
+                    == json_str_or_empty(jsonl_value, "result_json")
+                && value_to_string_sqlite(db_row.get(8))
+                    == json_str_or_empty(jsonl_value, "warnings_json")
                 && value_to_string_sqlite(db_row.get(9))
                     == json_str_or_empty(jsonl_value, "transcript")
                 && value_to_string_sqlite(db_row.get(10))
@@ -3034,6 +3060,31 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_major_export_format_version_mismatch() {
+        let dir = tempdir().expect("tempdir");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+        let target_db = dir.path().join("target.sqlite3");
+
+        write_jsonl_snapshot(&export_dir, &[], &[], &[]);
+
+        let manifest_path = export_dir.join("manifest.json");
+        let mut manifest_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("manifest read"))
+                .expect("manifest json");
+        manifest_value["export_format_version"] = json!("2.0");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest_value).expect("manifest serialize"),
+        )
+        .expect("manifest write");
+
+        let error = import(&target_db, &export_dir, &state_root, ConflictPolicy::Reject)
+            .expect_err("major export format mismatch must fail");
+        assert!(error.to_string().contains("export format version mismatch"));
+    }
+
+    #[test]
     fn import_accepts_backward_compatible_minor_schema_version() {
         let dir = tempdir().expect("tempdir");
         let export_dir = dir.path().join("export");
@@ -3055,6 +3106,33 @@ mod tests {
 
         let result = import(&target_db, &export_dir, &state_root, ConflictPolicy::Reject)
             .expect("minor version should be accepted");
+        assert_eq!(result.runs_imported, 0);
+        assert_eq!(result.segments_imported, 0);
+        assert_eq!(result.events_imported, 0);
+    }
+
+    #[test]
+    fn import_accepts_backward_compatible_minor_export_format_version() {
+        let dir = tempdir().expect("tempdir");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+        let target_db = dir.path().join("target.sqlite3");
+
+        write_jsonl_snapshot(&export_dir, &[], &[], &[]);
+
+        let manifest_path = export_dir.join("manifest.json");
+        let mut manifest_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("manifest read"))
+                .expect("manifest json");
+        manifest_value["export_format_version"] = json!("1.5");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest_value).expect("manifest serialize"),
+        )
+        .expect("manifest write");
+
+        let result = import(&target_db, &export_dir, &state_root, ConflictPolicy::Reject)
+            .expect("minor export format version should be accepted");
         assert_eq!(result.runs_imported, 0);
         assert_eq!(result.segments_imported, 0);
         assert_eq!(result.events_imported, 0);
@@ -9015,6 +9093,187 @@ mod tests {
                 .mismatched_records
                 .contains(&"bk-mismatch".to_owned()),
             "bk-mismatch should be in mismatched_records: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn validate_sync_detects_mismatched_input_path_field() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("val_input_path.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("input-path-mismatch", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read");
+        let first_line = content.lines().next().expect("has line");
+        let mut mutated: serde_json::Value = serde_json::from_str(first_line).expect("valid run");
+        mutated["input_path"] = json!("different.wav");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("ser")),
+        )
+        .expect("write");
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(!validation.is_valid, "should detect input_path mismatch");
+        assert!(
+            validation
+                .mismatched_records
+                .contains(&"input-path-mismatch".to_owned()),
+            "input-path-mismatch should be in mismatched_records: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn validate_sync_detects_mismatched_normalized_wav_path_field() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("val_norm_path.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("norm-path-mismatch", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read");
+        let first_line = content.lines().next().expect("has line");
+        let mut mutated: serde_json::Value = serde_json::from_str(first_line).expect("valid run");
+        mutated["normalized_wav_path"] = json!("different_norm.wav");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("ser")),
+        )
+        .expect("write");
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(
+            !validation.is_valid,
+            "should detect normalized_wav_path mismatch"
+        );
+        assert!(
+            validation
+                .mismatched_records
+                .contains(&"norm-path-mismatch".to_owned()),
+            "norm-path-mismatch should be in mismatched_records: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn validate_sync_detects_mismatched_request_json_field() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("val_request_json.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("request-json-mismatch", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read");
+        let first_line = content.lines().next().expect("has line");
+        let mut mutated: serde_json::Value = serde_json::from_str(first_line).expect("valid run");
+        mutated["request_json"] = json!("{\"mutated\":true}");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("ser")),
+        )
+        .expect("write");
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(!validation.is_valid, "should detect request_json mismatch");
+        assert!(
+            validation
+                .mismatched_records
+                .contains(&"request-json-mismatch".to_owned()),
+            "request-json-mismatch should be in mismatched_records: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn validate_sync_detects_mismatched_result_json_field() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("val_result_json.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("result-json-mismatch", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read");
+        let first_line = content.lines().next().expect("has line");
+        let mut mutated: serde_json::Value = serde_json::from_str(first_line).expect("valid run");
+        mutated["result_json"] = json!("{\"mutated_result\":true}");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("ser")),
+        )
+        .expect("write");
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(!validation.is_valid, "should detect result_json mismatch");
+        assert!(
+            validation
+                .mismatched_records
+                .contains(&"result-json-mismatch".to_owned()),
+            "result-json-mismatch should be in mismatched_records: {:?}",
+            validation.mismatched_records
+        );
+    }
+
+    #[test]
+    fn validate_sync_detects_mismatched_warnings_json_field() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("val_warnings_json.sqlite3");
+        let export_dir = dir.path().join("export");
+        let state_root = dir.path().join("state");
+
+        let store = RunStore::open(&db_path).expect("open");
+        store
+            .persist_report(&fixture_report("warnings-json-mismatch", &db_path))
+            .expect("persist");
+        export(&db_path, &export_dir, &state_root).expect("export");
+
+        let runs_path = export_dir.join("runs.jsonl");
+        let content = fs::read_to_string(&runs_path).expect("read");
+        let first_line = content.lines().next().expect("has line");
+        let mut mutated: serde_json::Value = serde_json::from_str(first_line).expect("valid run");
+        mutated["warnings_json"] = json!("[\"extra warning\"]");
+        fs::write(
+            &runs_path,
+            format!("{}\n", serde_json::to_string(&mutated).expect("ser")),
+        )
+        .expect("write");
+
+        let validation = validate_sync(&db_path, &export_dir).expect("validate");
+        assert!(
+            !validation.is_valid,
+            "should detect warnings_json mismatch"
+        );
+        assert!(
+            validation
+                .mismatched_records
+                .contains(&"warnings-json-mismatch".to_owned()),
+            "warnings-json-mismatch should be in mismatched_records: {:?}",
             validation.mismatched_records
         );
     }

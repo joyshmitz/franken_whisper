@@ -12,7 +12,9 @@ use serde_json::{Value, json};
 use tracing::warn;
 
 use crate::error::FwResult;
-use crate::model::{BackendKind, TranscribeRequest, TranscriptionResult, TranscriptionSegment};
+use crate::model::{
+    BackendKind, TranscribeRequest, TranscriptionResult, TranscriptionSegment, WordTimestampParams,
+};
 
 use super::native_audio::analyze_wav;
 
@@ -28,6 +30,33 @@ struct NativeSegmentation {
     duration_ms: u64,
     pilot_segments: Vec<super::TranscriptSegment>,
     analysis_provenance: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordTimestampMode {
+    None,
+    Word,
+    MaxLen(u32),
+}
+
+fn word_timestamp_mode(params: Option<&WordTimestampParams>) -> WordTimestampMode {
+    let Some(params) = params else {
+        return WordTimestampMode::None;
+    };
+
+    if let Some(max_len) = params.max_len {
+        return match max_len {
+            0 => WordTimestampMode::None,
+            1 => WordTimestampMode::Word,
+            _ => WordTimestampMode::MaxLen(max_len),
+        };
+    }
+
+    if params.enabled || params.token_threshold.is_some() || params.token_sum_threshold.is_some() {
+        WordTimestampMode::Word
+    } else {
+        WordTimestampMode::None
+    }
 }
 
 /// In-process pilot is always available at compile/runtime.
@@ -47,6 +76,7 @@ pub fn run(
     }
 
     let threads = usize::try_from(request.backend_params.threads.unwrap_or(4)).unwrap_or(4);
+    let word_mode = word_timestamp_mode(request.backend_params.word_timestamps.as_ref());
     let pilot = super::WhisperCppPilot::new(
         request
             .model
@@ -55,9 +85,21 @@ pub fn run(
         threads,
         request.language.clone(),
         request.translate,
+        matches!(word_mode, WordTimestampMode::Word | WordTimestampMode::MaxLen(_)),
+        request.backend_params.split_on_word,
     );
     let native = build_native_segmentation(request, normalized_wav, &pilot, token)?;
-    let segments = to_transcription_segments(&native.pilot_segments, token)?;
+    let pilot_segments = apply_word_timestamp_controls(
+        &native.pilot_segments,
+        word_mode,
+        request.backend_params.split_on_word,
+        token,
+    )?;
+    let segments = to_transcription_segments(
+        &pilot_segments,
+        request.backend_params.no_timestamps,
+        token,
+    )?;
     let transcript = super::transcript_from_segments(&segments);
 
     Ok(TranscriptionResult {
@@ -94,6 +136,7 @@ pub fn run_streaming(
     }
 
     let threads = usize::try_from(request.backend_params.threads.unwrap_or(4)).unwrap_or(4);
+    let word_mode = word_timestamp_mode(request.backend_params.word_timestamps.as_ref());
     let pilot = super::WhisperCppPilot::new(
         request
             .model
@@ -102,9 +145,21 @@ pub fn run_streaming(
         threads,
         request.language.clone(),
         request.translate,
+        matches!(word_mode, WordTimestampMode::Word | WordTimestampMode::MaxLen(_)),
+        request.backend_params.split_on_word,
     );
     let native = build_native_segmentation(request, normalized_wav, &pilot, token)?;
-    let segments = to_transcription_segments(&native.pilot_segments, token)?;
+    let pilot_segments = apply_word_timestamp_controls(
+        &native.pilot_segments,
+        word_mode,
+        request.backend_params.split_on_word,
+        token,
+    )?;
+    let segments = to_transcription_segments(
+        &pilot_segments,
+        request.backend_params.no_timestamps,
+        token,
+    )?;
     for segment in &segments {
         if let Some(tok) = token {
             tok.checkpoint()?;
@@ -247,8 +302,132 @@ fn estimate_duration_ms(request: &TranscribeRequest, normalized_wav: &Path) -> u
     estimated.clamp(MIN_DURATION_MS, MAX_DURATION_MS)
 }
 
+fn apply_word_timestamp_controls(
+    pilot_segments: &[super::TranscriptSegment],
+    word_mode: WordTimestampMode,
+    split_on_word: bool,
+    token: Option<&crate::orchestrator::CancellationToken>,
+) -> FwResult<Vec<super::TranscriptSegment>> {
+    if word_mode == WordTimestampMode::None && !split_on_word {
+        return Ok(pilot_segments.to_vec());
+    }
+
+    let word_segments = explode_segments_to_words(pilot_segments, token)?;
+
+    match word_mode {
+        WordTimestampMode::MaxLen(max_len) if max_len > 1 => {
+            group_word_segments_by_len(&word_segments, max_len, token)
+        }
+        _ => Ok(word_segments),
+    }
+}
+
+fn explode_segments_to_words(
+    pilot_segments: &[super::TranscriptSegment],
+    token: Option<&crate::orchestrator::CancellationToken>,
+) -> FwResult<Vec<super::TranscriptSegment>> {
+    let mut out = Vec::new();
+    for segment in pilot_segments {
+        if let Some(tok) = token {
+            tok.checkpoint()?;
+        }
+        let words: Vec<&str> = segment.text.split_whitespace().collect();
+        if words.is_empty() {
+            continue;
+        }
+        let duration_ms = segment.end_ms.saturating_sub(segment.start_ms);
+        let ms_per_word = if words.is_empty() {
+            0
+        } else {
+            duration_ms / words.len() as u64
+        };
+        for (index, word) in words.iter().enumerate() {
+            let start_ms = segment.start_ms + (index as u64) * ms_per_word;
+            let end_ms = if index + 1 == words.len() {
+                segment.end_ms
+            } else {
+                start_ms + ms_per_word
+            };
+            out.push(super::TranscriptSegment {
+                start_ms,
+                end_ms,
+                text: (*word).to_owned(),
+                confidence: segment.confidence,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn group_word_segments_by_len(
+    segments: &[super::TranscriptSegment],
+    max_len: u32,
+    token: Option<&crate::orchestrator::CancellationToken>,
+) -> FwResult<Vec<super::TranscriptSegment>> {
+    let limit = max_len as usize;
+    let mut grouped = Vec::new();
+    let mut current_text = String::new();
+    let mut current_len = 0usize;
+    let mut current_start = 0u64;
+    let mut current_end = 0u64;
+    let mut confidence_sum = 0.0;
+    let mut confidence_count = 0u64;
+
+    for segment in segments {
+        if let Some(tok) = token {
+            tok.checkpoint()?;
+        }
+        let word = segment.text.trim();
+        if word.is_empty() {
+            continue;
+        }
+
+        let word_len = word.chars().count();
+        let extra_len = if current_text.is_empty() {
+            word_len
+        } else {
+            1 + word_len
+        };
+
+        if !current_text.is_empty() && current_len + extra_len > limit {
+            grouped.push(super::TranscriptSegment {
+                start_ms: current_start,
+                end_ms: current_end,
+                text: current_text.clone(),
+                confidence: confidence_sum / confidence_count.max(1) as f64,
+            });
+            current_text.clear();
+            confidence_sum = 0.0;
+            confidence_count = 0;
+        }
+
+        if current_text.is_empty() {
+            current_start = segment.start_ms;
+        } else {
+            current_text.push(' ');
+        }
+        current_text.push_str(word);
+        current_len = current_text.chars().count();
+        current_end = segment.end_ms;
+        confidence_sum += segment.confidence;
+        confidence_count += 1;
+    }
+
+    if !current_text.is_empty() {
+        grouped.push(super::TranscriptSegment {
+            start_ms: current_start,
+            end_ms: current_end,
+            text: current_text,
+            confidence: confidence_sum / confidence_count.max(1) as f64,
+        });
+    }
+
+    Ok(grouped)
+}
+
 fn to_transcription_segments(
     pilot_segments: &[super::TranscriptSegment],
+    no_timestamps: bool,
     token: Option<&crate::orchestrator::CancellationToken>,
 ) -> FwResult<Vec<TranscriptionSegment>> {
     let mut segments = Vec::with_capacity(pilot_segments.len());
@@ -257,8 +436,16 @@ fn to_transcription_segments(
             tok.checkpoint()?;
         }
         segments.push(TranscriptionSegment {
-            start_sec: Some(seg.start_ms as f64 / 1_000.0),
-            end_sec: Some(seg.end_ms as f64 / 1_000.0),
+            start_sec: if no_timestamps {
+                None
+            } else {
+                Some(seg.start_ms as f64 / 1_000.0)
+            },
+            end_sec: if no_timestamps {
+                None
+            } else {
+                Some(seg.end_ms as f64 / 1_000.0)
+            },
             text: seg.text.trim().to_owned(),
             speaker: None,
             confidence: Some(seg.confidence.clamp(0.0, 1.0)),
@@ -274,7 +461,9 @@ mod tests {
     use std::time::Duration;
 
     use crate::backend::{Engine, TranscriptSegment, WhisperCppPilot};
-    use crate::model::{BackendKind, BackendParams, InputSource, TranscribeRequest};
+    use crate::model::{
+        BackendKind, BackendParams, InputSource, TranscribeRequest, WordTimestampParams,
+    };
     use crate::orchestrator::CancellationToken;
 
     use super::*;
@@ -514,7 +703,7 @@ mod tests {
 
         let request = native_request();
         let pilot =
-            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false);
+            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false, false, false);
         let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
         let result = build_native_segmentation(&request, &wav, &pilot, Some(&token));
         assert!(
@@ -578,7 +767,7 @@ mod tests {
             },
         ];
 
-        let result = to_transcription_segments(&pilot_segments, None).expect("segments");
+        let result = to_transcription_segments(&pilot_segments, false, None).expect("segments");
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].text, "hello world");
         assert!((result[0].start_sec.unwrap() - 0.5).abs() < 0.001);
@@ -587,6 +776,169 @@ mod tests {
         assert!(result[0].speaker.is_none());
 
         assert_eq!(result[1].confidence, Some(0.0));
+    }
+
+    #[test]
+    fn to_transcription_segments_respects_no_timestamps() {
+        let pilot_segments = vec![TranscriptSegment {
+            start_ms: 500,
+            end_ms: 1500,
+            text: "hello".to_owned(),
+            confidence: 0.9,
+        }];
+
+        let result = to_transcription_segments(&pilot_segments, true, None).expect("segments");
+        assert_eq!(result.len(), 1);
+        assert!(result[0].start_sec.is_none());
+        assert!(result[0].end_sec.is_none());
+    }
+
+    #[test]
+    fn run_word_timestamps_enabled_splits_into_words() {
+        let mut req = native_request();
+        req.backend_params.duration_ms = Some(5_000);
+        req.backend_params.word_timestamps = Some(WordTimestampParams {
+            enabled: true,
+            ..WordTimestampParams::default()
+        });
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("word timestamp run should succeed");
+
+        assert_eq!(
+            result.segments.len(),
+            9,
+            "word timestamp mode should split into 9 words"
+        );
+        assert!(
+            result
+                .segments
+                .iter()
+                .all(|seg| !seg.text.contains(' ')),
+            "word-level segments should not contain whitespace"
+        );
+    }
+
+    #[test]
+    fn run_split_on_word_splits_even_without_word_timestamp_level() {
+        let mut req = native_request();
+        req.backend_params.duration_ms = Some(5_000);
+        req.backend_params.split_on_word = true;
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("split_on_word run should succeed");
+
+        assert_eq!(
+            result.segments.len(),
+            9,
+            "split_on_word should split into 9 words"
+        );
+        assert!(
+            result
+                .segments
+                .iter()
+                .all(|seg| !seg.text.contains(' ')),
+            "split_on_word segments should not contain whitespace"
+        );
+    }
+
+    #[test]
+    fn no_timestamps_clears_word_level_bounds() {
+        let mut req = native_request();
+        req.backend_params.duration_ms = Some(5_000);
+        req.backend_params.word_timestamps = Some(WordTimestampParams {
+            enabled: true,
+            ..WordTimestampParams::default()
+        });
+        req.backend_params.no_timestamps = true;
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("no_timestamps should still succeed");
+
+        assert!(
+            result
+                .segments
+                .iter()
+                .all(|seg| seg.start_sec.is_none() && seg.end_sec.is_none()),
+            "no_timestamps should clear start/end even with word-level split"
+        );
+    }
+
+    #[test]
+    fn word_timestamps_max_len_groups_words() {
+        let mut req = native_request();
+        req.backend_params.duration_ms = Some(5_000);
+        req.backend_params.word_timestamps = Some(WordTimestampParams {
+            enabled: true,
+            max_len: Some(10),
+            ..WordTimestampParams::default()
+        });
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("max_len run should succeed");
+
+        let texts: Vec<String> = result.segments.iter().map(|seg| seg.text.clone()).collect();
+        assert_eq!(texts.len(), 5, "max_len=10 should group into 5 segments");
+        assert_eq!(
+            texts,
+            vec![
+                "The quick",
+                "brown fox",
+                "jumps over",
+                "the lazy",
+                "dog."
+            ],
+        );
+    }
+
+    #[test]
+    fn word_timestamps_token_threshold_enables_word_split() {
+        let mut req = native_request();
+        req.backend_params.duration_ms = Some(5_000);
+        req.backend_params.word_timestamps = Some(WordTimestampParams {
+            enabled: false,
+            token_threshold: Some(0.5),
+            ..WordTimestampParams::default()
+        });
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            Path::new("."),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("token threshold run should succeed");
+
+        assert_eq!(
+            result.segments.len(),
+            9,
+            "token_threshold should enable word-level splitting"
+        );
     }
 
     #[test]
@@ -659,7 +1011,7 @@ mod tests {
 
     #[test]
     fn to_transcription_segments_empty_input_returns_empty() {
-        let result = to_transcription_segments(&[], None).unwrap();
+        let result = to_transcription_segments(&[], false, None).unwrap();
         assert!(
             result.is_empty(),
             "empty pilot segments should produce empty output"
@@ -678,7 +1030,7 @@ mod tests {
         let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
         std::thread::sleep(Duration::from_millis(5));
 
-        let result = to_transcription_segments(&pilot_segs, Some(&token));
+        let result = to_transcription_segments(&pilot_segs, false, Some(&token));
         assert!(
             result.is_err(),
             "expired cancellation token should propagate error"
@@ -797,7 +1149,7 @@ mod tests {
         req.backend_params.duration_ms = Some(10_000);
 
         let pilot =
-            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false);
+            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false, false, false);
         let result = build_native_segmentation(&req, Path::new("no_such_file.wav"), &pilot, None)
             .expect("fallback path should succeed");
 
@@ -884,7 +1236,7 @@ mod tests {
 
         let req = native_request();
         let pilot =
-            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false);
+            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false, false, false);
         let segmentation = build_native_segmentation(&req, &wav, &pilot, None)
             .expect("segmentation should succeed");
 
@@ -945,7 +1297,7 @@ mod tests {
             text: "  \t\n  ".to_owned(),
             confidence: 0.8,
         }];
-        let result = to_transcription_segments(&pilot_segs, None).expect("segments");
+        let result = to_transcription_segments(&pilot_segs, false, None).expect("segments");
         assert_eq!(
             result[0].text, "",
             "whitespace-only text should become empty after trim"
@@ -960,7 +1312,7 @@ mod tests {
             text: "late".to_owned(),
             confidence: 0.5,
         }];
-        let result = to_transcription_segments(&pilot_segs, None).expect("segments");
+        let result = to_transcription_segments(&pilot_segs, false, None).expect("segments");
         assert!(
             (result[0].start_sec.unwrap() - 3600.0).abs() < 1e-6,
             "3_600_000 ms → 3600.0 sec, got {:?}",
@@ -1029,7 +1381,7 @@ mod tests {
         ];
         let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
         std::thread::sleep(Duration::from_millis(5));
-        let result = to_transcription_segments(&pilot_segs, Some(&token));
+        let result = to_transcription_segments(&pilot_segs, false, Some(&token));
         assert!(result.is_err(), "should fail with expired token");
         assert!(
             matches!(result.unwrap_err(), crate::error::FwError::Cancelled(_)),
@@ -1068,7 +1420,7 @@ mod tests {
                 confidence: -1.0,
             },
         ];
-        let result = to_transcription_segments(&pilot_segs, None).unwrap();
+        let result = to_transcription_segments(&pilot_segs, false, None).unwrap();
         assert_eq!(
             result[0].confidence,
             Some(1.0),
@@ -1111,7 +1463,7 @@ mod tests {
                 confidence: 0.8,
             },
         ];
-        let result = to_transcription_segments(&pilot_segs, None).unwrap();
+        let result = to_transcription_segments(&pilot_segs, false, None).unwrap();
         assert_eq!(result[0].text, "leading and trailing");
         assert_eq!(result[1].text, "tabs and newlines");
         // speaker is always None for whisper_cpp
@@ -1176,7 +1528,7 @@ mod tests {
         write_pcm16_mono_wav(&wav, 16_000, &samples);
 
         let pilot =
-            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false);
+            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false, false, false);
         let req = native_request();
         let seg = build_native_segmentation(&req, &wav, &pilot, None)
             .expect("segmentation should succeed");
@@ -1288,7 +1640,7 @@ mod tests {
         write_pcm16_mono_wav(&wav, 16_000, &samples);
 
         let pilot =
-            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false);
+            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false, false, false);
         let req = native_request();
         let seg = build_native_segmentation(&req, &wav, &pilot, None)
             .expect("segmentation should succeed");

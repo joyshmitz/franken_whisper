@@ -1,0 +1,19 @@
+1
+00:00:00,000 --> 00:00:02,000
+[SPEAKER_00] Speaker one opens the meeting.
+
+2
+00:00:02,000 --> 00:00:04,010
+[SPEAKER_01] Speaker two overlaps by a narrow boundary.
+
+3
+00:00:04,010 --> 00:00:06,000
+[SPEAKER_00] Speaker one resumes without losing context.
+
+4
+00:00:06,000 --> 00:00:08,020
+[SPEAKER_02] Speaker three asks for a repeat.
+
+5
+00:00:08,020 --> 00:00:10,000
+[SPEAKER_01] Speaker two confirms the corrected timeline.

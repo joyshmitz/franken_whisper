@@ -1,0 +1,39 @@
+{
+  "engine": "whisper.cpp-native",
+  "schema_version": "native-pilot-v1",
+  "in_process": true,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 2.0,
+      "text": " Speaker one opens the meeting.",
+      "confidence": 0.95
+    },
+    {
+      "start": 2.0,
+      "end": 4.01,
+      "text": " Speaker two overlaps by a narrow boundary.",
+      "confidence": 0.95
+    },
+    {
+      "start": 4.01,
+      "end": 6.0,
+      "text": " Speaker one resumes without losing context.",
+      "confidence": 0.95
+    },
+    {
+      "start": 6.0,
+      "end": 8.02,
+      "text": " Speaker three asks for a repeat.",
+      "confidence": 0.95
+    },
+    {
+      "start": 8.02,
+      "end": 10.0,
+      "text": " Speaker two confirms the corrected timeline.",
+      "confidence": 0.95
+    }
+  ],
+  "language": "en",
+  "text": "Speaker one opens the meeting. Speaker two overlaps by a narrow boundary. Speaker one resumes without losing context. Speaker three asks for a repeat. Speaker two confirms the corrected timeline."
+}

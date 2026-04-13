@@ -1,0 +1,15 @@
+{
+  "text": "Fast lane quality",
+  "chunks": [
+    {
+      "text": " Fast lane quality",
+      "timestamp": [0.0, 1.4],
+      "speaker": "SPEAKER_00",
+      "words": [
+        {"word": "Fast", "start": 0.0, "end": 0.45, "probability": 0.9},
+        {"word": "lane", "start": 0.45, "end": 0.9, "probability": 0.88},
+        {"word": "quality", "start": 0.9, "end": 1.4, "probability": 0.86}
+      ]
+    }
+  ]
+}

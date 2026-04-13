@@ -537,14 +537,6 @@ fn find_file_named(root: &Path, needle: &str) -> Option<PathBuf> {
             }
 
             if file_type.is_symlink() {
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name == needle)
-                    && fs::metadata(&path).is_ok_and(|meta| meta.is_file())
-                {
-                    return Some(path);
-                }
                 continue;
             }
 

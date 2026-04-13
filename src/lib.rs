@@ -7,6 +7,7 @@ pub mod backend;
 pub mod cli;
 pub mod conformance;
 pub mod error;
+pub mod export;
 pub mod logging;
 pub mod model;
 pub mod orchestrator;

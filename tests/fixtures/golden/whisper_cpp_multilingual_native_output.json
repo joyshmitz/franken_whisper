@@ -1,0 +1,33 @@
+{
+  "engine": "whisper.cpp-native",
+  "schema_version": "native-pilot-v1",
+  "in_process": true,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 5.2,
+      "text": " Hello and welcome to the multilingual system check.",
+      "confidence": 0.95
+    },
+    {
+      "start": 5.2,
+      "end": 10.4,
+      "text": " Buenos dias, este canal mezcla ingles y espanol.",
+      "confidence": 0.95
+    },
+    {
+      "start": 10.4,
+      "end": 15.6,
+      "text": " Bonjour, cette ligne confirme la couverture romance.",
+      "confidence": 0.95
+    },
+    {
+      "start": 15.6,
+      "end": 20.8,
+      "text": " Grazie, the final segment returns to english control.",
+      "confidence": 0.95
+    }
+  ],
+  "language": "multi",
+  "text": "Hello and welcome to the multilingual system check. Buenos dias, este canal mezcla ingles y espanol. Bonjour, cette ligne confirme la couverture romance. Grazie, the final segment returns to english control."
+}

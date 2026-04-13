@@ -213,6 +213,15 @@ fn run(cli: Cli) -> FwResult<()> {
                     &args.state_root,
                     args.conflict_policy,
                 )?;
+                let validation = franken_whisper::sync::validate_sync(&args.db, &args.input);
+                let (validation_report, validation_error) = match validation {
+                    Ok(report) => (Some(report), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                let validation_ok = validation_report
+                    .as_ref()
+                    .map(|report| report.is_valid)
+                    .unwrap_or(false);
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
@@ -220,6 +229,9 @@ fn run(cli: Cli) -> FwResult<()> {
                         "segments_imported": result.segments_imported,
                         "events_imported": result.events_imported,
                         "conflicts": result.conflicts,
+                        "validation_ok": validation_ok,
+                        "validation": validation_report,
+                        "validation_error": validation_error,
                     }))?
                 );
                 Ok(())

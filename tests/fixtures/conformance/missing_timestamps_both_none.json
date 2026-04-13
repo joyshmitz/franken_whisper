@@ -1,0 +1,30 @@
+{
+  "name": "missing_timestamps_both_none",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": null,
+      "end_sec": null,
+      "text": "no timing",
+      "speaker": null,
+      "confidence": null
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": null,
+      "end_sec": null,
+      "text": "no timing",
+      "speaker": null,
+      "confidence": null
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

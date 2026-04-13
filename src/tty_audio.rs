@@ -36,7 +36,8 @@ pub struct TtyAudioFrame {
 const MIN_PROTOCOL_VERSION: u32 = 1;
 /// Protocol version that adds transcript correction frames.
 pub const TRANSCRIPT_PROTOCOL_VERSION: u32 = 2;
-const SUPPORTED_PROTOCOL_VERSION: u32 = TRANSCRIPT_PROTOCOL_VERSION;
+// Audio frames remain protocol version 1; transcript control frames are negotiated separately.
+const SUPPORTED_PROTOCOL_VERSION: u32 = MIN_PROTOCOL_VERSION;
 const DEFAULT_PROTOCOL_VERSION: u32 = MIN_PROTOCOL_VERSION;
 const CODEC_MULAW_ZLIB_B64: &str = "mulaw+zlib+b64";
 
@@ -613,6 +614,8 @@ fn parse_audio_frames_for_decode<R: Read>(reader: &mut R) -> FwResult<Vec<TtyAud
     let mut audio_started = false;
     let mut negotiated_version = SUPPORTED_PROTOCOL_VERSION;
     let mut legacy_protocol_version: Option<u32> = None;
+    let mut session_close_reason: Option<SessionCloseReason> = None;
+    let mut session_close_last_seq: Option<u64> = None;
 
     for entry in entries {
         match entry {
@@ -693,14 +696,33 @@ fn parse_audio_frames_for_decode<R: Read>(reader: &mut R) -> FwResult<Vec<TtyAud
                         )));
                     }
                 }
+                TtyControlFrame::SessionClose {
+                    reason,
+                    last_data_seq,
+                } => {
+                    if let Some(existing_reason) = session_close_reason {
+                        if existing_reason != reason || session_close_last_seq != last_data_seq {
+                            return Err(FwError::InvalidRequest(
+                                "conflicting tty-audio session_close frames received".to_owned(),
+                            ));
+                        }
+                    } else {
+                        session_close_reason = Some(reason);
+                        session_close_last_seq = last_data_seq;
+                    }
+                    if !handshake_seen && !audio_started {
+                        return Err(FwError::InvalidRequest(
+                            "tty-audio control frame received before handshake".to_owned(),
+                        ));
+                    }
+                }
                 TtyControlFrame::RetransmitRequest { .. }
                 | TtyControlFrame::RetransmitResponse { .. }
                 | TtyControlFrame::Ack { .. }
                 | TtyControlFrame::Backpressure { .. }
                 | TtyControlFrame::TranscriptPartial { .. }
                 | TtyControlFrame::TranscriptRetract { .. }
-                | TtyControlFrame::TranscriptCorrect { .. }
-                | TtyControlFrame::SessionClose { .. } => {
+                | TtyControlFrame::TranscriptCorrect { .. } => {
                     if !handshake_seen && !audio_started {
                         return Err(FwError::InvalidRequest(
                             "tty-audio control frame received before handshake".to_owned(),
@@ -709,6 +731,15 @@ fn parse_audio_frames_for_decode<R: Read>(reader: &mut R) -> FwResult<Vec<TtyAud
                 }
             },
         }
+    }
+
+    if let Some(reason) = session_close_reason {
+        let observed_last_seq = frames.iter().map(|frame| frame.seq).max();
+        let close_frame = TtyControlFrame::SessionClose {
+            reason,
+            last_data_seq: session_close_last_seq,
+        };
+        validate_session_close(observed_last_seq, &close_frame)?;
     }
 
     Ok(frames)
@@ -1741,9 +1772,9 @@ mod tests {
 
     use super::{
         CODEC_MULAW_ZLIB_B64, DEFAULT_PROTOCOL_VERSION, DecodeRecoveryPolicy, MIN_PROTOCOL_VERSION,
-        SUPPORTED_PROTOCOL_VERSION, TranscriptSegmentCompact, TtyAudioFrame, compress_chunk,
-        crc32_of, decode_frames_to_raw, decode_frames_to_raw_with_policy, decompress_chunk,
-        emit_control_frame_to_writer, emit_retransmit_loop_from_reader,
+        SUPPORTED_PROTOCOL_VERSION, SessionCloseReason, TranscriptSegmentCompact, TtyAudioFrame,
+        compress_chunk, crc32_of, decode_frames_to_raw, decode_frames_to_raw_with_policy,
+        decompress_chunk, emit_control_frame_to_writer, emit_retransmit_loop_from_reader,
         emit_tty_transcript_partial, emit_tty_transcript_retract, ensure_parent_dir,
         mulaw_chunk_size, parse_audio_frames_for_decode, parse_frame_line, parse_frames,
         retransmit_plan_from_reader, sha256_hex,
@@ -2294,6 +2325,80 @@ mod tests {
     }
 
     #[test]
+    fn decode_accepts_session_close_with_matching_last_seq() {
+        let handshake = serde_json::to_string(&TtyControlFrame::Handshake {
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
+            supported_codecs: vec![CODEC_MULAW_ZLIB_B64.to_owned()],
+        })
+        .expect("serialize handshake");
+        let frames = [make_frame(0, b"chunk-zero"), make_frame(1, b"chunk-one")];
+        let close = serde_json::to_string(&TtyControlFrame::SessionClose {
+            reason: SessionCloseReason::Normal,
+            last_data_seq: Some(1),
+        })
+        .expect("serialize close");
+        let ndjson = format!(
+            "{handshake}\n{}\n{}\n{close}\n",
+            serde_json::to_string(&frames[0]).expect("serialize"),
+            serde_json::to_string(&frames[1]).expect("serialize")
+        );
+        let mut reader = ndjson.as_bytes();
+
+        let (report, raw) = decode_frames_to_raw(&mut reader).expect("decode");
+        assert_eq!(report.frames_decoded, 2);
+        assert_eq!(raw, b"chunk-zerochunk-one");
+    }
+
+    #[test]
+    fn decode_rejects_session_close_with_mismatched_last_seq() {
+        let handshake = serde_json::to_string(&TtyControlFrame::Handshake {
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
+            supported_codecs: vec![CODEC_MULAW_ZLIB_B64.to_owned()],
+        })
+        .expect("serialize handshake");
+        let frame = make_frame(0, b"chunk-zero");
+        let close = serde_json::to_string(&TtyControlFrame::SessionClose {
+            reason: SessionCloseReason::Normal,
+            last_data_seq: Some(9),
+        })
+        .expect("serialize close");
+        let ndjson = format!(
+            "{handshake}\n{}\n{close}\n",
+            serde_json::to_string(&frame).expect("serialize")
+        );
+        let mut reader = ndjson.as_bytes();
+
+        let error = decode_frames_to_raw(&mut reader).expect_err("mismatch should fail");
+        assert!(error.to_string().contains("session_close last_data_seq mismatch"));
+    }
+
+    #[test]
+    fn decode_accepts_duplicate_session_close_when_identical() {
+        let handshake = serde_json::to_string(&TtyControlFrame::Handshake {
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: SUPPORTED_PROTOCOL_VERSION,
+            supported_codecs: vec![CODEC_MULAW_ZLIB_B64.to_owned()],
+        })
+        .expect("serialize handshake");
+        let frame = make_frame(0, b"chunk-zero");
+        let close = TtyControlFrame::SessionClose {
+            reason: SessionCloseReason::Normal,
+            last_data_seq: Some(0),
+        };
+        let close_json = serde_json::to_string(&close).expect("serialize close");
+        let ndjson = format!(
+            "{handshake}\n{}\n{close_json}\n{close_json}\n",
+            serde_json::to_string(&frame).expect("serialize")
+        );
+        let mut reader = ndjson.as_bytes();
+
+        let (report, _raw) = decode_frames_to_raw(&mut reader).expect("decode");
+        assert_eq!(report.frames_decoded, 1);
+    }
+
+    #[test]
     fn parse_frame_line_classifies_control_and_audio_entries() {
         let control_line = serde_json::to_string(&TtyControlFrame::Ack { up_to_seq: 5 }).unwrap();
         let audio_line = serde_json::to_string(&make_frame(0, b"chunk")).unwrap();
@@ -2321,7 +2426,7 @@ mod tests {
         let mut frame_v1 = make_frame(0, b"a");
         frame_v1.protocol_version = MIN_PROTOCOL_VERSION;
         let mut frame_v2 = make_frame(1, b"b");
-        frame_v2.protocol_version = SUPPORTED_PROTOCOL_VERSION;
+        frame_v2.protocol_version = MIN_PROTOCOL_VERSION + 1;
         let ndjson = frames_to_ndjson(&[frame_v1, frame_v2]);
         let mut reader = ndjson.as_bytes();
         let err =
@@ -4390,7 +4495,7 @@ mod tests {
     // Session close (TtyControlFrame) tests (bead bd-30v)
     // ---------------------------------------------------------------
 
-    use super::{SessionCloseReason, emit_session_close, validate_session_close};
+    use super::{emit_session_close, validate_session_close};
 
     #[test]
     fn session_close_reason_serde_round_trip_normal() {

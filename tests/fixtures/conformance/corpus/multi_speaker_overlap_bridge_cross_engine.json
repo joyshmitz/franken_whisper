@@ -1,6 +1,9 @@
 {
   "name": "golden_multi_speaker_overlap_bridge_cross_engine",
-  "tags": ["multi_speaker_overlap", "bridge"],
+  "tags": [
+    "multi_speaker_overlap",
+    "bridge"
+  ],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,
@@ -13,15 +16,78 @@
     "allow_length_mismatch": false
   },
   "canonical": [
-    {"start_sec": 0.0, "end_sec": 2.0, "text": "Speaker one opens the meeting.", "speaker": null, "confidence": null},
-    {"start_sec": 2.0, "end_sec": 4.01, "text": "Speaker two overlaps by a narrow boundary.", "speaker": null, "confidence": null},
-    {"start_sec": 4.01, "end_sec": 6.0, "text": "Speaker one resumes without losing context.", "speaker": null, "confidence": null},
-    {"start_sec": 6.0, "end_sec": 8.02, "text": "Speaker three asks for a repeat.", "speaker": null, "confidence": null},
-    {"start_sec": 8.02, "end_sec": 10.0, "text": "Speaker two confirms the corrected timeline.", "speaker": null, "confidence": null}
+    {
+      "start_sec": 0.0,
+      "end_sec": 2.0,
+      "text": "Speaker one opens the meeting.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 2.0,
+      "end_sec": 4.01,
+      "text": "Speaker two overlaps by a narrow boundary.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 4.01,
+      "end_sec": 6.0,
+      "text": "Speaker one resumes without losing context.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 6.0,
+      "end_sec": 8.02,
+      "text": "Speaker three asks for a repeat.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 8.02,
+      "end_sec": 10.0,
+      "text": "Speaker two confirms the corrected timeline.",
+      "speaker": null,
+      "confidence": null
+    }
   ],
   "engines": [
-    {"engine": "whisper_cpp_bridge_overlap", "format": "json_payload", "artifact": "tests/fixtures/golden/whisper_cpp_overlap_output.json", "expect_within_tolerance": true},
-    {"engine": "insanely_fast_bridge_overlap", "format": "json_payload", "artifact": "tests/fixtures/golden/insanely_fast_overlap_output.json", "expect_within_tolerance": true},
-    {"engine": "whisper_diarization_bridge_overlap", "format": "diarization_srt", "artifact": "tests/fixtures/golden/diarization_overlap_output.srt", "expect_within_tolerance": true}
+    {
+      "engine": "whisper_cpp_bridge_overlap",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/whisper_cpp_overlap_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_cpp_native_overlap",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/whisper_cpp_overlap_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "insanely_fast_bridge_overlap",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/insanely_fast_overlap_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "insanely_fast_native_overlap",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/insanely_fast_overlap_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_diarization_bridge_overlap",
+      "format": "diarization_srt",
+      "artifact": "tests/fixtures/golden/diarization_overlap_output.srt",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_diarization_native_overlap",
+      "format": "diarization_srt",
+      "artifact": "tests/fixtures/golden/diarization_overlap_native_output.srt",
+      "expect_within_tolerance": true
+    }
   ]
 }

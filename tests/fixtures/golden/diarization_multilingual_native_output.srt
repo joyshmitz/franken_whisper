@@ -1,0 +1,15 @@
+1
+00:00:00,000 --> 00:00:05,200
+[SPEAKER_00] Hello and welcome to the multilingual system check.
+
+2
+00:00:05,200 --> 00:00:10,400
+[SPEAKER_01] Buenos dias, este canal mezcla ingles y espanol.
+
+3
+00:00:10,400 --> 00:00:15,600
+[SPEAKER_00] Bonjour, cette ligne confirme la couverture romance.
+
+4
+00:00:15,600 --> 00:00:20,800
+[SPEAKER_01] Grazie, the final segment returns to english control.

@@ -471,12 +471,12 @@ impl PipelineCx {
 /// Lightweight, `Send + Sync + Clone` handle that backends use to check the
 /// pipeline deadline without needing the full `PipelineCx`.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct CancellationToken {
+pub struct CancellationToken {
     deadline: Option<chrono::DateTime<Utc>>,
 }
 
 impl CancellationToken {
-    pub(crate) fn checkpoint(&self) -> FwResult<()> {
+    pub fn checkpoint(&self) -> FwResult<()> {
         if crate::cli::ShutdownController::is_shutting_down() {
             return Err(FwError::Cancelled(
                 "pipeline cancelled via Ctrl+C".to_owned(),
@@ -1526,7 +1526,7 @@ async fn run_pipeline_body(
 
     let finished_at = Utc::now().to_rfc3339();
 
-    let result = inter
+    let mut result = inter
         .result
         .unwrap_or_else(|| crate::model::TranscriptionResult {
             backend: crate::model::BackendKind::Auto,
@@ -1537,6 +1537,28 @@ async fn run_pipeline_body(
             raw_output: json!({}),
             artifact_paths: Vec::new(),
         });
+
+    let output_formats = &request.backend_params.output_formats;
+    if !output_formats.is_empty() {
+        let base_name = match &request.input {
+            crate::model::InputSource::File { path } => path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("transcript"),
+            _ => "transcript",
+        };
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let output_prefix = cwd.join(base_name);
+        
+        match crate::export::write_artifacts(output_formats, &result, &output_prefix) {
+            Ok(paths) => {
+                result.artifact_paths = paths.into_iter().map(|p| p.display().to_string()).collect();
+            }
+            Err(e) => {
+                inter.warnings.push(format!("Failed to export artifacts: {}", e));
+            }
+        }
+    }
 
     let input_path_str = inter
         .input_path
@@ -1855,7 +1877,7 @@ async fn execute_backend(
     let backend_dir = run_tmp_dir.path().to_path_buf();
     let backend_budget_ms = stage_budgets.backend_ms;
     let cancel_token = pcx.stage_token(backend_budget_ms); // ubs:ignore — cancellation token is not a secret
-    let execution = match run_stage_with_budget("backend", backend_budget_ms, move || {
+    let execution_result = run_stage_with_budget("backend", backend_budget_ms, move || {
         let tok = Some(&cancel_token);
         if let Some(order) = backend_order {
             backend::execute_with_order(
@@ -1876,8 +1898,18 @@ async fn execute_backend(
             )
         }
     })
-    .await
-    {
+    .await;
+
+    if let Some((top_backend, predicted_success)) = adaptive_prediction {
+        let top_succeeded = match &execution_result {
+            Ok(execution) => execution.result.backend == top_backend,
+            Err(_) => false,
+        };
+        backend::record_adaptive_prediction(top_succeeded);
+        backend::record_calibration_observation(predicted_success, top_succeeded);
+    }
+
+    let execution = match execution_result {
         Ok(result) => result,
         Err(error) => {
             let code = stage_failure_code("backend", &error);
@@ -1925,12 +1957,6 @@ async fn execute_backend(
             "native_fallback_error": execution.native_fallback_error.clone(),
         }),
     );
-    if let Some((top_backend, predicted_success)) = adaptive_prediction {
-        let top_succeeded = execution.result.backend == top_backend;
-        backend::record_adaptive_prediction(top_succeeded);
-        backend::record_calibration_observation(predicted_success, top_succeeded);
-    }
-
     let backend_output_sha256 = match sha256_json_value(&execution.result.raw_output) {
         Ok(hash) => Some(hash),
         Err(error) => {

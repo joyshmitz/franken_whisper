@@ -461,6 +461,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_speaker_label_mixed_case_and_whitespace() {
+        let block = "1\n00:00:01,000 --> 00:00:02,000\n  sPeAkEr_00  :  mixed case and spaces";
+        let segment = parse_srt_block(block).expect("segment should parse");
+        assert_eq!(segment.speaker.as_deref(), Some("sPeAkEr_00"));
+        assert_eq!(segment.text, "mixed case and spaces");
+    }
+
+    #[test]
     fn non_speaker_prefix_has_no_speaker() {
         let block = "1\n00:00:01,000 --> 00:00:02,000\njust text without speaker label";
         let segment = parse_srt_block(block).expect("segment should parse");

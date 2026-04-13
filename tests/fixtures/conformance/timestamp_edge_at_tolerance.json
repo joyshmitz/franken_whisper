@@ -1,0 +1,30 @@
+{
+  "name": "timestamp_edge_at_tolerance",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "text": "edge case",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.9
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 1.04,
+      "end_sec": 2.04,
+      "text": "edge case",
+      "speaker": "spk0",
+      "confidence": 0.88
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

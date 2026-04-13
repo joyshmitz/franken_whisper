@@ -1,0 +1,57 @@
+{
+  "engine": "whisper.cpp-native",
+  "schema_version": "native-pilot-v1",
+  "in_process": true,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 14.5,
+      "text": " In this long form fixture we validate that cross engine comparisons remain stable across many contiguous segments.",
+      "confidence": 0.95
+    },
+    {
+      "start": 14.5,
+      "end": 31.0,
+      "text": " The transcript continues with additional detail so that timing drift accumulation is exercised over a longer horizon.",
+      "confidence": 0.95
+    },
+    {
+      "start": 31.0,
+      "end": 47.5,
+      "text": " We keep punctuation and spacing deterministic to preserve text exactness guarantees in strict mode.",
+      "confidence": 0.95
+    },
+    {
+      "start": 47.5,
+      "end": 64.0,
+      "text": " Segment four confirms that mid stream boundaries remain monotonic and replay safe.",
+      "confidence": 0.95
+    },
+    {
+      "start": 64.0,
+      "end": 78.5,
+      "text": " Segment five records a speaker handoff marker in plain text without relying on diarization metadata.",
+      "confidence": 0.95
+    },
+    {
+      "start": 78.5,
+      "end": 93.0,
+      "text": " Segment six verifies that downstream normalization keeps confidence and ordering contracts intact.",
+      "confidence": 0.95
+    },
+    {
+      "start": 93.0,
+      "end": 108.0,
+      "text": " Segment seven extends the sample close to two minutes to emulate production scale meeting excerpts.",
+      "confidence": 0.95
+    },
+    {
+      "start": 108.0,
+      "end": 120.0,
+      "text": " Segment eight closes the long form corpus scenario and anchors final tolerance checks.",
+      "confidence": 0.95
+    }
+  ],
+  "language": "en",
+  "text": "In this long form fixture we validate that cross engine comparisons remain stable across many contiguous segments. The transcript continues with additional detail so that timing drift accumulation is exercised over a longer horizon. We keep punctuation and spacing deterministic to preserve text exactness guarantees in strict mode. Segment four confirms that mid stream boundaries remain monotonic and replay safe. Segment five records a speaker handoff marker in plain text without relying on diarization metadata. Segment six verifies that downstream normalization keeps confidence and ordering contracts intact. Segment seven extends the sample close to two minutes to emulate production scale meeting excerpts. Segment eight closes the long form corpus scenario and anchors final tolerance checks."
+}

@@ -11,7 +11,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::error::{FwError, FwResult};
-use crate::model::{BackendKind, TranscribeRequest, TranscriptionResult, TranscriptionSegment};
+use crate::model::{
+    BackendKind, TimestampLevel, TranscribeRequest, TranscriptionResult, TranscriptionSegment,
+};
 
 use super::native_audio::analyze_wav;
 
@@ -27,6 +29,15 @@ struct NativeBatchSegmentation {
     duration_ms: u64,
     pilot_segments: Vec<super::TranscriptSegment>,
     analysis_provenance: Value,
+}
+
+#[derive(Debug, Clone)]
+struct WordSegment {
+    start_ms: u64,
+    end_ms: u64,
+    text: String,
+    confidence: f64,
+    speaker: Option<String>,
 }
 
 /// In-process pilot is always available.
@@ -88,7 +99,12 @@ pub fn run(
         dtype.clone(),
     );
     let native = build_native_segmentation(request, normalized_wav, &pilot, token)?;
-    let segments = to_transcription_segments(&native.pilot_segments, request.diarize, token)?;
+    let (segments, raw_chunks) = build_segments_and_chunks(
+        &native.pilot_segments,
+        request.diarize,
+        request.backend_params.timestamp_level,
+        token,
+    )?;
     let transcript = super::transcript_from_segments(&segments);
 
     let output_path = super::insanely_fast::output_path_for(request, work_dir);
@@ -105,14 +121,7 @@ pub fn run(
         "model": request.model.clone().unwrap_or_else(|| "openai/whisper-large-v3".to_owned()),
         "text": transcript,
         "language": request.language.clone(),
-        "chunks": segments.iter().map(|seg| {
-            json!({
-                "text": seg.text,
-                "timestamp": [seg.start_sec, seg.end_sec],
-                "speaker": seg.speaker,
-                "confidence": seg.confidence,
-            })
-        }).collect::<Vec<_>>(),
+        "chunks": raw_chunks,
         "telemetry": {
             "batch_size_requested": request.backend_params.batch_size,
             "batch_size_effective": batch_size,
@@ -249,6 +258,135 @@ fn to_transcription_segments(
         });
     }
     Ok(segments)
+}
+
+fn build_segments_and_chunks(
+    pilot_segments: &[super::TranscriptSegment],
+    diarize: bool,
+    timestamp_level: Option<TimestampLevel>,
+    token: Option<&crate::orchestrator::CancellationToken>,
+) -> FwResult<(Vec<TranscriptionSegment>, Vec<Value>)> {
+    match timestamp_level {
+        Some(TimestampLevel::Word) => {
+            let word_segments = word_segments_from_pilot(pilot_segments, diarize, token)?;
+            let segments = word_segments
+                .iter()
+                .map(|word| TranscriptionSegment {
+                    start_sec: Some(word.start_ms as f64 / 1_000.0),
+                    end_sec: Some(word.end_ms as f64 / 1_000.0),
+                    text: word.text.clone(),
+                    speaker: word.speaker.clone(),
+                    confidence: Some(word.confidence.clamp(0.0, 1.0)),
+                })
+                .collect::<Vec<_>>();
+            let raw_chunks = build_word_level_chunks(pilot_segments, diarize, token)?;
+            Ok((segments, raw_chunks))
+        }
+        _ => {
+            let segments = to_transcription_segments(pilot_segments, diarize, token)?;
+            let raw_chunks = segments
+                .iter()
+                .map(|seg| {
+                    json!({
+                        "text": seg.text,
+                        "timestamp": [seg.start_sec, seg.end_sec],
+                        "speaker": seg.speaker,
+                        "confidence": seg.confidence,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok((segments, raw_chunks))
+        }
+    }
+}
+
+fn word_segments_from_pilot(
+    pilot_segments: &[super::TranscriptSegment],
+    diarize: bool,
+    token: Option<&crate::orchestrator::CancellationToken>,
+) -> FwResult<Vec<WordSegment>> {
+    let mut out = Vec::new();
+    for (index, segment) in pilot_segments.iter().enumerate() {
+        if let Some(tok) = token {
+            tok.checkpoint()?;
+        }
+        let speaker = diarize.then(|| format!("SPEAKER_{:02}", index % 2));
+        let words = split_segment_into_words(segment, speaker.as_deref(), token)?;
+        out.extend(words);
+    }
+    Ok(out)
+}
+
+fn split_segment_into_words(
+    segment: &super::TranscriptSegment,
+    speaker: Option<&str>,
+    token: Option<&crate::orchestrator::CancellationToken>,
+) -> FwResult<Vec<WordSegment>> {
+    let words: Vec<&str> = segment.text.split_whitespace().collect();
+    if words.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let duration_ms = segment.end_ms.saturating_sub(segment.start_ms);
+    let ms_per_word = duration_ms / words.len() as u64;
+    let mut out = Vec::with_capacity(words.len());
+    for (idx, word) in words.iter().enumerate() {
+        if let Some(tok) = token {
+            tok.checkpoint()?;
+        }
+        let start_ms = segment.start_ms + (idx as u64) * ms_per_word;
+        let end_ms = if idx + 1 == words.len() {
+            segment.end_ms
+        } else {
+            start_ms + ms_per_word
+        };
+        out.push(WordSegment {
+            start_ms,
+            end_ms,
+            text: (*word).to_owned(),
+            confidence: segment.confidence,
+            speaker: speaker.map(str::to_owned),
+        });
+    }
+    Ok(out)
+}
+
+fn build_word_level_chunks(
+    pilot_segments: &[super::TranscriptSegment],
+    diarize: bool,
+    token: Option<&crate::orchestrator::CancellationToken>,
+) -> FwResult<Vec<Value>> {
+    let mut chunks = Vec::with_capacity(pilot_segments.len());
+    for (index, segment) in pilot_segments.iter().enumerate() {
+        if let Some(tok) = token {
+            tok.checkpoint()?;
+        }
+        let speaker = diarize.then(|| format!("SPEAKER_{:02}", index % 2));
+        let words = split_segment_into_words(segment, speaker.as_deref(), token)?;
+        let word_values = words
+            .iter()
+            .map(|word| {
+                json!({
+                    "word": word.text,
+                    "start": word.start_ms as f64 / 1_000.0,
+                    "end": word.end_ms as f64 / 1_000.0,
+                    "confidence": word.confidence.clamp(0.0, 1.0),
+                    "speaker": word.speaker,
+                })
+            })
+            .collect::<Vec<_>>();
+        chunks.push(json!({
+            "text": segment.text.trim(),
+            "timestamp": [
+                segment.start_ms as f64 / 1_000.0,
+                segment.end_ms as f64 / 1_000.0
+            ],
+            "speaker": speaker,
+            "confidence": segment.confidence.clamp(0.0, 1.0),
+            "words": word_values,
+        }));
+    }
+    Ok(chunks)
 }
 
 #[cfg(test)]
@@ -1123,6 +1261,83 @@ mod tests {
         assert_eq!(
             result.raw_output["telemetry"]["batch_size_requested"], 16,
             "requested value should also be 16"
+        );
+    }
+
+    #[test]
+    fn run_word_timestamp_level_splits_into_word_segments() {
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.backend_params.timestamp_level = Some(crate::model::TimestampLevel::Word);
+        req.backend_params.duration_ms = Some(10_000);
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("word timestamp run should succeed");
+
+        assert_eq!(
+            result.segments.len(),
+            5,
+            "word-level mode should split into 5 words"
+        );
+        assert!(
+            result.segments.iter().all(|seg| !seg.text.contains(' ')),
+            "word-level segments should not contain whitespace"
+        );
+
+        let chunks = result.raw_output["chunks"]
+            .as_array()
+            .expect("chunks should be array");
+        assert_eq!(chunks.len(), 1, "single pilot chunk expected");
+        let words = chunks[0]["words"]
+            .as_array()
+            .expect("word-level chunks should contain words array");
+        assert_eq!(words.len(), 5, "words array should match word segments");
+        assert_eq!(
+            words[0]["word"].as_str(),
+            Some("Batch"),
+            "first word should match pilot phrase"
+        );
+
+        let chunk_end = chunks[0]["timestamp"][1]
+            .as_f64()
+            .expect("chunk end timestamp");
+        let last_word_end = words.last().unwrap()["end"].as_f64().expect("word end");
+        assert!(
+            (chunk_end - last_word_end).abs() < 1e-6,
+            "last word end should match chunk end"
+        );
+    }
+
+    #[test]
+    fn run_chunk_timestamp_level_keeps_chunk_segments() {
+        let tmp = tempdir().expect("tempdir");
+        let mut req = request();
+        req.backend_params.timestamp_level = Some(crate::model::TimestampLevel::Chunk);
+        req.backend_params.duration_ms = Some(10_000);
+
+        let result = run(
+            &req,
+            Path::new("missing.wav"),
+            tmp.path(),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("chunk timestamp run should succeed");
+
+        assert_eq!(result.segments.len(), 1, "chunk-level keeps 1 segment");
+        let chunks = result.raw_output["chunks"]
+            .as_array()
+            .expect("chunks should be array");
+        assert_eq!(chunks.len(), 1);
+        assert!(
+            chunks[0].get("words").is_none(),
+            "chunk-level output should not include words array"
         );
     }
 

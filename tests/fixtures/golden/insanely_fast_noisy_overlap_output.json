@@ -1,0 +1,25 @@
+{
+  "transcription": [
+    {
+      "start_sec": 0.05,
+      "end_sec": 2.55,
+      "text": "The engine starts with a loud grind.",
+      "speaker": null,
+      "confidence": 0.88
+    },
+    {
+      "start_sec": 2.55,
+      "end_sec": 5.05,
+      "text": "Can you hear that? It's definitely the bearing.",
+      "speaker": null,
+      "confidence": 0.8
+    },
+    {
+      "start_sec": 5.05,
+      "end_sec": 7.55,
+      "text": "I see it now. The belt is also worn.",
+      "speaker": null,
+      "confidence": 0.84
+    }
+  ]
+}

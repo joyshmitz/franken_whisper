@@ -1,0 +1,44 @@
+{
+  "name": "text_mismatch_ignored_when_not_required",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": false,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "Case Sensitive",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.93
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "text": "Punctuation matters",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.90
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.02,
+      "end_sec": 1.01,
+      "text": "case sensitive",
+      "speaker": "spk0",
+      "confidence": 0.91
+    },
+    {
+      "start_sec": 1.02,
+      "end_sec": 2.01,
+      "text": "punctuation matters!",
+      "speaker": "spk0",
+      "confidence": 0.88
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

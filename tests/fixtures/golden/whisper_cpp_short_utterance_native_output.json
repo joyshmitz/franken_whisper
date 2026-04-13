@@ -1,0 +1,45 @@
+{
+  "engine": "whisper.cpp-native",
+  "schema_version": "native-pilot-v1",
+  "in_process": true,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 0.6,
+      "text": " Yes.",
+      "confidence": 0.95
+    },
+    {
+      "start": 1.1,
+      "end": 1.6,
+      "text": " No.",
+      "confidence": 0.95
+    },
+    {
+      "start": 2.2,
+      "end": 2.9,
+      "text": " Maybe.",
+      "confidence": 0.95
+    },
+    {
+      "start": 3.4,
+      "end": 3.9,
+      "text": " Go.",
+      "confidence": 0.95
+    },
+    {
+      "start": 4.5,
+      "end": 5.2,
+      "text": " Stop.",
+      "confidence": 0.95
+    },
+    {
+      "start": 5.9,
+      "end": 6.6,
+      "text": " Done.",
+      "confidence": 0.95
+    }
+  ],
+  "language": "en",
+  "text": "Yes. No. Maybe. Go. Stop. Done."
+}

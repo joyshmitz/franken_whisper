@@ -1,0 +1,30 @@
+{
+  "name": "text_case_mismatch_strict",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "Hello",
+      "speaker": "SPEAKER_01",
+      "confidence": 0.8
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "hello",
+      "speaker": "SPEAKER_01",
+      "confidence": 0.82
+    }
+  ],
+  "expect_within_tolerance": false,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 1,
+  "expected_speaker_mismatches": 0
+}

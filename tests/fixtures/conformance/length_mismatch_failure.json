@@ -1,0 +1,37 @@
+{
+  "name": "length_mismatch_failure",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 0.5,
+      "text": "one",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 0.5,
+      "end_sec": 1.0,
+      "text": "two",
+      "speaker": null,
+      "confidence": null
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 0.5,
+      "text": "one",
+      "speaker": null,
+      "confidence": null
+    }
+  ],
+  "expect_within_tolerance": false,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

@@ -1,0 +1,30 @@
+{
+  "name": "timestamp_boundary_violation_single_end",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "boundary check",
+      "speaker": null,
+      "confidence": 0.90
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.02,
+      "end_sec": 1.2,
+      "text": "boundary check",
+      "speaker": null,
+      "confidence": 0.88
+    }
+  ],
+  "expect_within_tolerance": false,
+  "expected_timestamp_violations": 1,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

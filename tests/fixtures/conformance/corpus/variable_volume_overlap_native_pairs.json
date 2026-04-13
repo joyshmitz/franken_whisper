@@ -1,0 +1,58 @@
+{
+  "name": "variable_volume_overlap_native_pairs",
+  "tags": ["variable_volume_overlap", "multi_speaker_overlap", "native_coverage"],
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 2.0,
+      "text": "Speaker A is talking at a normal volume.",
+      "speaker": "S0",
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 3.5,
+      "text": "SPEAKER B IS WHISPERING VERY QUIETLY.",
+      "speaker": "S1",
+      "confidence": 0.8
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 2.0,
+      "text": "Speaker A is talking at a normal volume.",
+      "speaker": "S0",
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 3.5,
+      "text": "SPEAKER B IS WHISPERING VERY QUIETLY.",
+      "speaker": "S1",
+      "confidence": 0.8
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "engines": [
+    {
+      "engine": "whisper_cpp_native_variable_volume",
+      "format": "json",
+      "artifact": "tests/fixtures/golden/whisper_cpp_variable_volume_overlap_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "insanely_fast_native_variable_volume",
+      "format": "json",
+      "artifact": "tests/fixtures/golden/insanely_fast_variable_volume_overlap_native_output.json",
+      "expect_within_tolerance": true
+    }
+  ]
+}

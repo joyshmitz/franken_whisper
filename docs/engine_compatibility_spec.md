@@ -15,6 +15,11 @@ Under the default `SegmentConformancePolicy` (`allow_overlap = false`), each seg
 ### 1.3 Segment boundary tolerance
 Default cross-engine timestamp drift tolerance is **50ms** (`timestamp_tolerance_sec = 0.05`, matching `SegmentCompatibilityTolerance::default()`). This is checked by `compare_segments_with_tolerance` with an explicit `SegmentCompatibilityTolerance`; tests may pass a looser explicit tolerance when a scenario requires it.
 
+Comparison semantics:
+- `compare_segments_with_tolerance` treats any length mismatch as a conformance failure, regardless of per-field tolerance.
+- Timestamp checks are per-segment boundary pairs; both start and end must be within tolerance.
+- `None` timestamps only compare equal to `None` (any Some/None pair is a violation).
+
 ## 2. Confidence Calibration
 
 ### 2.1 Range

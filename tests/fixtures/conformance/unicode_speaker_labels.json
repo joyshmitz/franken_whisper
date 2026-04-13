@@ -1,0 +1,44 @@
+{
+  "name": "unicode_speaker_labels",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": true
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "Hello.",
+      "speaker": "👤_01",
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "text": "Hi!",
+      "speaker": "🤖_BOT",
+      "confidence": 0.9
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "Hello.",
+      "speaker": "👤_01",
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "text": "Hi!",
+      "speaker": "🤖_BOT",
+      "confidence": 0.9
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

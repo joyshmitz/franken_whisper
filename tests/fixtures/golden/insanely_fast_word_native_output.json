@@ -1,0 +1,17 @@
+{
+  "text": "Fast lane quality",
+  "chunks": [
+    {
+      "text": " Fast lane quality",
+      "timestamp": [0.0, 1.4],
+      "speaker": "SPEAKER_00",
+      "words": [
+        {"word": "Fast", "start": 0.01, "end": 0.46, "confidence": 0.91},
+        {"word": "lane", "start": 0.46, "end": 0.91, "confidence": 0.87},
+        {"word": "quality", "start": 0.91, "end": 1.41, "confidence": 0.85}
+      ]
+    }
+  ],
+  "schema_version": "native-pilot-v1",
+  "engine": "insanely-fast-native"
+}

@@ -1,0 +1,15 @@
+1
+00:00:05,000 --> 00:00:07,000
+[SPEAKER_00] Short speech island after a long silence.
+
+2
+00:00:30,000 --> 00:00:32,200
+[SPEAKER_01] Second island appears near the midpoint.
+
+3
+00:00:58,000 --> 00:01:00,000
+[SPEAKER_00] Third island closes the sparse recording.
+
+4
+00:01:28,500 --> 00:01:30,000
+[SPEAKER_01] Final island confirms trailing silence handling.

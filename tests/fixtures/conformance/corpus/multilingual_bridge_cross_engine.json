@@ -1,6 +1,9 @@
 {
   "name": "golden_multilingual_bridge_cross_engine",
-  "tags": ["multilingual", "bridge"],
+  "tags": [
+    "multilingual",
+    "bridge"
+  ],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,
@@ -13,14 +16,71 @@
     "allow_length_mismatch": false
   },
   "canonical": [
-    {"start_sec": 0.0, "end_sec": 5.2, "text": "Hello and welcome to the multilingual system check.", "speaker": null, "confidence": null},
-    {"start_sec": 5.2, "end_sec": 10.4, "text": "Buenos dias, este canal mezcla ingles y espanol.", "speaker": null, "confidence": null},
-    {"start_sec": 10.4, "end_sec": 15.6, "text": "Bonjour, cette ligne confirme la couverture romance.", "speaker": null, "confidence": null},
-    {"start_sec": 15.6, "end_sec": 20.8, "text": "Grazie, the final segment returns to english control.", "speaker": null, "confidence": null}
+    {
+      "start_sec": 0.0,
+      "end_sec": 5.2,
+      "text": "Hello and welcome to the multilingual system check.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 5.2,
+      "end_sec": 10.4,
+      "text": "Buenos dias, este canal mezcla ingles y espanol.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 10.4,
+      "end_sec": 15.6,
+      "text": "Bonjour, cette ligne confirme la couverture romance.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 15.6,
+      "end_sec": 20.8,
+      "text": "Grazie, the final segment returns to english control.",
+      "speaker": null,
+      "confidence": null
+    }
   ],
   "engines": [
-    {"engine": "whisper_cpp_bridge_multilingual", "format": "json_payload", "artifact": "tests/fixtures/golden/whisper_cpp_multilingual_output.json", "expect_within_tolerance": true},
-    {"engine": "insanely_fast_bridge_multilingual", "format": "json_payload", "artifact": "tests/fixtures/golden/insanely_fast_multilingual_output.json", "expect_within_tolerance": true},
-    {"engine": "whisper_diarization_bridge_multilingual", "format": "diarization_srt", "artifact": "tests/fixtures/golden/diarization_multilingual_output.srt", "expect_within_tolerance": true}
+    {
+      "engine": "whisper_cpp_bridge_multilingual",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/whisper_cpp_multilingual_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_cpp_native_multilingual",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/whisper_cpp_multilingual_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "insanely_fast_bridge_multilingual",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/insanely_fast_multilingual_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "insanely_fast_native_multilingual",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/insanely_fast_multilingual_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_diarization_bridge_multilingual",
+      "format": "diarization_srt",
+      "artifact": "tests/fixtures/golden/diarization_multilingual_output.srt",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_diarization_native_multilingual",
+      "format": "diarization_srt",
+      "artifact": "tests/fixtures/golden/diarization_multilingual_native_output.srt",
+      "expect_within_tolerance": true
+    }
   ]
 }

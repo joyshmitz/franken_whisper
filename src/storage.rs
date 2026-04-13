@@ -172,15 +172,24 @@ impl RunStore {
             tok.checkpoint()?;
         }
 
-        // Do not trust fsqlite row ordering for recency queries. Pull the rows
-        // and sort deterministically in Rust instead.
+        // Use SQL ORDER BY and LIMIT for efficient and memory-safe queries.
+        let sql = if limit > 0 {
+            format!(
+                "SELECT id, started_at, finished_at, backend, transcript FROM runs \
+                 ORDER BY started_at DESC, id DESC LIMIT {limit}"
+            )
+        } else {
+            "SELECT id, started_at, finished_at, backend, transcript FROM runs \
+             ORDER BY started_at DESC, id DESC"
+                .to_owned()
+        };
+
         let rows = self
             .connection
-            .query("SELECT id, started_at, finished_at, backend, transcript FROM runs")
+            .query(&sql)
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
-        let mut summaries: Vec<RunSummary> = rows
-            .into_iter()
+        rows.into_iter()
             .map(|row| {
                 let run_id = value_to_string(row.get(0));
                 let started = value_to_string(row.get(1));
@@ -197,18 +206,7 @@ impl RunStore {
                     transcript_preview: preview,
                 })
             })
-            .collect::<FwResult<Vec<_>>>()?;
-
-        summaries.sort_by(|left, right| {
-            right
-                .started_at_rfc3339
-                .cmp(&left.started_at_rfc3339)
-                .then_with(|| right.run_id.cmp(&left.run_id))
-        });
-        if limit > 0 && summaries.len() > limit {
-            summaries.truncate(limit);
-        }
-        Ok(summaries)
+            .collect()
     }
 
     pub fn load_latest_run_details(&self) -> FwResult<Option<StoredRunDetails>> {
@@ -223,22 +221,18 @@ impl RunStore {
             tok.checkpoint()?;
         }
 
-        // Do not trust fsqlite ORDER BY semantics here; determine the latest
-        // row in Rust from the raw results.
+        // Use SQL ORDER BY and LIMIT 1 for efficient latest-run lookup.
         let rows = self
             .connection
-            .query("SELECT id, started_at FROM runs")
+            .query("SELECT id FROM runs ORDER BY started_at DESC, id DESC LIMIT 1")
             .map_err(|error| FwError::Storage(error.to_string()))?;
 
-        let Some(row) = rows.into_iter().max_by(|left, right| {
-            value_to_string(left.get(1))
-                .cmp(&value_to_string(right.get(1)))
-                .then_with(|| value_to_string(left.get(0)).cmp(&value_to_string(right.get(0))))
-        }) else {
-            return Ok(None);
-        };
-        let run_id = value_to_string(row.get(0));
-        self.load_run_details_cancellable(&run_id, token)
+        if let Some(row) = rows.into_iter().next() {
+            let run_id = value_to_string(row.get(0));
+            self.load_run_details_cancellable(&run_id, token)
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn load_run_details(&self, run_id: &str) -> FwResult<Option<StoredRunDetails>> {

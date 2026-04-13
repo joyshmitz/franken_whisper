@@ -1,0 +1,33 @@
+{
+  "engine": "whisper.cpp-native",
+  "schema_version": "native-pilot-v1",
+  "in_process": true,
+  "segments": [
+    {
+      "start": 5.0,
+      "end": 7.0,
+      "text": " Short speech island after a long silence.",
+      "confidence": 0.95
+    },
+    {
+      "start": 30.0,
+      "end": 32.2,
+      "text": " Second island appears near the midpoint.",
+      "confidence": 0.95
+    },
+    {
+      "start": 58.0,
+      "end": 60.0,
+      "text": " Third island closes the sparse recording.",
+      "confidence": 0.95
+    },
+    {
+      "start": 88.5,
+      "end": 90.0,
+      "text": " Final island confirms trailing silence handling.",
+      "confidence": 0.95
+    }
+  ],
+  "language": "en",
+  "text": "Short speech island after a long silence. Second island appears near the midpoint. Third island closes the sparse recording. Final island confirms trailing silence handling."
+}

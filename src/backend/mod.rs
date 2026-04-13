@@ -26,6 +26,7 @@ use crate::error::{FwError, FwResult};
 use crate::model::{
     BackendKind, EngineCapabilities, TranscribeRequest, TranscriptionResult, TranscriptionSegment,
 };
+use crate::orchestrator::CancellationToken;
 use crate::process::run_command_with_timeout;
 
 /// Stable identifier for the current routing policy. Bump when the loss
@@ -792,6 +793,7 @@ pub trait Engine: Send + Sync {
         normalized_wav: &Path,
         work_dir: &Path,
         timeout: Duration,
+        token: Option<&CancellationToken>,
     ) -> FwResult<TranscriptionResult>;
 }
 
@@ -822,9 +824,10 @@ pub trait StreamingEngine: Engine {
         normalized_wav: &Path,
         work_dir: &Path,
         timeout: Duration,
+        token: Option<&CancellationToken>,
         on_segment: Box<dyn Fn(TranscriptionSegment) + Send>,
     ) -> FwResult<TranscriptionResult> {
-        let result = self.run(request, normalized_wav, work_dir, timeout)?;
+        let result = self.run(request, normalized_wav, work_dir, timeout, token)?;
         for segment in &result.segments {
             on_segment(segment.clone());
         }
@@ -860,8 +863,9 @@ impl Engine for WhisperCppEngine {
         normalized_wav: &Path,
         work_dir: &Path,
         timeout: Duration,
+        token: Option<&crate::orchestrator::CancellationToken>,
     ) -> FwResult<TranscriptionResult> {
-        whisper_cpp::run(request, normalized_wav, work_dir, timeout, None)
+        whisper_cpp::run(request, normalized_wav, work_dir, timeout, token)
     }
 }
 
@@ -872,6 +876,7 @@ impl StreamingEngine for WhisperCppEngine {
         normalized_wav: &Path,
         work_dir: &Path,
         timeout: Duration,
+        token: Option<&crate::orchestrator::CancellationToken>,
         on_segment: Box<dyn Fn(TranscriptionSegment) + Send>,
     ) -> FwResult<TranscriptionResult> {
         whisper_cpp::run_streaming(
@@ -879,7 +884,7 @@ impl StreamingEngine for WhisperCppEngine {
             normalized_wav,
             work_dir,
             timeout,
-            None,
+            token,
             &on_segment,
         )
     }
@@ -917,8 +922,9 @@ impl Engine for WhisperCppNativeEngine {
         normalized_wav: &Path,
         work_dir: &Path,
         timeout: Duration,
+        token: Option<&crate::orchestrator::CancellationToken>,
     ) -> FwResult<TranscriptionResult> {
-        whisper_cpp_native::run(request, normalized_wav, work_dir, timeout, None)
+        whisper_cpp_native::run(request, normalized_wav, work_dir, timeout, token)
     }
 }
 
@@ -929,6 +935,7 @@ impl StreamingEngine for WhisperCppNativeEngine {
         normalized_wav: &Path,
         work_dir: &Path,
         timeout: Duration,
+        token: Option<&crate::orchestrator::CancellationToken>,
         on_segment: Box<dyn Fn(TranscriptionSegment) + Send>,
     ) -> FwResult<TranscriptionResult> {
         whisper_cpp_native::run_streaming(
@@ -936,7 +943,7 @@ impl StreamingEngine for WhisperCppNativeEngine {
             normalized_wav,
             work_dir,
             timeout,
-            None,
+            token,
             &on_segment,
         )
     }
@@ -973,8 +980,9 @@ impl Engine for InsanelyFastEngine {
         normalized_wav: &Path,
         work_dir: &Path,
         timeout: Duration,
+        token: Option<&crate::orchestrator::CancellationToken>,
     ) -> FwResult<TranscriptionResult> {
-        insanely_fast::run(request, normalized_wav, work_dir, timeout, None)
+        insanely_fast::run(request, normalized_wav, work_dir, timeout, token)
     }
 }
 
@@ -1012,8 +1020,9 @@ impl Engine for InsanelyFastNativeEngine {
         normalized_wav: &Path,
         work_dir: &Path,
         timeout: Duration,
+        token: Option<&crate::orchestrator::CancellationToken>,
     ) -> FwResult<TranscriptionResult> {
-        insanely_fast_native::run(request, normalized_wav, work_dir, timeout, None)
+        insanely_fast_native::run(request, normalized_wav, work_dir, timeout, token)
     }
 }
 
@@ -1050,8 +1059,9 @@ impl Engine for WhisperDiarizationEngine {
         normalized_wav: &Path,
         work_dir: &Path,
         timeout: Duration,
+        token: Option<&crate::orchestrator::CancellationToken>,
     ) -> FwResult<TranscriptionResult> {
-        whisper_diarization::run(request, normalized_wav, work_dir, timeout, None)
+        whisper_diarization::run(request, normalized_wav, work_dir, timeout, token)
     }
 }
 
@@ -1089,8 +1099,9 @@ impl Engine for WhisperDiarizationNativeEngine {
         normalized_wav: &Path,
         work_dir: &Path,
         timeout: Duration,
+        token: Option<&crate::orchestrator::CancellationToken>,
     ) -> FwResult<TranscriptionResult> {
-        whisper_diarization_native::run(request, normalized_wav, work_dir, timeout, None)
+        whisper_diarization_native::run(request, normalized_wav, work_dir, timeout, token)
     }
 }
 
@@ -2741,6 +2752,7 @@ fn segment_start(node: &Value) -> Option<f64> {
         number_millis_to_secs(value)
     } else {
         node.get("start")
+            .or_else(|| node.get("start_sec"))
             .or_else(|| node.pointer("/timestamp/0"))
             .or_else(|| node.pointer("/timestamp/start"))
             .and_then(number_to_secs)
@@ -2753,6 +2765,7 @@ fn segment_end(node: &Value) -> Option<f64> {
         number_millis_to_secs(value)
     } else {
         node.get("end")
+            .or_else(|| node.get("end_sec"))
             .or_else(|| node.pointer("/timestamp/1"))
             .or_else(|| node.pointer("/timestamp/end"))
             .and_then(number_to_secs)
@@ -3197,6 +3210,10 @@ pub struct WhisperCppPilot {
     pub language: Option<String>,
     /// If true, translate non-English speech to English.
     pub translate: bool,
+    /// If true, output word-level timestamps instead of sentence-level.
+    pub word_timestamps: bool,
+    /// If true, split segments on words rather than phrases.
+    pub split_on_word: bool,
 }
 
 impl WhisperCppPilot {
@@ -3207,12 +3224,16 @@ impl WhisperCppPilot {
         n_threads: usize,
         language: Option<String>,
         translate: bool,
+        word_timestamps: bool,
+        split_on_word: bool,
     ) -> Self {
         Self {
             model_path,
             n_threads,
             language,
             translate,
+            word_timestamps,
+            split_on_word,
         }
     }
 
@@ -3236,21 +3257,43 @@ impl WhisperCppPilot {
             "Artificial intelligence continues to advance.",
         ];
 
-        (0..n_segments)
-            .map(|i| {
-                let start_ms = (i as u64) * segment_duration_ms;
-                let end_ms = std::cmp::min(start_ms + segment_duration_ms, duration_ms);
-                let text = phrases[i % phrases.len()].to_owned();
-                let confidence = 0.92 - (i as f64 * 0.01);
+        let mut segments = Vec::new();
+        for i in 0..n_segments {
+            let start_ms = (i as u64) * segment_duration_ms;
+            let end_ms = std::cmp::min(start_ms + segment_duration_ms, duration_ms);
+            let text = phrases[i % phrases.len()].to_owned();
+            let confidence = 0.92 - (i as f64 * 0.01);
 
-                TranscriptSegment {
+            if self.split_on_word || self.word_timestamps {
+                let words: Vec<&str> = text.split_whitespace().collect();
+                if words.is_empty() {
+                    continue;
+                }
+                let ms_per_word = (end_ms - start_ms) / words.len() as u64;
+                for (j, word) in words.iter().enumerate() {
+                    let w_start_ms = start_ms + (j as u64) * ms_per_word;
+                    let w_end_ms = if j == words.len() - 1 {
+                        end_ms
+                    } else {
+                        w_start_ms + ms_per_word
+                    };
+                    segments.push(TranscriptSegment {
+                        start_ms: w_start_ms,
+                        end_ms: w_end_ms,
+                        text: (*word).to_owned(),
+                        confidence,
+                    });
+                }
+            } else {
+                segments.push(TranscriptSegment {
                     start_ms,
                     end_ms,
                     text,
                     confidence,
-                }
-            })
-            .collect()
+                });
+            }
+        }
+        segments
     }
 
     /// Whether this pilot supports streaming transcription.
@@ -3689,10 +3732,12 @@ impl ConcurrentTwoLaneExecutor {
             (result, latency_ms)
         });
 
-        let (primary_result, primary_latency_ms) =
-            primary_handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
-        let (secondary_result, secondary_latency_ms) =
-            secondary_handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+        let (primary_result, primary_latency_ms) = primary_handle
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+        let (secondary_result, secondary_latency_ms) = secondary_handle
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
 
         let (selected, selection_reason) = self.select(
             &primary_result,
@@ -3742,13 +3787,15 @@ impl ConcurrentTwoLaneExecutor {
         });
 
         // Wait for primary first (fast model) and emit immediately
-        let (primary_result, primary_latency_ms) =
-            primary_handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+        let (primary_result, primary_latency_ms) = primary_handle
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
         on_primary(&primary_result, primary_latency_ms);
 
         // Wait for secondary (quality model)
-        let (secondary_result, secondary_latency_ms) =
-            secondary_handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+        let (secondary_result, secondary_latency_ms) = secondary_handle
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
         on_compare(
             &primary_result,
             &secondary_result,
@@ -6029,6 +6076,7 @@ mod tests {
             _normalized_wav: &Path,
             _work_dir: &Path,
             _timeout: Duration,
+            _token: Option<&crate::orchestrator::CancellationToken>,
         ) -> crate::error::FwResult<TranscriptionResult> {
             let transcript = self
                 .segments
@@ -6081,6 +6129,7 @@ mod tests {
                 Path::new("dummy.wav"),
                 Path::new("/tmp"),
                 Duration::from_secs(30),
+                None,
                 Box::new(move |seg| {
                     collected_clone.lock().unwrap().push(seg);
                 }),
@@ -6113,6 +6162,7 @@ mod tests {
                 Path::new("dummy.wav"),
                 Path::new("/tmp"),
                 Duration::from_secs(30),
+                None,
                 Box::new(move |seg| {
                     collected_clone.lock().unwrap().push(seg.text);
                 }),
@@ -6147,6 +6197,7 @@ mod tests {
                 Path::new("dummy.wav"),
                 Path::new("/tmp"),
                 Duration::from_secs(30),
+                None,
                 Box::new(move |_seg| {
                     *count_clone.lock().unwrap() += 1;
                 }),
@@ -6176,6 +6227,7 @@ mod tests {
                 Path::new("dummy.wav"),
                 Path::new("/tmp"),
                 Duration::from_secs(30),
+                None,
                 Box::new(move |_seg| {
                     *invoked_clone.lock().unwrap() = true;
                 }),
@@ -6203,6 +6255,7 @@ mod tests {
                 Path::new("dummy.wav"),
                 Path::new("/tmp"),
                 Duration::from_secs(30),
+                None,
             )
             .expect("batch run should succeed");
 
@@ -6212,6 +6265,7 @@ mod tests {
                 Path::new("dummy.wav"),
                 Path::new("/tmp"),
                 Duration::from_secs(30),
+                None,
                 Box::new(|_seg| {}),
             )
             .expect("streaming run should succeed");
@@ -7749,6 +7803,8 @@ mod tests {
             8,
             Some("en".to_owned()),
             false,
+            false,
+            false,
         );
         assert_eq!(pilot.model_path, "/models/ggml-large-v3.bin");
         assert_eq!(pilot.n_threads, 8);
@@ -7758,7 +7814,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_transcribe_deterministic() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         let segments_a = pilot.transcribe(10_000);
         let segments_b = pilot.transcribe(10_000);
         assert_eq!(segments_a, segments_b, "transcribe must be deterministic");
@@ -7766,7 +7822,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_transcribe_segment_count() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         // 0ms -> 0 segments
         assert!(pilot.transcribe(0).is_empty());
         // 5000ms -> 1 segment
@@ -7779,7 +7835,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_transcribe_timing_coverage() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         let segments = pilot.transcribe(15_000);
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0].start_ms, 0);
@@ -7792,7 +7848,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_transcribe_last_segment_clamped() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         let segments = pilot.transcribe(7000);
         assert_eq!(segments.len(), 2);
         assert_eq!(
@@ -7803,7 +7859,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_supports_streaming() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         assert!(
             !pilot.supports_streaming(),
             "pilot should not support streaming"
@@ -7812,7 +7868,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_confidence_decreases() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         let segments = pilot.transcribe(20_000);
         for window in segments.windows(2) {
             assert!(
@@ -7826,7 +7882,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_zero_duration_produces_empty() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         let segments = pilot.transcribe(0);
         assert!(
             segments.is_empty(),
@@ -7836,7 +7892,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_very_short_duration_single_segment() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         // 1ms of audio → still one segment due to div_ceil.
         let segments = pilot.transcribe(1);
         assert_eq!(segments.len(), 1);
@@ -7846,7 +7902,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_extremely_long_duration() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         // 24 hours of audio = 86_400_000 ms.
         let segments = pilot.transcribe(86_400_000);
         // 86_400_000 / 5000 = 17_280 segments.
@@ -7863,7 +7919,7 @@ mod tests {
     #[test]
     fn whisper_cpp_pilot_empty_model_path_still_works() {
         // Pilot is a mock — empty model path should not cause a panic.
-        let pilot = WhisperCppPilot::new(String::new(), 4, None, false);
+        let pilot = WhisperCppPilot::new(String::new(), 4, None, false, false, false);
         let segments = pilot.transcribe(5000);
         assert_eq!(segments.len(), 1);
         assert_eq!(pilot.model_path, "");
@@ -7872,7 +7928,7 @@ mod tests {
     #[test]
     fn whisper_cpp_pilot_zero_threads() {
         // Zero threads: the pilot is a mock so this should not panic.
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 0, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 0, None, false, false, false);
         assert_eq!(pilot.n_threads, 0);
         let segments = pilot.transcribe(10_000);
         assert_eq!(segments.len(), 2);
@@ -7880,7 +7936,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_translate_flag_stored() {
-        let pilot = WhisperCppPilot::new("m.bin".to_owned(), 2, Some("ja".to_owned()), true);
+        let pilot = WhisperCppPilot::new("m.bin".to_owned(), 2, Some("ja".to_owned()), true, false, false);
         assert!(pilot.translate);
         assert_eq!(pilot.language.as_deref(), Some("ja"));
         // Translate flag doesn't affect mock output, but should be stored.
@@ -7890,7 +7946,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_phrase_cycle_wraps() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         // 5 segments → phrases cycle at index 4 (mod 4 == 0).
         let segments = pilot.transcribe(25_000);
         assert_eq!(segments.len(), 5);
@@ -7899,7 +7955,7 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_segment_boundaries_are_contiguous() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         let segments = pilot.transcribe(20_000);
         for window in segments.windows(2) {
             assert_eq!(
@@ -7912,7 +7968,7 @@ mod tests {
     #[test]
     fn whisper_cpp_pilot_exact_boundary_duration() {
         // Exactly 5000ms → exactly 1 segment, not 2.
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false);
+        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
         let segments = pilot.transcribe(5000);
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].start_ms, 0);

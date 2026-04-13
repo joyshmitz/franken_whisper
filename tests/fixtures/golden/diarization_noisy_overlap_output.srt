@@ -1,0 +1,11 @@
+1
+00:00:00,000 --> 00:00:02,500
+[SPEAKER_00] The engine starts with a loud grind.
+
+2
+00:00:02,500 --> 00:00:05,000
+[SPEAKER_01] Can you hear that? It's definitely the bearing.
+
+3
+00:00:05,000 --> 00:00:07,500
+[SPEAKER_00] I see it now. The belt is also worn.

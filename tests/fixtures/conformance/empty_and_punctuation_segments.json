@@ -1,0 +1,58 @@
+{
+  "name": "empty_and_punctuation_segments",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "Hello.",
+      "speaker": null,
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "text": "  ",
+      "speaker": null,
+      "confidence": 0.5
+    },
+    {
+      "start_sec": 2.0,
+      "end_sec": 3.0,
+      "text": "...",
+      "speaker": null,
+      "confidence": 0.8
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "Hello.",
+      "speaker": null,
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 1.0,
+      "end_sec": 2.0,
+      "text": "",
+      "speaker": null,
+      "confidence": 0.5
+    },
+    {
+      "start_sec": 2.0,
+      "end_sec": 3.0,
+      "text": "...",
+      "speaker": null,
+      "confidence": 0.8
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

@@ -1,0 +1,31 @@
+{
+  "name": "invalid_timestamp_ordering",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "Valid.",
+      "speaker": null,
+      "confidence": null
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 1.0,
+      "end_sec": 0.5,
+      "text": "Invalid: end before start.",
+      "speaker": null,
+      "confidence": null
+    }
+  ],
+  "expect_within_tolerance": false,
+  "expect_invariants_pass": false,
+  "expected_timestamp_violations": 1,
+  "expected_text_mismatches": 1,
+  "expected_speaker_mismatches": 0
+}

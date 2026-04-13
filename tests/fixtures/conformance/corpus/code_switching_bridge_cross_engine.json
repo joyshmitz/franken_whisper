@@ -1,6 +1,9 @@
 {
   "name": "golden_code_switching_bridge_cross_engine",
-  "tags": ["code_switching", "bridge"],
+  "tags": [
+    "code_switching",
+    "bridge"
+  ],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,
@@ -13,15 +16,78 @@
     "allow_length_mismatch": false
   },
   "canonical": [
-    {"start_sec": 0.0, "end_sec": 3.6, "text": "We start in English before switching languages mid sentence.", "speaker": null, "confidence": null},
-    {"start_sec": 3.6, "end_sec": 7.4, "text": "Ahora cambiamos a espanol para validar code switching estable.", "speaker": null, "confidence": null},
-    {"start_sec": 7.4, "end_sec": 11.0, "text": "On bascule en francais puis on revient sans perdre le contexte.", "speaker": null, "confidence": null},
-    {"start_sec": 11.0, "end_sec": 14.8, "text": "Wir wechseln kurz ins Deutsche und keep the same intent.", "speaker": null, "confidence": null},
-    {"start_sec": 14.8, "end_sec": 18.2, "text": "Finally we return to English to close the mixed language sample.", "speaker": null, "confidence": null}
+    {
+      "start_sec": 0.0,
+      "end_sec": 3.6,
+      "text": "We start in English before switching languages mid sentence.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 3.6,
+      "end_sec": 7.4,
+      "text": "Ahora cambiamos a espanol para validar code switching estable.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 7.4,
+      "end_sec": 11.0,
+      "text": "On bascule en francais puis on revient sans perdre le contexte.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 11.0,
+      "end_sec": 14.8,
+      "text": "Wir wechseln kurz ins Deutsche und keep the same intent.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 14.8,
+      "end_sec": 18.2,
+      "text": "Finally we return to English to close the mixed language sample.",
+      "speaker": null,
+      "confidence": null
+    }
   ],
   "engines": [
-    {"engine": "whisper_cpp_bridge_code_switching", "format": "json_payload", "artifact": "tests/fixtures/golden/whisper_cpp_code_switching_output.json", "expect_within_tolerance": true},
-    {"engine": "insanely_fast_bridge_code_switching", "format": "json_payload", "artifact": "tests/fixtures/golden/insanely_fast_code_switching_output.json", "expect_within_tolerance": true},
-    {"engine": "whisper_diarization_bridge_code_switching", "format": "diarization_srt", "artifact": "tests/fixtures/golden/diarization_code_switching_output.srt", "expect_within_tolerance": true}
+    {
+      "engine": "whisper_cpp_bridge_code_switching",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/whisper_cpp_code_switching_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_cpp_native_code_switching",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/whisper_cpp_code_switching_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "insanely_fast_bridge_code_switching",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/insanely_fast_code_switching_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "insanely_fast_native_code_switching",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/insanely_fast_code_switching_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_diarization_bridge_code_switching",
+      "format": "diarization_srt",
+      "artifact": "tests/fixtures/golden/diarization_code_switching_output.srt",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_diarization_native_code_switching",
+      "format": "diarization_srt",
+      "artifact": "tests/fixtures/golden/diarization_code_switching_native_output.srt",
+      "expect_within_tolerance": true
+    }
   ]
 }

@@ -1,0 +1,39 @@
+{
+  "engine": "whisper.cpp-native",
+  "schema_version": "native-pilot-v1",
+  "in_process": true,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 3.2,
+      "text": " Background fan noise is present but speech remains intelligible.",
+      "confidence": 0.95
+    },
+    {
+      "start": 3.2,
+      "end": 6.7,
+      "text": " Street traffic rises while the speaker confirms checkpoint alpha.",
+      "confidence": 0.95
+    },
+    {
+      "start": 6.7,
+      "end": 9.9,
+      "text": " A keyboard clatter appears and the transcript should stay stable.",
+      "confidence": 0.95
+    },
+    {
+      "start": 9.9,
+      "end": 13.4,
+      "text": " The channel briefly clips, then recovers without dropping words.",
+      "confidence": 0.95
+    },
+    {
+      "start": 13.4,
+      "end": 16.8,
+      "text": " Final noisy segment confirms robustness under layered interference.",
+      "confidence": 0.95
+    }
+  ],
+  "language": "en",
+  "text": "Background fan noise is present but speech remains intelligible. Street traffic rises while the speaker confirms checkpoint alpha. A keyboard clatter appears and the transcript should stay stable. The channel briefly clips, then recovers without dropping words. Final noisy segment confirms robustness under layered interference."
+}

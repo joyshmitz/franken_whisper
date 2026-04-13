@@ -1,0 +1,45 @@
+{
+  "name": "overlapping_speakers_rejected",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 2.0,
+      "text": "Speaker 1.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 1.5,
+      "end_sec": 3.0,
+      "text": "Speaker 2 cuts in.",
+      "speaker": null,
+      "confidence": null
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 2.0,
+      "text": "Speaker 1.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 1.5,
+      "end_sec": 3.0,
+      "text": "Speaker 2 cuts in.",
+      "speaker": null,
+      "confidence": null
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expect_invariants_pass": false,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

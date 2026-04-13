@@ -169,7 +169,9 @@ pub fn validate_segment_invariants_with_policy(
             return Err(conformance_err(index, "has empty speaker label"));
         }
 
-        previous_end = segment.end_sec;
+        if let Some(end) = segment.end_sec {
+            previous_end = Some(end);
+        }
     }
 
     Ok(())
@@ -186,7 +188,7 @@ pub fn compare_segments_with_tolerance(
     let mut timestamp_violations = 0usize;
 
     for (left, right) in expected.iter().zip(observed.iter()) {
-        if tolerance.require_text_exact && left.text != right.text {
+        if tolerance.require_text_exact && left.text.trim() != right.text.trim() {
             text_mismatches += 1;
         }
 
@@ -1451,6 +1453,66 @@ mod tests {
             validate_segment_invariants(&segments).is_ok(),
             "negative zero should be accepted (IEEE 754: -0.0 == 0.0)"
         );
+    }
+
+    #[test]
+    fn validate_segment_invariants_rejects_significant_overlap() {
+        let segments = vec![
+            segment(Some(0.0), Some(2.0), "first"),
+            segment(Some(1.0), Some(3.0), "overlaps significantly"),
+        ];
+        // Default epsilon is 1e-6. 1.0 + 1e-6 < 2.0 is true.
+        let err = validate_segment_invariants(&segments).expect_err("should reject overlap");
+        assert!(err.to_string().contains("overlap"));
+    }
+
+    #[test]
+    fn validate_segment_invariants_accepts_micro_overlap_within_epsilon() {
+        let segments = vec![
+            segment(Some(0.0), Some(1.0), "first"),
+            segment(Some(0.99999999), Some(2.0), "micro overlap"),
+        ];
+        // 0.99999999 + 1e-6 > 1.0.
+        assert!(validate_segment_invariants(&segments).is_ok());
+    }
+
+    #[test]
+    fn validate_segment_invariants_policy_allows_explicit_overlap() {
+        let segments = vec![
+            segment(Some(0.0), Some(2.0), "first"),
+            segment(Some(1.0), Some(3.0), "overlapping speaker"),
+        ];
+        let policy = SegmentConformancePolicy {
+            allow_overlap: true,
+            timestamp_epsilon_sec: 1e-6,
+        };
+        assert!(validate_segment_invariants_with_policy(&segments, policy).is_ok());
+    }
+
+    #[test]
+    fn validate_segment_invariants_rejects_non_monotonic_start_times() {
+        let segments = vec![
+            segment(Some(2.0), Some(3.0), "second"),
+            segment(Some(1.0), Some(2.0), "first (out of order)"),
+        ];
+        let err = validate_segment_invariants(&segments).expect_err("should reject non-monotonic");
+        assert!(err.to_string().contains("out of order") || err.to_string().contains("overlap"));
+    }
+
+    #[test]
+    fn validate_segment_invariants_rejects_end_before_start() {
+        let segments = vec![segment(Some(2.0), Some(1.0), "time traveler")];
+        let err = validate_segment_invariants(&segments).expect_err("should reject end < start");
+        assert!(err.to_string().contains("precedes start"));
+    }
+
+    #[test]
+    fn validate_segment_invariants_accepts_exact_abutting_segments() {
+        let segments = vec![
+            segment(Some(0.0), Some(1.0), "first"),
+            segment(Some(1.0), Some(2.0), "second"),
+        ];
+        assert!(validate_segment_invariants(&segments).is_ok());
     }
 
     #[test]

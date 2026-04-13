@@ -1,6 +1,9 @@
 {
   "name": "golden_hello_world_bridge_native_pairs",
-  "tags": ["smoke", "native_coverage"],
+  "tags": [
+    "smoke",
+    "native_coverage"
+  ],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,
@@ -42,6 +45,12 @@
       "expect_within_tolerance": true
     },
     {
+      "engine": "whisper_cpp_native",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/whisper_cpp_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
       "engine": "insanely_fast_bridge",
       "format": "json_payload",
       "artifact": "tests/fixtures/golden/insanely_fast_output.json",
@@ -54,9 +63,21 @@
       "expect_within_tolerance": true
     },
     {
+      "engine": "insanely_fast_native",
+      "format": "json_payload",
+      "artifact": "tests/fixtures/golden/insanely_fast_native_output.json",
+      "expect_within_tolerance": true
+    },
+    {
       "engine": "whisper_diarization_bridge",
       "format": "diarization_srt",
       "artifact": "tests/fixtures/golden/diarization_output.srt",
+      "expect_within_tolerance": true
+    },
+    {
+      "engine": "whisper_diarization_native",
+      "format": "diarization_srt",
+      "artifact": "tests/fixtures/golden/diarization_native_output.srt",
       "expect_within_tolerance": true
     },
     {

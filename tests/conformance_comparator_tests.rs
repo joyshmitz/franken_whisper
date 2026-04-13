@@ -417,6 +417,8 @@ fn whisper_cpp_pilot_engine() -> MockEngine {
                 4,
                 Some("en".to_owned()),
                 false,
+                false,
+                false,
             );
             pilot.transcribe(duration_ms)
         }),
@@ -484,6 +486,8 @@ fn whisper_cpp_bridge_engine() -> MockEngine {
                 "models/ggml-base.bin".to_owned(),
                 4,
                 Some("en".to_owned()),
+                false,
+                false,
                 false,
             );
             pilot.transcribe(duration_ms)
@@ -620,6 +624,8 @@ fn drift_metrics_correctly_computed_identical_engines() {
         4,
         Some("en".to_owned()),
         false,
+        false,
+        false,
     );
     let segments = pilot.transcribe(10_000);
     let metrics = DriftMetrics::compute("engine-a", "engine-b", &segments, &segments);
@@ -643,6 +649,8 @@ fn drift_metrics_correctly_computed_different_engines() {
         "models/ggml-base.bin".to_owned(),
         4,
         Some("en".to_owned()),
+        false,
+        false,
         false,
     );
     let reference = pilot.transcribe(10_000);

@@ -1,0 +1,39 @@
+{
+  "engine": "whisper.cpp-native",
+  "schema_version": "native-pilot-v1",
+  "in_process": true,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 3.6,
+      "text": " We start in English before switching languages mid sentence.",
+      "confidence": 0.95
+    },
+    {
+      "start": 3.6,
+      "end": 7.4,
+      "text": " Ahora cambiamos a espanol para validar code switching estable.",
+      "confidence": 0.95
+    },
+    {
+      "start": 7.4,
+      "end": 11.0,
+      "text": " On bascule en francais puis on revient sans perdre le contexte.",
+      "confidence": 0.95
+    },
+    {
+      "start": 11.0,
+      "end": 14.8,
+      "text": " Wir wechseln kurz ins Deutsche und keep the same intent.",
+      "confidence": 0.95
+    },
+    {
+      "start": 14.8,
+      "end": 18.2,
+      "text": " Finally we return to English to close the mixed language sample.",
+      "confidence": 0.95
+    }
+  ],
+  "language": "multi",
+  "text": "We start in English before switching languages mid sentence. Ahora cambiamos a espanol para validar code switching estable. On bascule en francais puis on revient sans perdre le contexte. Wir wechseln kurz ins Deutsche und keep the same intent. Finally we return to English to close the mixed language sample."
+}

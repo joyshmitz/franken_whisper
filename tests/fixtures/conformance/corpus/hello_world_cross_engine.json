@@ -1,6 +1,9 @@
 {
   "name": "golden_hello_world_cross_engine",
-  "tags": ["smoke", "bridge"],
+  "tags": [
+    "smoke",
+    "bridge"
+  ],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,
