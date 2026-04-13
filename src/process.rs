@@ -109,13 +109,11 @@ pub fn run_command_with_timeout(
         let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
 
         thread::spawn(move || {
-            let buf = read_pipe_with_limit(stdout_pipe);
-            let _ = stdout_tx.send(buf);
+            read_pipe_with_limit_streaming(stdout_pipe, stdout_tx);
         });
 
         thread::spawn(move || {
-            let buf = read_pipe_with_limit(stderr_pipe);
-            let _ = stderr_tx.send(buf);
+            read_pipe_with_limit_streaming(stderr_pipe, stderr_tx);
         });
 
         loop {
@@ -135,7 +133,7 @@ pub fn run_command_with_timeout(
             if started_at.elapsed() >= limit {
                 let _ = child.kill();
                 let _ = child.wait();
-                let stderr = recv_pipe_output(stderr_rx);
+                let stderr = stderr_rx.recv_timeout(Duration::from_millis(50)).unwrap_or_default();
                 let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
                 return Err(FwError::from_command_timeout(
                     rendered,
@@ -226,8 +224,8 @@ pub(crate) fn run_command_cancellable(
         if let Err(err) = token.checkpoint() {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = recv_pipe_output(stdout_rx);
-            let _ = recv_pipe_output(stderr_rx);
+            let _ = stdout_rx.recv_timeout(Duration::from_millis(50));
+            let _ = stderr_rx.recv_timeout(Duration::from_millis(50));
             return Err(err);
         }
 
@@ -237,7 +235,7 @@ pub(crate) fn run_command_cancellable(
         {
             let _ = child.kill();
             let _ = child.wait();
-            let stderr = recv_pipe_output(stderr_rx);
+            let stderr = stderr_rx.recv_timeout(Duration::from_millis(50)).unwrap_or_default();
             let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
             return Err(FwError::from_command_timeout(
                 rendered,
@@ -264,19 +262,15 @@ fn validate_command_output(rendered: &str, output: Output) -> FwResult<Output> {
     ))
 }
 
-fn recv_pipe_output(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
-    rx.recv().unwrap_or_default()
-}
-
 fn saturating_duration_ms(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 const MAX_CAPTURED_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
-fn read_pipe_with_limit<R: Read>(mut pipe: R) -> Vec<u8> {
+fn read_pipe_with_limit_streaming<R: Read>(mut pipe: R, tx: std::sync::mpsc::Sender<Vec<u8>>) {
     let mut buf = [0u8; 8192];
-    let mut output = Vec::with_capacity(MAX_CAPTURED_OUTPUT_BYTES.min(buf.len()));
+    let mut total_read = 0;
 
     loop {
         let read = match pipe.read(&mut buf) {
@@ -285,13 +279,22 @@ fn read_pipe_with_limit<R: Read>(mut pipe: R) -> Vec<u8> {
             Err(_) => break,
         };
 
-        if output.len() < MAX_CAPTURED_OUTPUT_BYTES {
-            let remaining = MAX_CAPTURED_OUTPUT_BYTES - output.len();
+        if total_read < MAX_CAPTURED_OUTPUT_BYTES {
+            let remaining = MAX_CAPTURED_OUTPUT_BYTES - total_read;
             let take = remaining.min(read);
-            output.extend_from_slice(&buf[..take]);
+            if tx.send(buf[..take].to_vec()).is_err() {
+                break; // Receiver disconnected
+            }
+            total_read += take;
         }
     }
+}
 
+fn recv_pipe_output(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+    let mut output = Vec::new();
+    while let Ok(mut chunk) = rx.recv_timeout(Duration::from_millis(50)) {
+        output.append(&mut chunk);
+    }
     output
 }
 

@@ -661,6 +661,12 @@ pub enum TtyAudioControlCommand {
 
 impl TranscribeArgs {
     pub fn to_request(&self) -> FwResult<TranscribeRequest> {
+        if self.speculative {
+            return Err(FwError::InvalidRequest(
+                "--speculative streaming is currently a library-only feature and not yet integrated into the CLI orchestrator".to_owned(),
+            ));
+        }
+
         let mut mode_count = 0usize;
         if self.input.is_some() {
             mode_count += 1;
