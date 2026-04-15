@@ -1714,7 +1714,11 @@ fn validate_schema_version(manifest: &SyncManifest) -> FwResult<()> {
 
 fn validate_export_format_version(manifest: &SyncManifest) -> FwResult<()> {
     let expected_major = EXPORT_FORMAT_VERSION.split('.').next().unwrap_or("1");
-    let actual_major = manifest.export_format_version.split('.').next().unwrap_or("0");
+    let actual_major = manifest
+        .export_format_version
+        .split('.')
+        .next()
+        .unwrap_or("0");
 
     if expected_major != actual_major {
         return Err(FwError::Storage(format!(
@@ -9265,10 +9269,7 @@ mod tests {
         .expect("write");
 
         let validation = validate_sync(&db_path, &export_dir).expect("validate");
-        assert!(
-            !validation.is_valid,
-            "should detect warnings_json mismatch"
-        );
+        assert!(!validation.is_valid, "should detect warnings_json mismatch");
         assert!(
             validation
                 .mismatched_records

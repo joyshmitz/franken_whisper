@@ -1,0 +1,31 @@
+{
+  "name": "confidence_out_of_bounds_invariants",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "confidence check",
+      "speaker": null,
+      "confidence": 0.9
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "confidence check",
+      "speaker": null,
+      "confidence": 1.2
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expect_invariants_pass": false,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

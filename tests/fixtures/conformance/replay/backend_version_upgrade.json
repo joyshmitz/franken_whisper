@@ -15,5 +15,6 @@
   "expect_within_tolerance": false,
   "expect_input_hash_match": true,
   "expect_backend_identity_match": true,
+  "expect_backend_version_match": false,
   "expect_output_hash_match": true
 }

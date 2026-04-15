@@ -1,0 +1,31 @@
+{
+  "name": "empty_text_invariants_rejected",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "placeholder",
+      "speaker": null,
+      "confidence": 0.9
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 1.0,
+      "text": "   ",
+      "speaker": null,
+      "confidence": 0.9
+    }
+  ],
+  "expect_within_tolerance": false,
+  "expect_invariants_pass": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 1,
+  "expected_speaker_mismatches": 0
+}

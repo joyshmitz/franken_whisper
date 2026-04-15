@@ -2371,7 +2371,11 @@ mod tests {
         let mut reader = ndjson.as_bytes();
 
         let error = decode_frames_to_raw(&mut reader).expect_err("mismatch should fail");
-        assert!(error.to_string().contains("session_close last_data_seq mismatch"));
+        assert!(
+            error
+                .to_string()
+                .contains("session_close last_data_seq mismatch")
+        );
     }
 
     #[test]

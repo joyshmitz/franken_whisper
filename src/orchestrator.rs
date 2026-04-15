@@ -1549,13 +1549,16 @@ async fn run_pipeline_body(
         };
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let output_prefix = cwd.join(base_name);
-        
+
         match crate::export::write_artifacts(output_formats, &result, &output_prefix) {
             Ok(paths) => {
-                result.artifact_paths = paths.into_iter().map(|p| p.display().to_string()).collect();
+                result.artifact_paths =
+                    paths.into_iter().map(|p| p.display().to_string()).collect();
             }
             Err(e) => {
-                inter.warnings.push(format!("Failed to export artifacts: {}", e));
+                inter
+                    .warnings
+                    .push(format!("Failed to export artifacts: {}", e));
             }
         }
     }

@@ -1,0 +1,49 @@
+{
+  "name": "overlap_allowed_policy",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.05,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "policy": {
+    "allow_overlap": true,
+    "epsilon": 0.000001
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 2.0,
+      "text": "first segment",
+      "speaker": null,
+      "confidence": 0.9
+    },
+    {
+      "start_sec": 1.5,
+      "end_sec": 3.0,
+      "text": "overlapping segment",
+      "speaker": null,
+      "confidence": 0.9
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 2.0,
+      "text": "first segment",
+      "speaker": null,
+      "confidence": 0.9
+    },
+    {
+      "start_sec": 1.5,
+      "end_sec": 3.0,
+      "text": "overlapping segment",
+      "speaker": null,
+      "confidence": 0.9
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expect_invariants_pass": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

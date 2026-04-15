@@ -85,7 +85,10 @@ pub fn run(
         threads,
         request.language.clone(),
         request.translate,
-        matches!(word_mode, WordTimestampMode::Word | WordTimestampMode::MaxLen(_)),
+        matches!(
+            word_mode,
+            WordTimestampMode::Word | WordTimestampMode::MaxLen(_)
+        ),
         request.backend_params.split_on_word,
     );
     let native = build_native_segmentation(request, normalized_wav, &pilot, token)?;
@@ -95,11 +98,8 @@ pub fn run(
         request.backend_params.split_on_word,
         token,
     )?;
-    let segments = to_transcription_segments(
-        &pilot_segments,
-        request.backend_params.no_timestamps,
-        token,
-    )?;
+    let segments =
+        to_transcription_segments(&pilot_segments, request.backend_params.no_timestamps, token)?;
     let transcript = super::transcript_from_segments(&segments);
 
     Ok(TranscriptionResult {
@@ -145,7 +145,10 @@ pub fn run_streaming(
         threads,
         request.language.clone(),
         request.translate,
-        matches!(word_mode, WordTimestampMode::Word | WordTimestampMode::MaxLen(_)),
+        matches!(
+            word_mode,
+            WordTimestampMode::Word | WordTimestampMode::MaxLen(_)
+        ),
         request.backend_params.split_on_word,
     );
     let native = build_native_segmentation(request, normalized_wav, &pilot, token)?;
@@ -155,11 +158,8 @@ pub fn run_streaming(
         request.backend_params.split_on_word,
         token,
     )?;
-    let segments = to_transcription_segments(
-        &pilot_segments,
-        request.backend_params.no_timestamps,
-        token,
-    )?;
+    let segments =
+        to_transcription_segments(&pilot_segments, request.backend_params.no_timestamps, token)?;
     for segment in &segments {
         if let Some(tok) = token {
             tok.checkpoint()?;
@@ -702,8 +702,14 @@ mod tests {
         write_pcm16_mono_wav(&wav, 16_000, &samples);
 
         let request = native_request();
-        let pilot =
-            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false, false, false);
+        let pilot = WhisperCppPilot::new(
+            "ggml-base.en".to_owned(),
+            4,
+            Some("en".to_owned()),
+            false,
+            false,
+            false,
+        );
         let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
         let result = build_native_segmentation(&request, &wav, &pilot, Some(&token));
         assert!(
@@ -817,10 +823,7 @@ mod tests {
             "word timestamp mode should split into 9 words"
         );
         assert!(
-            result
-                .segments
-                .iter()
-                .all(|seg| !seg.text.contains(' ')),
+            result.segments.iter().all(|seg| !seg.text.contains(' ')),
             "word-level segments should not contain whitespace"
         );
     }
@@ -846,10 +849,7 @@ mod tests {
             "split_on_word should split into 9 words"
         );
         assert!(
-            result
-                .segments
-                .iter()
-                .all(|seg| !seg.text.contains(' ')),
+            result.segments.iter().all(|seg| !seg.text.contains(' ')),
             "split_on_word segments should not contain whitespace"
         );
     }
@@ -905,13 +905,7 @@ mod tests {
         assert_eq!(texts.len(), 5, "max_len=10 should group into 5 segments");
         assert_eq!(
             texts,
-            vec![
-                "The quick",
-                "brown fox",
-                "jumps over",
-                "the lazy",
-                "dog."
-            ],
+            vec!["The quick", "brown fox", "jumps over", "the lazy", "dog."],
         );
     }
 
@@ -1148,8 +1142,14 @@ mod tests {
         let mut req = native_request();
         req.backend_params.duration_ms = Some(10_000);
 
-        let pilot =
-            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false, false, false);
+        let pilot = WhisperCppPilot::new(
+            "ggml-base.en".to_owned(),
+            4,
+            Some("en".to_owned()),
+            false,
+            false,
+            false,
+        );
         let result = build_native_segmentation(&req, Path::new("no_such_file.wav"), &pilot, None)
             .expect("fallback path should succeed");
 
@@ -1235,8 +1235,14 @@ mod tests {
         write_pcm16_mono_wav(&wav, 16_000, &samples);
 
         let req = native_request();
-        let pilot =
-            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false, false, false);
+        let pilot = WhisperCppPilot::new(
+            "ggml-base.en".to_owned(),
+            4,
+            Some("en".to_owned()),
+            false,
+            false,
+            false,
+        );
         let segmentation = build_native_segmentation(&req, &wav, &pilot, None)
             .expect("segmentation should succeed");
 
@@ -1527,8 +1533,14 @@ mod tests {
         samples.extend(vec![0i16; 8_000]); // 0.5s silence
         write_pcm16_mono_wav(&wav, 16_000, &samples);
 
-        let pilot =
-            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false, false, false);
+        let pilot = WhisperCppPilot::new(
+            "ggml-base.en".to_owned(),
+            4,
+            Some("en".to_owned()),
+            false,
+            false,
+            false,
+        );
         let req = native_request();
         let seg = build_native_segmentation(&req, &wav, &pilot, None)
             .expect("segmentation should succeed");
@@ -1639,8 +1651,14 @@ mod tests {
             .collect();
         write_pcm16_mono_wav(&wav, 16_000, &samples);
 
-        let pilot =
-            WhisperCppPilot::new("ggml-base.en".to_owned(), 4, Some("en".to_owned()), false, false, false);
+        let pilot = WhisperCppPilot::new(
+            "ggml-base.en".to_owned(),
+            4,
+            Some("en".to_owned()),
+            false,
+            false,
+            false,
+        );
         let req = native_request();
         let seg = build_native_segmentation(&req, &wav, &pilot, None)
             .expect("segmentation should succeed");

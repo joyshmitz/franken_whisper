@@ -111,14 +111,21 @@ fn write_csv(path: &Path, result: &TranscriptionResult) -> FwResult<()> {
         // simple CSV escaping: replace " with "" and wrap in "
         let escaped_speaker = speaker.replace('\"', "\"\"");
         let escaped_text = seg.text.replace('\"', "\"\"");
-        writeln!(file, "{},{},\"{}\",\"{}\"", start, end, escaped_speaker, escaped_text)?;
+        writeln!(
+            file,
+            "{},{},\"{}\",\"{}\"",
+            start, end, escaped_speaker, escaped_text
+        )?;
     }
     Ok(())
 }
 
 fn write_json(path: &Path, result: &TranscriptionResult) -> FwResult<()> {
     let file = File::create(path)?;
-    serde_json::to_writer_pretty(file, &serde_json::json!({ "transcription": result.segments }))?;
+    serde_json::to_writer_pretty(
+        file,
+        &serde_json::json!({ "transcription": result.segments }),
+    )?;
     Ok(())
 }
 
@@ -178,11 +185,11 @@ mod tests {
             raw_output: serde_json::json!({}),
             artifact_paths: vec![],
         };
-        
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.csv");
         write_csv(&path, &result).unwrap();
-        
+
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             content,

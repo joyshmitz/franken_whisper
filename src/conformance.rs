@@ -1503,7 +1503,7 @@ mod tests {
     fn validate_segment_invariants_rejects_end_before_start() {
         let segments = vec![segment(Some(2.0), Some(1.0), "time traveler")];
         let err = validate_segment_invariants(&segments).expect_err("should reject end < start");
-        assert!(err.to_string().contains("precedes start"));
+        assert!(err.to_string().contains("before start_sec"));
     }
 
     #[test]

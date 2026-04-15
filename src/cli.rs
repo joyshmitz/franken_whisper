@@ -868,11 +868,11 @@ impl TranscribeArgs {
         if !self.speculative {
             return None;
         }
-        
+
         let window_size_ms = self.speculative_window_ms.unwrap_or(3000);
         let raw_overlap_ms = self.speculative_overlap_ms.unwrap_or(500);
         let overlap_ms = raw_overlap_ms.min(window_size_ms.saturating_sub(1));
-        
+
         Some(crate::streaming::SpeculativeConfig {
             window_size_ms,
             overlap_ms,

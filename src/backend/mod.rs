@@ -7936,7 +7936,14 @@ mod tests {
 
     #[test]
     fn whisper_cpp_pilot_translate_flag_stored() {
-        let pilot = WhisperCppPilot::new("m.bin".to_owned(), 2, Some("ja".to_owned()), true, false, false);
+        let pilot = WhisperCppPilot::new(
+            "m.bin".to_owned(),
+            2,
+            Some("ja".to_owned()),
+            true,
+            false,
+            false,
+        );
         assert!(pilot.translate);
         assert_eq!(pilot.language.as_deref(), Some("ja"));
         // Translate flag doesn't affect mock output, but should be stored.

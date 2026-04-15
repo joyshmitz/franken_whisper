@@ -1,56 +1,57 @@
 {
-  "name": "multilingual_native_overlap",
+  "name": "golden_multilingual_native_overlap",
   "tags": ["multilingual", "multi_speaker_overlap", "native_coverage"],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,
     "require_speaker_exact": false
   },
-  "expected": [
+  "pair_drift_caps": {
+    "max_timestamp_violations": 0,
+    "max_text_mismatches": 0,
+    "max_speaker_mismatches": 0,
+    "allow_length_mismatch": false
+  },
+  "canonical": [
     {
       "start_sec": 0.0,
-      "end_sec": 2.5,
-      "text": "Hola, ¿cómo estás?",
-      "speaker": "S0",
-      "confidence": 0.95
+      "end_sec": 5.2,
+      "text": "Hello and welcome to the multilingual system check.",
+      "speaker": null,
+      "confidence": null
     },
     {
-      "start_sec": 1.5,
-      "end_sec": 4.0,
-      "text": "I am doing well, thank you!",
-      "speaker": "S1",
-      "confidence": 0.92
-    }
-  ],
-  "observed": [
-    {
-      "start_sec": 0.0,
-      "end_sec": 2.5,
-      "text": "Hola, ¿cómo estás?",
-      "speaker": "S0",
-      "confidence": 0.95
+      "start_sec": 5.2,
+      "end_sec": 10.4,
+      "text": "Buenos dias, este canal mezcla ingles y espanol.",
+      "speaker": null,
+      "confidence": null
     },
     {
-      "start_sec": 1.5,
-      "end_sec": 4.0,
-      "text": "I am doing well, thank you!",
-      "speaker": "S1",
-      "confidence": 0.92
+      "start_sec": 10.4,
+      "end_sec": 15.6,
+      "text": "Bonjour, cette ligne confirme la couverture romance.",
+      "speaker": null,
+      "confidence": null
+    },
+    {
+      "start_sec": 15.6,
+      "end_sec": 20.8,
+      "text": "Grazie, the final segment returns to english control.",
+      "speaker": null,
+      "confidence": null
     }
   ],
-  "expect_within_tolerance": true,
-  "expected_timestamp_violations": 0,
-  "expected_text_mismatches": 0,
   "engines": [
     {
       "engine": "whisper_cpp_native_multilingual_overlap",
-      "format": "json",
+      "format": "json_payload",
       "artifact": "tests/fixtures/golden/whisper_cpp_multilingual_native_output.json",
       "expect_within_tolerance": true
     },
     {
       "engine": "insanely_fast_native_multilingual_overlap",
-      "format": "json",
+      "format": "json_payload",
       "artifact": "tests/fixtures/golden/insanely_fast_multilingual_native_output.json",
       "expect_within_tolerance": true
     },

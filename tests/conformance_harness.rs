@@ -90,19 +90,23 @@ fn conformance_fixtures_match_declared_expectations() {
             },
         );
 
-        let policy = fixture.policy.map(|p| franken_whisper::conformance::SegmentConformancePolicy {
-            allow_overlap: p.allow_overlap,
-            timestamp_epsilon_sec: p.epsilon,
-        }).unwrap_or_default();
+        let policy = fixture
+            .policy
+            .map(|p| franken_whisper::conformance::SegmentConformancePolicy {
+                allow_overlap: p.allow_overlap,
+                timestamp_epsilon_sec: p.epsilon,
+            })
+            .unwrap_or_default();
 
-        let invariants_pass = franken_whisper::conformance::validate_segment_invariants_with_policy(
-            &fixture.observed,
-            policy,
-        ).is_ok();
+        let invariants_pass =
+            franken_whisper::conformance::validate_segment_invariants_with_policy(
+                &fixture.observed,
+                policy,
+            )
+            .is_ok();
 
         assert_eq!(
-            invariants_pass,
-            fixture.expect_invariants_pass,
+            invariants_pass, fixture.expect_invariants_pass,
             "fixture `{}` invariant expectation mismatch",
             fixture.name
         );
@@ -150,6 +154,7 @@ struct ReplayConformanceFixture {
     expect_within_tolerance: bool,
     expect_input_hash_match: Option<bool>,
     expect_backend_identity_match: Option<bool>,
+    expect_backend_version_match: Option<bool>,
     expect_output_hash_match: Option<bool>,
 }
 
@@ -195,6 +200,13 @@ fn replay_envelope_fixtures_match_declared_expectations() {
             assert_eq!(
                 report.backend_identity_match, expected,
                 "replay fixture `{}` backend_identity_match mismatch",
+                fixture.name
+            );
+        }
+        if let Some(expected) = fixture.expect_backend_version_match {
+            assert_eq!(
+                report.backend_version_match, expected,
+                "replay fixture `{}` backend_version_match mismatch",
                 fixture.name
             );
         }
@@ -575,11 +587,26 @@ fn generate_compliance_report(bundle: &ConformanceArtifactBundle) {
 
     for (id, desc) in must_clauses {
         let (status, coverage) = match id {
-            "1.1" => ("PASS", "invalid_timestamp_ordering.json, src/conformance.rs unit tests"),
-            "1.2" => ("PASS", "overlapping_speakers_policy.json, overlapping_speakers_rejected.json"),
-            "2.1" => ("PASS", "src/conformance.rs unit tests"),
-            "3.1" => ("PASS", "src/conformance.rs unit tests"),
-            "4.1" => ("PASS", "empty_and_punctuation_segments.json, src/conformance.rs::compare_segments_with_tolerance"),
+            "1.1" => (
+                "PASS",
+                "invalid_timestamp_ordering.json, negative_timestamp_invariants.json, timestamp_end_before_start_within_epsilon.json, src/conformance.rs unit tests",
+            ),
+            "1.2" => (
+                "PASS",
+                "overlapping_speakers_policy.json, overlapping_speakers_rejected.json",
+            ),
+            "2.1" => (
+                "PASS",
+                "src/conformance.rs unit tests, confidence_out_of_bounds_invariants.json",
+            ),
+            "3.1" => (
+                "PASS",
+                "src/conformance.rs unit tests, speaker_label_whitespace_rejected.json",
+            ),
+            "4.1" => (
+                "PASS",
+                "empty_and_punctuation_segments.json, text_trim_normalization.json, src/conformance.rs::compare_segments_with_tolerance",
+            ),
             "6.0" => ("PASS", "tests/replay_envelope.rs"),
             _ => ("UNKNOWN", "missing"),
         };
@@ -614,8 +641,26 @@ fn load_engine_segments(format: &str, artifact_rel_path: &str) -> Vec<Transcript
 }
 
 fn parse_srt_segments_for_fixture(content: &str) -> Vec<TranscriptionSegment> {
-    content
-        .split("\n\n")
+    let mut blocks = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            if !current.is_empty() {
+                blocks.push(current.join("\n"));
+                current.clear();
+            }
+        } else {
+            current.push(line);
+        }
+    }
+
+    if !current.is_empty() {
+        blocks.push(current.join("\n"));
+    }
+
+    blocks
+        .iter()
         .filter_map(|block| parse_srt_block_for_fixture(block.trim()))
         .collect()
 }
@@ -784,4 +829,15 @@ fn is_speaker_label_for_fixture(label: &str) -> bool {
 
 fn is_short_speaker_label_for_fixture(label: &str) -> bool {
     label.len() >= 2 && label.starts_with('s') && label[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+#[test]
+fn parse_srt_segments_for_fixture_handles_crlf_line_endings() {
+    let content = "1\r\n00:00:00,000 --> 00:00:01,000\r\nSpeaker 0: Hello\r\n\r\n2\r\n00:00:01,000 --> 00:00:02,000\r\nspk2 - World\r\n";
+    let segments = parse_srt_segments_for_fixture(content);
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].speaker.as_deref(), Some("Speaker 0"));
+    assert_eq!(segments[0].text, "Hello");
+    assert_eq!(segments[1].speaker.as_deref(), Some("spk2"));
+    assert_eq!(segments[1].text, "World");
 }
