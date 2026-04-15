@@ -1,0 +1,77 @@
+{
+  "name": "word_level_boundary_cases",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.02,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "policy": {
+    "allow_overlap": false,
+    "epsilon": 0.001
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 0.1,
+      "text": "I",
+      "speaker": null,
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 0.1,
+      "end_sec": 0.25,
+      "text": "am",
+      "speaker": null,
+      "confidence": 0.92
+    },
+    {
+      "start_sec": 0.25,
+      "end_sec": 0.5,
+      "text": "here",
+      "speaker": null,
+      "confidence": 0.88
+    },
+    {
+      "start_sec": 0.5,
+      "end_sec": 0.52,
+      "text": ".",
+      "speaker": null,
+      "confidence": 0.99
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.01,
+      "end_sec": 0.11,
+      "text": "I",
+      "speaker": null,
+      "confidence": 0.94
+    },
+    {
+      "start_sec": 0.11,
+      "end_sec": 0.26,
+      "text": "am",
+      "speaker": null,
+      "confidence": 0.91
+    },
+    {
+      "start_sec": 0.26,
+      "end_sec": 0.51,
+      "text": "here",
+      "speaker": null,
+      "confidence": 0.87
+    },
+    {
+      "start_sec": 0.51,
+      "end_sec": 0.53,
+      "text": ".",
+      "speaker": null,
+      "confidence": 0.98
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expect_invariants_pass": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}

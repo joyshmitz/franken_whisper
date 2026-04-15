@@ -157,9 +157,9 @@ See [DISCREPANCIES.md](/DISCREPANCIES.md) for intentional deviations:
 
 ## Gaps and TODOs
 
-- [ ] No fixture for `NaN`/`Infinity` timestamp edge cases (covered by unit tests only)
-- [ ] No fixture for extremely long segments (> 10 minutes)
-- [ ] Word-level timestamp conformance is minimal (`word_timestamps_bridge_native.json`)
+- [x] ~~No fixture for `NaN`/`Infinity` timestamp edge cases~~ → `nonfinite_timestamp_invariants.json` (null proxy; actual NaN/Inf not expressible in JSON)
+- [x] ~~No fixture for extremely long segments (> 10 minutes)~~ → `long_segment_duration.json` (10 min), `very_long_segment_15min.json` (15 min)
+- [x] ~~Word-level timestamp conformance is minimal~~ → `word_level_boundary_cases.json` added (single-char words, punctuation segments)
 
 ## Commands
 

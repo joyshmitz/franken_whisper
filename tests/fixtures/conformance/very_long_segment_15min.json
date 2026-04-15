@@ -1,0 +1,49 @@
+{
+  "name": "very_long_segment_15min",
+  "tolerance": {
+    "timestamp_tolerance_sec": 0.1,
+    "require_text_exact": true,
+    "require_speaker_exact": false
+  },
+  "policy": {
+    "allow_overlap": false,
+    "epsilon": 0.1
+  },
+  "expected": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 120.0,
+      "text": "Introduction spanning two minutes of continuous speech.",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.95
+    },
+    {
+      "start_sec": 120.0,
+      "end_sec": 900.0,
+      "text": "Extended monologue segment covering fifteen minutes total, testing extreme long-form transcription tolerance beyond the ten-minute threshold.",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.88
+    }
+  ],
+  "observed": [
+    {
+      "start_sec": 0.02,
+      "end_sec": 120.0,
+      "text": "Introduction spanning two minutes of continuous speech.",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.94
+    },
+    {
+      "start_sec": 120.05,
+      "end_sec": 900.0,
+      "text": "Extended monologue segment covering fifteen minutes total, testing extreme long-form transcription tolerance beyond the ten-minute threshold.",
+      "speaker": "SPEAKER_00",
+      "confidence": 0.87
+    }
+  ],
+  "expect_within_tolerance": true,
+  "expect_invariants_pass": true,
+  "expected_timestamp_violations": 0,
+  "expected_text_mismatches": 0,
+  "expected_speaker_mismatches": 0
+}
