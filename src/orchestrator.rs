@@ -1802,14 +1802,17 @@ async fn execute_backend(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.1);
 
-    let backend_order = if routing_safe_mode {
+    // Evaluate adaptive routing and capture prediction even during fallback.
+    // This fixes bd-k87e: we record prediction outcomes regardless of whether
+    // the adaptive order is actually used, enabling calibration during fallback.
+    let (backend_order, adaptive_prediction) = if routing_safe_mode {
         log.push(
             "backend_routing",
             "backend.routing.safe_mode",
             "routing safe mode active; using static priority order",
             json!({"env": "FRANKEN_WHISPER_ROUTING_SAFE_MODE"}),
         );
-        None
+        (None, None)
     } else if let Some(selection) =
         backend::evaluate_backend_selection(request, normalized_duration, pcx.trace_id())
     {
@@ -1825,6 +1828,14 @@ async fn execute_backend(
             "evaluated formal backend selection contract",
             selection.routing_log,
         );
+
+        // Capture the adaptive prediction BEFORE deciding whether to use it.
+        // This allows calibration tracking even when we fall back to static order.
+        let top_backend = selection.recommended_order[0];
+        let predicted_success = backend::router_state_snapshot()
+            .map(|state| state.metrics_for(top_backend).success_rate)
+            .unwrap_or(0.5);
+        let prediction = (top_backend, predicted_success);
 
         if selection.calibration_score < min_calibration {
             tracing::warn!(
@@ -1846,20 +1857,14 @@ async fn execute_backend(
                     "discarded_order": selection.recommended_order.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
                 }),
             );
-            None
+            // Use static order but still record the adaptive prediction outcome
+            (None, Some(prediction))
         } else {
-            Some(selection.recommended_order)
+            (Some(selection.recommended_order), Some(prediction))
         }
     } else {
-        None
+        (None, None)
     };
-    let adaptive_prediction = backend_order.as_ref().map(|order| {
-        let top_backend = order[0];
-        let predicted_success = backend::router_state_snapshot()
-            .map(|state| state.metrics_for(top_backend).success_rate)
-            .unwrap_or(0.5);
-        (top_backend, predicted_success)
-    });
 
     // Checkpoint: between normalize -> backend
     checkpoint_or_emit("backend", pcx, log)?;
