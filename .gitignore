@@ -97,3 +97,52 @@ storage.sqlite3-wal.corrupt-*
 
 # NTM session state
 .ntm/
+
+# Root-level agent-generated scripts and scratch output
+*.log
+nohup.out
+/*.txt
+/*.py
+/*.sh
+/*.json
+!package.json
+/*.jsonl
+
+# Beads ephemeral artifacts
+.beads/*.bad_*
+.beads/*.backup_*
+.beads/*.rebuild_*
+.beads/recovery*/
+.beads_recovery/
+.beads_recovery_*/
+
+# ACFS ephemeral patterns
+codex.mcp.json
+cursor.mcp.json
+gemini.mcp.json
+.opencode.json.*.bak
+.agent-mail-project-id
+
+# Agent session ephemeral files
+SESSION_TODO.md
+SESSION_REPORT.md
+SESSION_*.md
+verify_*.sh
+newfile.txt
+repro_*.rs
+
+# Claude local settings
+.claude/settings.local.json
+
+# FastEmbed model caches
+.fastembed_cache/
+
+# Codex build artifacts
+target-codex*/
+target_*/
+
+# Nested crate build artifacts
+crates/*/target/
+
+# Compiler crash reports
+rustc-ice-*.txt
