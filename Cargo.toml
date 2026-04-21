@@ -30,10 +30,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 hound = "3.5.1"
 symphonia = { version = "0.5.5", features = ["mp3", "aac", "isomp4", "ogg", "flac", "vorbis", "wav", "pcm"] }
 
-asupersync = { path = "../asupersync", default-features = false }
-franken-kernel = { path = "../asupersync/franken_kernel" }
-franken-evidence = { path = "../asupersync/franken_evidence" }
-franken-decision = { path = "../asupersync/franken_decision" }
+asupersync = { version = "0.3.0", default-features = false }
+franken-kernel = "0.3.0"
+franken-evidence = "0.3.0"
+franken-decision = "0.3.0"
 fsqlite = { path = "../frankensqlite/crates/fsqlite" }
 fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
 
