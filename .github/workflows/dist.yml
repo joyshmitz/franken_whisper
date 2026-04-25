@@ -15,7 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      # franken_whisper pins to nightly via rust-toolchain.toml; install
+      # the nightly channel up front so cargo doesn't have to fetch it on
+      # demand (and so we get rustfmt + clippy on the same channel).
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
 
@@ -74,8 +77,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      # franken_whisper pins nightly via rust-toolchain.toml; matching that
+      # here lets the cross-compile target install live on the same channel
+      # cargo will actually use for the build.
+      - name: Install Rust nightly with target
+        uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
 
