@@ -82,12 +82,17 @@ jobs:
 
       - name: Package archive (Unix)
         if: runner.os != 'Windows'
-        # install.sh expects archives named franken_whisper-vX.Y.Z-{os_arch}.tar.gz
-        # with the binary at the top level of the archive.
+        # install.sh strips the leading "v" before constructing the asset
+        # name (`franken_whisper-${VERSION#v}-${os}_${arch}.tar.gz`), so we
+        # must do the same here. Tag push -> v1.2.3 -> 1.2.3 in the name.
+        # Workflow_dispatch from a non-tag context ($GITHUB_REF_NAME = branch)
+        # produces something like `franken_whisper-main-...`; that's only
+        # downloadable via direct URL, never via install.sh.
         run: |
           set -euo pipefail
           mkdir -p dist
-          ARCHIVE="franken_whisper-${GITHUB_REF_NAME}-${{ matrix.os_arch }}.${{ matrix.archive_ext }}"
+          VERSION_NO_V="${GITHUB_REF_NAME#v}"
+          ARCHIVE="franken_whisper-${VERSION_NO_V}-${{ matrix.os_arch }}.${{ matrix.archive_ext }}"
           cd target/${{ matrix.target }}/release
           tar -czf "../../../dist/$ARCHIVE" "${{ matrix.binary }}"
           cd ../../../dist
@@ -98,7 +103,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $archive = "franken_whisper-${env:GITHUB_REF_NAME}-${{ matrix.os_arch }}.${{ matrix.archive_ext }}"
+          $versionNoV = "${env:GITHUB_REF_NAME}" -replace '^v',''
+          $archive = "franken_whisper-${versionNoV}-${{ matrix.os_arch }}.${{ matrix.archive_ext }}"
           Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}" -DestinationPath "dist/$archive"
           Push-Location dist
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()
@@ -127,16 +133,19 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Generate aggregate SHA256SUMS
+      - name: Generate aggregate checksums-sha256.txt
+        # install.sh expects this filename verbatim:
+        #   https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/checksums-sha256.txt
+        # with one `<sha256>  <archive_name>` line per binary asset.
         run: |
           set -euo pipefail
           shopt -s nullglob
           cd dist
-          rm -f SHA256SUMS
+          rm -f checksums-sha256.txt
           for f in franken_whisper-*.tar.gz franken_whisper-*.zip; do
-            shasum -a 256 "$f" >> SHA256SUMS
+            shasum -a 256 "$f" >> checksums-sha256.txt
           done
-          cat SHA256SUMS
+          cat checksums-sha256.txt
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.1
