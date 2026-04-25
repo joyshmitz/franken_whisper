@@ -1107,6 +1107,7 @@ dependencies = [
  "fsqlite-types",
  "hashbrown 0.14.5",
  "serde",
+ "smallvec",
  "tracing",
  "xxhash-rust",
 ]
@@ -1117,7 +1118,7 @@ version = "0.1.2"
 dependencies = [
  "asupersync",
  "blake3",
- "foldhash 0.1.5",
+ "foldhash 0.2.0",
  "fsqlite-ast",
  "fsqlite-btree",
  "fsqlite-error",
@@ -1138,7 +1139,7 @@ dependencies = [
  "fsqlite-wal",
  "hashbrown 0.14.5",
  "lazy_static",
- "lru",
+ "lru 0.16.4",
  "regex",
  "serde",
  "serde_json",
@@ -1222,6 +1223,7 @@ dependencies = [
 name = "fsqlite-mvcc"
 version = "0.1.2"
 dependencies = [
+ "asupersync",
  "blake3",
  "crc32c",
  "crossbeam-epoch",
@@ -1259,7 +1261,7 @@ dependencies = [
  "bumpalo",
  "chacha20poly1305",
  "dashmap",
- "foldhash 0.1.5",
+ "foldhash 0.2.0",
  "fsqlite-error",
  "fsqlite-observability",
  "fsqlite-types",
@@ -1279,6 +1281,7 @@ dependencies = [
  "fsqlite-ast",
  "fsqlite-error",
  "fsqlite-types",
+ "hashbrown 0.14.5",
  "memchr",
  "tracing",
 ]
@@ -1292,7 +1295,7 @@ dependencies = [
  "fsqlite-error",
  "fsqlite-parser",
  "fsqlite-types",
- "lru",
+ "lru 0.16.4",
  "serde",
  "serde_json",
  "tracing",
@@ -1421,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "ftui"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "ftui-core",
  "ftui-layout",
@@ -1434,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-a11y"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "ftui-core",
@@ -1442,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-backend"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "ftui-core",
  "ftui-render",
@@ -1450,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -1466,11 +1469,11 @@ dependencies = [
 
 [[package]]
 name = "ftui-i18n"
-version = "0.3.1"
+version = "0.4.0"
 
 [[package]]
 name = "ftui-layout"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "ftui-core",
  "rustc-hash",
@@ -1480,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-render"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "bitflags 2.11.1",
@@ -1494,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-runtime"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "ftui-backend",
@@ -1512,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-style"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -1522,13 +1525,13 @@ dependencies = [
 
 [[package]]
 name = "ftui-text"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "ftui-core",
  "ftui-layout",
  "ftui-render",
  "ftui-style",
- "lru",
+ "lru 0.17.0",
  "ropey",
  "rustc-hash",
  "smallvec",
@@ -1539,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-widgets"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "bitflags 2.11.1",
@@ -1856,13 +1859,12 @@ dependencies = [
 
 [[package]]
 name = "json5"
-version = "0.4.1"
+version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96b0db21af676c1ce64250b5f40f3ce2cf27e4e47cb91ed91eb6fe9350b430c1"
+checksum = "733a844dbd6fef128e98cb4487b887cb55454d92cd9994b1bafe004fabbe670c"
 dependencies = [
- "pest",
- "pest_derive",
  "serde",
+ "ucd-trie",
 ]
 
 [[package]]
@@ -1917,6 +1919,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 dependencies = [
  "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "lru"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e0b564323a0fb6d54b864f625ae139de9612e27edb944dda37c109f05aac531"
+dependencies = [
+ "hashbrown 0.17.0",
 ]
 
 [[package]]
@@ -2114,49 +2125,6 @@ dependencies = [
  "base64ct",
  "rand_core",
  "subtle",
-]
-
-[[package]]
-name = "pest"
-version = "2.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0848c601009d37dfa3430c4666e147e49cdcf1b92ecd3e63657d8a5f19da662"
-dependencies = [
- "memchr",
- "ucd-trie",
-]
-
-[[package]]
-name = "pest_derive"
-version = "2.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11f486f1ea21e6c10ed15d5a7c77165d0ee443402f0780849d1768e7d9d6fe77"
-dependencies = [
- "pest",
- "pest_generator",
-]
-
-[[package]]
-name = "pest_generator"
-version = "2.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8040c4647b13b210a963c1ed407c1ff4fdfa01c31d6d2a098218702e6664f94f"
-dependencies = [
- "pest",
- "pest_meta",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "pest_meta"
-version = "2.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89815c69d36021a140146f26659a81d6c2afa33d216d736dd4be5381a7362220"
-dependencies = [
- "pest",
- "sha2 0.10.9",
 ]
 
 [[package]]
