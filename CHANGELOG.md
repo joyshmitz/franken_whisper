@@ -2,7 +2,7 @@
 
 All notable changes to [franken_whisper](https://github.com/Dicklesworthstone/franken_whisper) are documented in this file.
 
-franken_whisper is an agent-first Rust ASR orchestration stack with adaptive Bayesian backend routing, real-time NDJSON streaming, speculative cancel-correct transcription, and SQLite-backed persistence. It wraps whisper.cpp, insanely-fast-whisper, and whisper-diarization behind a unified 10-stage composable pipeline.
+franken_whisper is an agent-first Rust ASR orchestration stack with adaptive Bayesian backend routing, real-time NDJSON streaming, speculative cancel-correct transcription, and SQLite-backed persistence. It wraps `whisper.cpp`, `insanely-fast-whisper`, and `whisper-diarization` behind a unified 10-stage composable pipeline, then adds in-process Rust native engines under a staged conformance-gated rollout.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Commit links point to the canonical GitHub repository.
 
@@ -10,27 +10,102 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Commit 
 
 ## [Unreleased] (since v0.1.0)
 
-72 commits since v0.1.0 | 236 files changed | +26,077 / -1,858 lines
+144 commits since v0.1.0 | 354 files changed | +38,883 / -3,117 lines
 
 Compare: [`v0.1.0...main`](https://github.com/Dicklesworthstone/franken_whisper/compare/v0.1.0...main)
 
-### Installer and Distribution
+### Release Pipeline and Distribution
 
+- **`dist.yml` + `release-automation.yml` release pipeline** — multi-platform binary builds (Linux x86_64/ARM64, macOS Intel/ARM64, Windows x86_64), tag-driven release automation that watches `Cargo.toml` and creates `v{VERSION}` tags when the version changes ([`d819076`](https://github.com/Dicklesworthstone/franken_whisper/commit/d819076b5eab5a09c218e680a20e8dae3589ae91))
+- Dist asset names aligned with `install.sh` expectations ([`d70d7c3`](https://github.com/Dicklesworthstone/franken_whisper/commit/d70d7c3b9ae546c45f2d488aacbcbaa353f76151))
+- Test job's `cargo fmt --check` made advisory; toolchain channel matched against `rust-toolchain.toml` ([`4a406d0`](https://github.com/Dicklesworthstone/franken_whisper/commit/4a406d01a1152720a7aaa36fad9196b678d02bd3), [`7cf1bfc`](https://github.com/Dicklesworthstone/franken_whisper/commit/7cf1bfcb6c6999f8e9364803d43654c84c38ac7a))
 - **curl|bash installer** with SHA-256 checksum verification for one-line installs ([`e06d87f`](https://github.com/Dicklesworthstone/franken_whisper/commit/e06d87f1c812d2acfd03459973a4cf36a9ced23c))
-- Fix installer to strip `v` prefix from version in asset URLs ([`4cc9b66`](https://github.com/Dicklesworthstone/franken_whisper/commit/4cc9b664c82abbd4f4d30e1145de8b8f56000a2d))
-- Fix installer to handle versioned binary names in release archives ([`6a48022`](https://github.com/Dicklesworthstone/franken_whisper/commit/6a480224261a235b942e7e172c5f70ed29fc38e2))
+- Installer strips `v` prefix from version in asset URLs ([`4cc9b66`](https://github.com/Dicklesworthstone/franken_whisper/commit/4cc9b664c82abbd4f4d30e1145de8b8f56000a2d))
+- Installer handles versioned binary names in release archives ([`6a48022`](https://github.com/Dicklesworthstone/franken_whisper/commit/6a480224261a235b942e7e172c5f70ed29fc38e2))
 
-### CLI and User Interface
+### Dependency Migration to crates.io
+
+- **`asupersync`, `franken-kernel`, `franken-evidence`, `franken-decision` migrated from local path dependencies to crates.io v0.3.0** — removes the requirement to clone sibling FrankenSuite repositories alongside `franken_whisper` for normal builds ([`d75c33f`](https://github.com/Dicklesworthstone/franken_whisper/commit/d75c33f4e9af26cd5a0fea804d8f3cf4d4d48218))
+- `asupersync` bumped to 0.3.1 ([`e8c1508`](https://github.com/Dicklesworthstone/franken_whisper/commit/e8c1508c3830cd56d465130a4b345b418ccbae07))
+- `Cargo.lock` refreshed against upstream dependency bumps ([`da4125b`](https://github.com/Dicklesworthstone/franken_whisper/commit/da4125bb1c85719f25bc39659e7ec78d2e589977))
+
+### Conformance: Native Engine Rollout Governance
+
+- **Backend version drift detection, native-pilot fixture generator, and expanded invariant coverage** — `NativeEngineRolloutStage` enum (Shadow → Validated → Fallback → Primary → Sole), shadow run comparator validating segment parity + replay envelope between bridge and native, `scripts/gen_native_fixtures.py` corpus generator, `tests/COVERAGE.md` mapping spec clauses to tests, and 30+ new conformance fixtures covering long segments, word-level boundaries, replay drift, timestamp edge cases, speaker label patterns, multilingual / code-switching / noisy-overlap corpora ([`c72eed3`](https://github.com/Dicklesworthstone/franken_whisper/commit/c72eed330428dab607eaced659cffda0a5e80083))
+- `tests/COVERAGE.md` tracking spec clause coverage ([`5a1ec0d`](https://github.com/Dicklesworthstone/franken_whisper/commit/5a1ec0db090d0e69d4814ea92dfdc30fe56489cd))
+- Conformance fixtures expanded with very long segments + word-level boundary cases ([`1f16dc5`](https://github.com/Dicklesworthstone/franken_whisper/commit/1f16dc59e2046f75b56a28f7bf5c5afd9210f508)) and timestamp / long segment edge cases ([`48078fe`](https://github.com/Dicklesworthstone/franken_whisper/commit/48078fe4d67fe7f6efbf27749a4622aa799c64da))
+
+### Pipeline: Word-Level Timestamps and Cancellation Threading
+
+- **Word-level timestamp pipeline support** (`WordTimestampParams`: `enabled`, `max_len`, `token_threshold`, `token_sum_threshold`) plus end-to-end **cancellation token threading through pipeline stages** so stage budgets are honored by the cancellation tokens, mid-pipeline cancellation no longer leaks partial subprocesses or partial transactions, and conformance assertions tighten around word-level segment invariants ([`f1cbd31`](https://github.com/Dicklesworthstone/franken_whisper/commit/f1cbd31560ea0d1586be4771224077ea5ed4729b))
+- Honor stage budgets in cancellation tokens (bd-xunn) ([`9e40cda`](https://github.com/Dicklesworthstone/franken_whisper/commit/9e40cda96a89ad575e4acf9325463159587bea44))
+- Block speculative CLI flag where unsupported; stream pipe output reliably; bump deps ([`25ff052`](https://github.com/Dicklesworthstone/franken_whisper/commit/25ff0521c334ef3cdbf728c74422010700e22ceb))
+
+### Adaptive Router: Calibration Observations
+
+- **`record_adaptive_router_prediction` captures predicted probability at routing decision time** so calibration observations (predicted vs. actual outcome) feed the Brier-score sliding window even when the router falls back to static priority ([`ef80eb8`](https://github.com/Dicklesworthstone/franken_whisper/commit/ef80eb8daff5d6385d477a73cbe3db63a5e717c9))
+- Calibration fallback path now records the adaptive prediction it would have made (bd-k87e), preventing fallback runs from silently corrupting calibration data ([`ed91ddd`](https://github.com/Dicklesworthstone/franken_whisper/commit/ed91ddddcbef30f9401cecb8568b24529d8d436e))
+- Non-finite calibration predictions sanitized (bd-bu04) ([`1c77e43`](https://github.com/Dicklesworthstone/franken_whisper/commit/1c77e4362650aa1c5c7996a7aa44be01d95be2e5))
+
+### Metamorphic Test Suites
+
+- **`tests/metamorphic_accelerate_tests.rs` (+475 lines)** — softmax / normalization / attention scoring invariants under permutation, scaling, and zero-padding transformations ([`47583d5`](https://github.com/Dicklesworthstone/franken_whisper/commit/47583d5073ea6049ff36fe846a9120db5278e676))
+- **`tests/metamorphic_speculation_tests.rs` (+481 lines)** — string distance and window-invariant metamorphic properties ([`3c0c972`](https://github.com/Dicklesworthstone/franken_whisper/commit/3c0c97271a285a2e53358b246f4178d4d5025ecb))
+- **`tests/metamorphic_audio_tests.rs` (+515 lines)** — audio processing invariants (resampling commutativity, mono mixing properties, silence-padding equivalence) ([`78b9db6`](https://github.com/Dicklesworthstone/franken_whisper/commit/78b9db692d10a8e1cccc185f1b7d925e8e710adc))
+
+### Audio Pipeline Hardening
+
+- **Native audio backend expanded with format detection** and sync improvements ([`1ad594e`](https://github.com/Dicklesworthstone/franken_whisper/commit/1ad594ebf8b0bc8d6412d3075d1d84924125db86))
+- Audio frame mono averaging uses actual frame length rather than nominal channel count ([`ad9c51b`](https://github.com/Dicklesworthstone/franken_whisper/commit/ad9c51b39fcc98b1d84ac4c40172b4933e89abf6))
+- `normalize_cpu` empty-input edge case guarded; two-lane streaming executor propagates thread panics rather than silently hanging ([`2d8457a`](https://github.com/Dicklesworthstone/franken_whisper/commit/2d8457abe503721a7e76d9dd50ae7e510f512046))
+- Audio normalization + streaming I/O hardened with cancellation checks ([`59a33df`](https://github.com/Dicklesworthstone/franken_whisper/commit/59a33df78527039b58afd5c26189e1df9bc3a834), [`13c8c80`](https://github.com/Dicklesworthstone/franken_whisper/commit/13c8c801cd050c9c80865f49840006e234fc71d1))
+
+### Robot Mode: Structured Error Envelopes and Diagnostics
+
+- **Structured `run_error` envelope for invalid robot requests** — malformed CLI args now produce a well-formed NDJSON error event instead of a human-readable stderr message ([`1e576a9`](https://github.com/Dicklesworthstone/franken_whisper/commit/1e576a9d021ff8f4fd23ac246b35e07e35546c9d))
+- Robot mode avoids human-decorated stderr ([`2a5982e`](https://github.com/Dicklesworthstone/franken_whisper/commit/2a5982e9f5943c57b40fce3f853451598c89dd48))
+- Robot error emitted on worker thread panic ([`8ab2ef8`](https://github.com/Dicklesworthstone/franken_whisper/commit/8ab2ef8ba7f1b46d6631e8969844eb1ab4e85ab3))
+- Database health check hardened (`robot health` integrity probes resilient to migration / corruption edge cases) ([`83b23be`](https://github.com/Dicklesworthstone/franken_whisper/commit/83b23be88778121e29d67762f9dc89910be373fe), [`fe058e2`](https://github.com/Dicklesworthstone/franken_whisper/commit/fe058e247cbfb9bf691e5896a3414cfe0762407c))
+- ffmpeg health probe improved ([`092bc1e`](https://github.com/Dicklesworthstone/franken_whisper/commit/092bc1e80555a1c552e8e81b485be57951d0afc7))
+
+### Sync Lock Robustness
+
+- Sync lock kept alive while owning PID runs (bd-qxf6); stale locks age-gated when PID unknown (bd-3jfj/bd-pvol); EPERM on `kill -0` treated as alive (bd-aijz); Windows `tasklist` errors treated as unknown (bd-7xh8); Windows PID liveness check improved (bd-ht0i) ([`396c652`](https://github.com/Dicklesworthstone/franken_whisper/commit/396c652e49b82558abf6dd89163610b98a43baa5), [`1aa7cf4`](https://github.com/Dicklesworthstone/franken_whisper/commit/1aa7cf4faff927fb9af3352036eb4145d14e1e79), [`eb0b9b8`](https://github.com/Dicklesworthstone/franken_whisper/commit/eb0b9b8076147c961f312bfac11f397636cfd4a7), [`80d74db`](https://github.com/Dicklesworthstone/franken_whisper/commit/80d74db596c6d5dba831097108474817b40189cc), [`afa5c16`](https://github.com/Dicklesworthstone/franken_whisper/commit/afa5c16a4b0cb9397dcedd2d54101ec4dbaa9bf7), [`4e1ee33`](https://github.com/Dicklesworthstone/franken_whisper/commit/4e1ee33f774078c4a44e9e1ff5b091c37fcc65fb))
+- Sync lock parsing hardened; SQLite table identifiers quoted ([`da9a844`](https://github.com/Dicklesworthstone/franken_whisper/commit/da9a84453214243b7e2de7ee4ff0bdd41cb1c322))
+- Sync lock release path hardened alongside ffmpeg bundle work (bd-g7b2) ([`b36ef02`](https://github.com/Dicklesworthstone/franken_whisper/commit/b36ef0296c26e8e8bf77fa3ab998c4fd5e40360c))
+
+### ffmpeg Bundle and Stdin Hygiene
+
+- ffmpeg bundle scan hardened (bd-wk8p); stdin extension sanitization + ffmpeg download test stabilization (bd-o8fo) ([`79f3492`](https://github.com/Dicklesworthstone/franken_whisper/commit/79f3492dbeb01a5ed47706766e9935e46b22de49), [`eb220c8`](https://github.com/Dicklesworthstone/franken_whisper/commit/eb220c810b437a6594ccbfac3c668f5777df13bc))
+- `tty-audio retransmit-plan` protocol version corrected ([`6076902`](https://github.com/Dicklesworthstone/franken_whisper/commit/60769026c8298f96ecd478540b17ce60ac1df802))
+- Legacy `tty-audio` version consistency enforced (bd-ithy) ([`036fbcf`](https://github.com/Dicklesworthstone/franken_whisper/commit/036fbcf4d990a112039422d4ef8ee7bef990727e))
+
+### Secrets Redaction
+
+- **HuggingFace token redacted in command logs** via `render_command_for_log()` — diarization invocations no longer leak `--hf-token` values into tracing output ([`60bf952`](https://github.com/Dicklesworthstone/franken_whisper/commit/60bf9521520865767c69fa07bb4d03e6a68248a8), [`8b3249a`](https://github.com/Dicklesworthstone/franken_whisper/commit/8b3249aa420454b502c633657167fc70006fe828))
+
+### Storage and Diarization Fixes
+
+- Storage concurrency tests stabilized (bd-pdyy) ([`f82031d`](https://github.com/Dicklesworthstone/franken_whisper/commit/f82031d0ae1c27210325f4a85f38c2d170a60ddc))
+- Diarize clustering hardened (bd-0ydr) ([`3adb608`](https://github.com/Dicklesworthstone/franken_whisper/commit/3adb6080da2787c66bcb7432198db213ed7c4ca3))
+- Orchestrator UBS critical findings resolved (bd-9ftg) ([`ad4d98b`](https://github.com/Dicklesworthstone/franken_whisper/commit/ad4d98b54cc9502077af370b033c5d98cf8da3f3))
+- SRT parsing fallback fixed ([`d409056`](https://github.com/Dicklesworthstone/franken_whisper/commit/d409056ba265bd1f7688578e1326edf2a1acb26e))
+- Diarization transcript fallback and command pipe output loss fixed ([`a8328bc`](https://github.com/Dicklesworthstone/franken_whisper/commit/a8328bcdf02b93f67ab788476c7ba198667af819))
+- Empty parent components ignored when ensuring directories exist ([`0a21253`](https://github.com/Dicklesworthstone/franken_whisper/commit/0a2125335e8e0cd7ab11b696c850b61dd3d503f0))
+- GPU cancellation evidence ledger tests: missing `expected_loss` entries supplied ([`a20b828`](https://github.com/Dicklesworthstone/franken_whisper/commit/a20b82808d93ae65cc52d34e13f7edbac9463fc4))
+- Speculation partials handled safely when missing ([`44729dc`](https://github.com/Dicklesworthstone/franken_whisper/commit/44729dc222fd6b7cc69d42f3b4481bd3207ff20e))
+
+### CLI and Robot Surface
 
 - **Expanded CLI** with structured subcommands and output modes (+122 lines) ([`ef221f7`](https://github.com/Dicklesworthstone/franken_whisper/commit/ef221f7ba39c1f8d6bd1caf36f2b34c8454608b6))
 - **Expanded robot output** with structured analysis views (+90 lines) ([`32ba54f`](https://github.com/Dicklesworthstone/franken_whisper/commit/32ba54f2e53c9e5fff07ed92abe854e797a70f21))
-- **routing_decision event builder** extracted in robot module; backends output aligned with NDJSON schema ([`6beedc3`](https://github.com/Dicklesworthstone/franken_whisper/commit/6beedc3db49efcf2c26d3f712ee0d78abf62c125))
+- **`routing_decision` event builder** extracted in `robot` module; backends output aligned with NDJSON schema ([`6beedc3`](https://github.com/Dicklesworthstone/franken_whisper/commit/6beedc3db49efcf2c26d3f712ee0d78abf62c125))
 - CLI argument parsing edge case corrected ([`8a8a58e`](https://github.com/Dicklesworthstone/franken_whisper/commit/8a8a58e0baba1df01dc4eecb6672a013f1ae7412))
 - CLI integration tests and orchestrator refinement ([`a7cca9e`](https://github.com/Dicklesworthstone/franken_whisper/commit/a7cca9e0c5d627be27ab0bb0aafab48884504c35))
 
 ### Speculative Streaming
 
-- **Adaptive window controller** for speculative streaming pipeline -- dynamically adjusts decode windows based on correction rates ([`61b7d40`](https://github.com/Dicklesworthstone/franken_whisper/commit/61b7d40073f41268280033ceac0a8251e0179923))
+- **Adaptive window controller** for speculative streaming pipeline — dynamically adjusts decode windows based on correction rates ([`61b7d40`](https://github.com/Dicklesworthstone/franken_whisper/commit/61b7d40073f41268280033ceac0a8251e0179923))
 - None-timestamp segment handling corrected in speculation and TUI; run detail load errors surfaced ([`dd04e9c`](https://github.com/Dicklesworthstone/franken_whisper/commit/dd04e9cad44621911b5cf68e69c5f03330665e55))
 - Speculation test error assertions simplified with `expect_err` ([`33423d5`](https://github.com/Dicklesworthstone/franken_whisper/commit/33423d582363e619be4c8ea0161fbb98720bac21))
 
@@ -39,7 +114,6 @@ Compare: [`v0.1.0...main`](https://github.com/Dicklesworthstone/franken_whisper/
 - **XDG_STATE_HOME support** for tool state storage; ffmpeg extracted to tmpdir instead of cwd ([`10be321`](https://github.com/Dicklesworthstone/franken_whisper/commit/10be321a493db1ce8617f82172c6d2b12716ef88))
 - Active region boundaries clamped to actual audio duration, preventing out-of-bounds processing ([`2bca2f9`](https://github.com/Dicklesworthstone/franken_whisper/commit/2bca2f9fd48b5be23b3434bf5bef25ed5953bc1e))
 - Audio processing pipeline refinement ([`162da2a`](https://github.com/Dicklesworthstone/franken_whisper/commit/162da2ad1154970e7a9bc0c1451186e3254f9215))
-- Diarization transcript fallback and command pipe output loss fixed ([`a8328bc`](https://github.com/Dicklesworthstone/franken_whisper/commit/a8328bcdf02b93f67ab788476c7ba198667af819))
 
 ### TTY Audio Transport
 
@@ -88,11 +162,13 @@ Compare: [`v0.1.0...main`](https://github.com/Dicklesworthstone/franken_whisper/
 
 - Major README refresh with updated architecture and feature documentation (+1,867 lines across three commits) ([`2a2bb9f`](https://github.com/Dicklesworthstone/franken_whisper/commit/2a2bb9fd333df71e1e0069d3086d2e8a49315c7c), [`7d207b8`](https://github.com/Dicklesworthstone/franken_whisper/commit/7d207b8ba23ee18573b12a9a8d9dbeadf16258be), [`ba227a6`](https://github.com/Dicklesworthstone/franken_whisper/commit/ba227a60fab5558e0d09c06171c4e37e5babd49e))
 - Robot event catalog updated with `routing_decision`, `backends.discovery`, and streaming events ([`ecf702b`](https://github.com/Dicklesworthstone/franken_whisper/commit/ecf702bea3219c697871788f4976d48b0f9dbb40))
+- `CHANGELOG.md` rebuilt from git history with live commit links ([`d678a9e`](https://github.com/Dicklesworthstone/franken_whisper/commit/d678a9ee57822cbdee44f14e477a21018f4628a3), [`0059e01`](https://github.com/Dicklesworthstone/franken_whisper/commit/0059e019eeae376dc5bb4298bd74f3ca26d01dd6))
+- `DISCREPANCIES.md` tracking known native-vs-bridge divergences (introduced alongside conformance work in `c72eed3`)
 - Implementation tracker and execution packet documentation updated ([`b34893e`](https://github.com/Dicklesworthstone/franken_whisper/commit/b34893e0e637ece3023c75572036e054b635ebf9))
 
 ---
 
-## [v0.1.0] -- 2026-03-04
+## [v0.1.0] — 2026-03-04
 
 **Initial release.** GitHub Release: [`v0.1.0`](https://github.com/Dicklesworthstone/franken_whisper/releases/tag/v0.1.0) | Published: 2026-03-04
 
@@ -112,13 +188,13 @@ SHA-256 checksums: [`checksums-sha256.txt`](https://github.com/Dicklesworthstone
 
 ### Core Architecture
 
-- **10-stage composable pipeline**: Ingest, Normalize, VAD, Source Separate, Backend, Accelerate, Align, Punctuate, Diarize, Persist -- stages composed dynamically per-request, skipped when unnecessary, budgeted independently, profiled automatically ([`2e9f2e9`](https://github.com/Dicklesworthstone/franken_whisper/commit/2e9f2e97e0ce8f37d71c2ae00eece2904f3fdd19))
-- **Adaptive Bayesian backend routing** with explicit loss matrix, posterior calibration, and deterministic fallback across whisper.cpp, insanely-fast-whisper, and whisper-diarization
-- **Real-time NDJSON streaming** with stable schema (v1.0.0) -- every pipeline stage emits sequenced, timestamped events for agent consumption
+- **10-stage composable pipeline**: Ingest, Normalize, VAD, Source Separate, Backend, Accelerate, Align, Punctuate, Diarize, Persist — stages composed dynamically per-request, skipped when unnecessary, budgeted independently, profiled automatically ([`2e9f2e9`](https://github.com/Dicklesworthstone/franken_whisper/commit/2e9f2e97e0ce8f37d71c2ae00eece2904f3fdd19))
+- **Adaptive Bayesian backend routing** with explicit loss matrix, posterior calibration, and deterministic fallback across `whisper.cpp`, `insanely-fast-whisper`, and `whisper-diarization`
+- **Real-time NDJSON streaming** with stable schema (v1.0.0) — every pipeline stage emits sequenced, timestamped events for agent consumption
 - **Cooperative cancellation** via `CancellationToken`-based graceful shutdown with resource cleanup
 - **Per-stage timeout budgets** with automatic latency profiling and tuning recommendations
 - **12 structured `FW-*` error codes** (`FW-IO`, `FW-CMD-TIMEOUT`, `FW-BACKEND-UNAVAILABLE`, etc.) for machine-readable error handling
-- **`#![forbid(unsafe_code)]`** enforced -- zero unsafe blocks across entire codebase
+- **`#![forbid(unsafe_code)]`** enforced — zero unsafe blocks across entire codebase
 - Rust 2024 edition, nightly toolchain, `cargo clippy --all-targets -- -D warnings` enforced
 
 ### Audio Processing
@@ -133,7 +209,7 @@ SHA-256 checksums: [`checksums-sha256.txt`](https://github.com/Dicklesworthstone
 
 ### Speculative Streaming
 
-- **Speculative cancel-correct streaming pipeline** with evidence ledger and file processing -- dual-model fast+quality architecture ([`ad4b54a`](https://github.com/Dicklesworthstone/franken_whisper/commit/ad4b54a39c58a8c5e37e66f4470778d0c48308e6))
+- **Speculative cancel-correct streaming pipeline** with evidence ledger and file processing — dual-model fast+quality architecture ([`ad4b54a`](https://github.com/Dicklesworthstone/franken_whisper/commit/ad4b54a39c58a8c5e37e66f4470778d0c48308e6))
 - TUI speculation display and TTY transcript control frame support ([`847658d`](https://github.com/Dicklesworthstone/franken_whisper/commit/847658d66d1f3364ccc550344b69f6eb7c7be594))
 - Conformance validation extended for speculation events ([`30044ab`](https://github.com/Dicklesworthstone/franken_whisper/commit/30044abd4cdec52cda71be7ea350c5006856560b))
 - Comprehensive integration test suites for speculative pipeline ([`bc2a526`](https://github.com/Dicklesworthstone/franken_whisper/commit/bc2a526e0ba15d7714b602c5f365059c5f6e56a5))
@@ -148,9 +224,9 @@ SHA-256 checksums: [`checksums-sha256.txt`](https://github.com/Dicklesworthstone
 ### Storage and Persistence
 
 - **SQLite-backed run history** with JSONL export/import and SHA-256 replay envelopes
-- **Rollback-safe legacy v1 to v2 runs schema migration** ([`1424a8d`](https://github.com/Dicklesworthstone/franken_whisper/commit/1424a8de48201a640ba86da6da9ff61d71a3bb07))
-- **acceleration_json column** propagated through sync pipeline with fail-closed overwrite semantics ([`9c7df9d`](https://github.com/Dicklesworthstone/franken_whisper/commit/9c7df9d426b03261bd4250bac0f01b9e967f4391))
-- **Cascade-aware overwrite tracking** with overwrite-strict conflict policy for verified child-row replacement ([`4c7cc45`](https://github.com/Dicklesworthstone/franken_whisper/commit/4c7cc4515d47287cee3337f8793b874f2ac93c35), [`e4db512`](https://github.com/Dicklesworthstone/franken_whisper/commit/e4db512b96c3779693e04788566663342f2e3e5d))
+- **Rollback-safe legacy v1 → v2 runs schema migration** ([`1424a8d`](https://github.com/Dicklesworthstone/franken_whisper/commit/1424a8de48201a640ba86da6da9ff61d71a3bb07))
+- **`acceleration_json` column** propagated through sync pipeline with fail-closed overwrite semantics ([`9c7df9d`](https://github.com/Dicklesworthstone/franken_whisper/commit/9c7df9d426b03261bd4250bac0f01b9e967f4391))
+- **Cascade-aware overwrite tracking** with `overwrite-strict` conflict policy for verified child-row replacement ([`4c7cc45`](https://github.com/Dicklesworthstone/franken_whisper/commit/4c7cc4515d47287cee3337f8793b874f2ac93c35), [`e4db512`](https://github.com/Dicklesworthstone/franken_whisper/commit/e4db512b96c3779693e04788566663342f2e3e5d))
 - Migration error messages enriched with contextual details ([`07f24f6`](https://github.com/Dicklesworthstone/franken_whisper/commit/07f24f6afbee2fcd9318f6a178c7252192718f12))
 - MVCC visibility retry in concurrent write test ([`4e713a2`](https://github.com/Dicklesworthstone/franken_whisper/commit/4e713a209906f085466d41b8788b88671b4ae639))
 - Incremental export corrected to use `finished_at` instead of `started_at` ([`8974203`](https://github.com/Dicklesworthstone/franken_whisper/commit/8974203d9b0bf0816a655e60c5a82f5f45657842))
@@ -159,7 +235,7 @@ SHA-256 checksums: [`checksums-sha256.txt`](https://github.com/Dicklesworthstone
 ### Diarization
 
 - **TinyDiarize support**: whisper.cpp's built-in speaker-turn detection without HF token ([`7abe271`](https://github.com/Dicklesworthstone/franken_whisper/commit/7abe27163dfcbd7e146d469c7aba562f531f4dd6))
-- Dead_code annotations removed from pipeline stages alongside TinyDiarize addition ([`7abe271`](https://github.com/Dicklesworthstone/franken_whisper/commit/7abe27163dfcbd7e146d469c7aba562f531f4dd6))
+- `dead_code` annotations removed from pipeline stages alongside TinyDiarize addition ([`7abe271`](https://github.com/Dicklesworthstone/franken_whisper/commit/7abe27163dfcbd7e146d469c7aba562f531f4dd6))
 - Speaker constraints integration tests ([`3412914`](https://github.com/Dicklesworthstone/franken_whisper/commit/3412914ffa6f26b3f20a3f8f85e8d82a1029f89a))
 
 ### Orchestration and Backend Routing
@@ -182,38 +258,52 @@ SHA-256 checksums: [`checksums-sha256.txt`](https://github.com/Dicklesworthstone
 ### Event and Observability
 
 - Event fingerprinting enriched with seq+stage tuples; ingest failure determinism test added ([`acbb240`](https://github.com/Dicklesworthstone/franken_whisper/commit/acbb2406139a8007f0e952c2c253cd4bc7cfd18b))
-- BetaPosterior::new input validation with assertions and tests ([`e4a898f`](https://github.com/Dicklesworthstone/franken_whisper/commit/e4a898f39e6ccf8cab1e17e3980f587cf22bf0d1))
+- `BetaPosterior::new` input validation with assertions and tests ([`e4a898f`](https://github.com/Dicklesworthstone/franken_whisper/commit/e4a898f39e6ccf8cab1e17e3980f587cf22bf0d1))
 - Conformance validation and robot event contract extended for speculation events ([`30044ab`](https://github.com/Dicklesworthstone/franken_whisper/commit/30044abd4cdec52cda71be7ea350c5006856560b))
 
 ### Sync and Replay
 
-- Sync and replay_pack edge-case tests with schema validation ([`8d787f2`](https://github.com/Dicklesworthstone/franken_whisper/commit/8d787f2127921285251c71483236ba0e0735a7c7))
+- Sync and `replay_pack` edge-case tests with schema validation ([`8d787f2`](https://github.com/Dicklesworthstone/franken_whisper/commit/8d787f2127921285251c71483236ba0e0735a7c7))
 
 ### Testing
 
-- 2,939 tests passing at release (3,500+ by HEAD)
+- 2,939 tests passing at release (now ~3,860 unit + integration tests at HEAD)
 - Unit test coverage expanded across orchestrator, error, model, accelerate, robot, and process modules ([`1ed8429`](https://github.com/Dicklesworthstone/franken_whisper/commit/1ed8429b9e751190566b080cc5b294fcfaa29793))
 - Conformance harness with 50ms cross-engine timestamp tolerance and drift detection
 
 ### Infrastructure and Tooling
 
-- Boilerplate and dead code annotations eliminated across cli, conformance, and orchestrator ([`e70b860`](https://github.com/Dicklesworthstone/franken_whisper/commit/e70b86082ed279ca6032142192a3d305b905bfa5))
-- rch quality-gate wrapper added ([`6f5f45e`](https://github.com/Dicklesworthstone/franken_whisper/commit/6f5f45e7ebd3f7010f3fd017729f7f87685824d5))
+- Boilerplate and `dead_code` annotations eliminated across cli, conformance, and orchestrator ([`e70b860`](https://github.com/Dicklesworthstone/franken_whisper/commit/e70b86082ed279ca6032142192a3d305b905bfa5))
+- `rch` quality-gate wrapper added ([`6f5f45e`](https://github.com/Dicklesworthstone/franken_whisper/commit/6f5f45e7ebd3f7010f3fd017729f7f87685824d5))
 - MCP agent mail configuration for Codex, Cursor, and Gemini ([`27b1a98`](https://github.com/Dicklesworthstone/franken_whisper/commit/27b1a9822edd4ae9c2b0253ea3e97c5581c4c997))
-- GitHub social preview image (1280x640, 24px border) ([`098da6c`](https://github.com/Dicklesworthstone/franken_whisper/commit/098da6c89e85dfbc2dd52009e327be67da3d03be))
+- GitHub social preview image (1280×640, 24px border) ([`098da6c`](https://github.com/Dicklesworthstone/franken_whisper/commit/098da6c89e85dfbc2dd52009e327be67da3d03be))
 
 ### Initial Commit
 
-- [`2e9f2e9`](https://github.com/Dicklesworthstone/franken_whisper/commit/2e9f2e97e0ce8f37d71c2ae00eece2904f3fdd19) -- 2026-02-22 -- franken_whisper ASR orchestration stack foundation
+- [`2e9f2e9`](https://github.com/Dicklesworthstone/franken_whisper/commit/2e9f2e97e0ce8f37d71c2ae00eece2904f3fdd19) — 2026-02-22 — franken_whisper ASR orchestration stack foundation
 
 ---
 
 <!-- agent-metadata
   repo: Dicklesworthstone/franken_whisper
-  generated: 2026-03-21
-  commits_analyzed: 131
+  generated: 2026-05-17
+  commits_analyzed: 203
+  commits_since_v0.1.0: 144
   tags: v0.1.0 (lightweight, on 6a51618)
   releases: v0.1.0 (GitHub Release, published 2026-03-04)
+  schema_version_at_HEAD: 3
+  workstreams_added_since_2026-03-21:
+    - release_pipeline (dist.yml + release-automation.yml)
+    - crates_io_migration (asupersync/franken-kernel/evidence/decision 0.3.1)
+    - conformance_native_rollout_governance (c72eed3, NativeEngineRolloutStage)
+    - word_level_timestamps + cancellation_threading (f1cbd31)
+    - adaptive_router_calibration (ef80eb8, ed91ddd)
+    - metamorphic_test_suites (audio + speculation + accelerate)
+    - health_probe_diagnostics_hardening
+    - sync_lock_pid_liveness (bd-3jfj/bd-pvol/bd-aijz/bd-7xh8/bd-ht0i/bd-qxf6/bd-uczx)
+    - ffmpeg_bundle_stdin_hardening (bd-wk8p/bd-o8fo/bd-g7b2)
+    - secrets_redaction_in_logs
+    - structured_run_error_for_invalid_robot_requests
 -->
 
 [Unreleased]: https://github.com/Dicklesworthstone/franken_whisper/compare/v0.1.0...main
