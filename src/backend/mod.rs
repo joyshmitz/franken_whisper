@@ -1919,6 +1919,51 @@ fn auto_priority(diarize: bool) -> &'static [BackendKind] {
     }
 }
 
+/// Resolve a request's backend selection down to a single concrete kind
+/// **once**, without performing per-window adaptive routing.
+///
+/// Used by the speculative streaming dispatch path, where invoking
+/// `backend::execute(BackendKind::Auto)` separately for every window would
+/// risk picking different backends per window and producing a mixed-engine
+/// transcript with confusing reporting. With this helper, the speculative
+/// path resolves `Auto` once via the static priority list, then forces that
+/// single kind onto every per-window invocation so the run is
+/// engine-consistent end to end.
+///
+/// Returns the resolved kind on success, or [`FwError::BackendUnavailable`]
+/// if no candidate backend is currently available for the request.
+pub(crate) fn resolve_static_backend(request: &TranscribeRequest) -> FwResult<BackendKind> {
+    match request.backend {
+        BackendKind::Auto => {
+            let mut attempts: Vec<String> = Vec::new();
+            for candidate in auto_priority(request.diarize) {
+                let readiness = readiness_for(*candidate, request);
+                if readiness.available {
+                    return Ok(*candidate);
+                }
+                let reason = readiness.reason.unwrap_or_else(|| "unavailable".to_owned());
+                attempts.push(format!("{}(missing: {})", candidate.as_str(), reason));
+            }
+            Err(FwError::BackendUnavailable(format!(
+                "no backend available for request (auto routing); attempts: {}",
+                attempts.join(", ")
+            )))
+        }
+        explicit => {
+            let readiness = readiness_for(explicit, request);
+            if readiness.available {
+                Ok(explicit)
+            } else {
+                Err(FwError::BackendUnavailable(format!(
+                    "selected backend `{}` is unavailable: {}",
+                    explicit.as_str(),
+                    readiness.reason.unwrap_or_else(|| "unknown".to_owned())
+                )))
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Health probing & capability reporting
 // ---------------------------------------------------------------------------

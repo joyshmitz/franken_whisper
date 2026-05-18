@@ -2028,6 +2028,25 @@ async fn execute_backend(
 /// become the run's final transcript; downstream stages (Accelerate, Align,
 /// Punctuate, Diarize, Persist) operate on the merged transcript exactly as
 /// they would for a single-backend execution.
+///
+/// Notes on the design:
+///
+/// * **Sticky backend.** The backend kind is resolved **once** upfront via
+///   [`backend::resolve_static_backend`]. When the user passes `--backend
+///   auto`, this picks the first-available kind from the static priority list
+///   and forces it onto every per-window invocation so the run is
+///   engine-consistent end to end (no risk of windows being served by
+///   different engines and producing a mixed-engine merged transcript).
+/// * **Partial event preservation.** When the speculation pipeline fails
+///   mid-run, partial `transcript.partial` / `transcript.confirm` /
+///   `transcript.retract` / `transcript.correct` events that did make it
+///   into the pipeline's internal log are still forwarded to the run-wide
+///   NDJSON log before the terminal `backend.error` event, so observers see
+///   the run's partial progress rather than only the failure code.
+/// * **Replay envelope.** The `BackendRuntimeMetadata` of the resolved kind
+///   is recorded in `inter.backend_runtime`, and the SHA-256 of the
+///   serialized merged segments is recorded in `inter.backend_output_sha256`
+///   so the run's `ReplayEnvelope` is populated even for speculative runs.
 async fn execute_backend_speculative(
     pcx: &mut PipelineCx,
     log: &mut EventLog,
@@ -2044,6 +2063,12 @@ async fn execute_backend_speculative(
             "execute_backend_speculative invoked without BackendParams.speculative".to_owned(),
         )
     })?;
+
+    // Resolve the speculative run's backend ONCE so every window invocation
+    // talks to the same engine (per design note above). Failures here surface
+    // before any backend.start event is emitted so the stream layout matches
+    // the pre-speculative dispatch path.
+    let resolved_backend = backend::resolve_static_backend(request)?;
 
     // Convert the serde-friendly request shape into the execution-shape config.
     let spec_config = crate::streaming::SpeculativeConfig {
@@ -2070,6 +2095,7 @@ async fn execute_backend_speculative(
         "executing backend (speculative streaming)",
         json!({
             "requested_backend": request.backend.as_str(),
+            "resolved_backend": resolved_backend.as_str(),
             "budget_ms": stage_budgets.backend_ms,
             "speculative": {
                 "fast_model": spec_config.fast_model_name,
@@ -2086,91 +2112,146 @@ async fn execute_backend_speculative(
     let cancel_token = pcx.stage_token(backend_budget_ms); // ubs:ignore — token, not a secret
     let normalized_wav = normalized_wav.clone();
     let backend_dir = run_tmp_dir.path().to_path_buf();
-    let backend_kind = request.backend;
     let base_request = request.clone();
     let run_id = log.run_id.clone();
     let per_invocation_timeout = budget_duration(backend_budget_ms);
 
-    let execution = run_stage_with_budget("backend", backend_budget_ms, move || {
-        let tok = cancel_token;
-        let mut pipeline =
-            crate::streaming::SpeculativeStreamingPipeline::new(spec_config.clone(), run_id);
-        let fast_model = spec_config.fast_model_name.clone();
-        let quality_model = spec_config.quality_model_name.clone();
+    /// Internal carry value: the speculation pipeline's inner result is
+    /// reified as a `Result` so the wrapping `run_stage_with_budget` closure
+    /// can always succeed with the partial events / stats / merged segments,
+    /// regardless of whether the pipeline itself errored mid-run.
+    type SpecOutcome = (
+        FwResult<crate::model::TranscriptionResult>,
+        Vec<crate::model::RunEvent>,
+        crate::speculation::SpeculationStats,
+        Vec<crate::model::TranscriptionSegment>,
+    );
 
-        let result = pipeline.process_file_with_models(
-            &normalized_wav,
-            || tok.checkpoint(),
-            |audio_path, start_ms, end_ms| {
-                // Slice the normalized WAV at the requested window boundaries.
-                let slice_path = crate::audio::slice_pcm_wav_to_temp_path(
-                    audio_path,
-                    &backend_dir,
-                    start_ms,
-                    end_ms,
-                )?;
-                // Build per-lane requests by overriding the model name. All
-                // other knobs (backend kind, language, diarize, decoding) are
-                // inherited from the user's TranscribeRequest so the lanes
-                // see identical conditions modulo the model selection.
-                let mut fast_req = base_request.clone();
-                fast_req.model = Some(fast_model.clone());
-                let mut quality_req = base_request.clone();
-                quality_req.model = Some(quality_model.clone());
+    let outcome: FwResult<SpecOutcome> =
+        run_stage_with_budget("backend", backend_budget_ms, move || {
+            let tok = cancel_token;
+            let mut pipeline =
+                crate::streaming::SpeculativeStreamingPipeline::new(spec_config.clone(), run_id);
+            let fast_model = spec_config.fast_model_name.clone();
+            let quality_model = spec_config.quality_model_name.clone();
 
-                let fast_execution = crate::backend::execute(
-                    &fast_req,
-                    &slice_path,
-                    &backend_dir,
-                    per_invocation_timeout,
-                    Some(&tok),
-                )?;
-                tok.checkpoint()?;
-                let quality_execution = crate::backend::execute(
-                    &quality_req,
-                    &slice_path,
-                    &backend_dir,
-                    per_invocation_timeout,
-                    Some(&tok),
-                )?;
-                // The slice file is no longer needed after both lanes finish.
-                let _ = std::fs::remove_file(&slice_path);
-                Ok((
-                    fast_execution.result.segments,
-                    quality_execution.result.segments,
-                ))
-            },
-        );
+            let inner_result = pipeline.process_file_with_models(
+                &normalized_wav,
+                || tok.checkpoint(),
+                |audio_path, start_ms, end_ms| {
+                    let slice_path = crate::audio::slice_pcm_wav_to_temp_path(
+                        audio_path,
+                        &backend_dir,
+                        start_ms,
+                        end_ms,
+                    )?;
+                    // Build per-lane requests by overriding the model name AND
+                    // forcing the backend kind to the resolved sticky value.
+                    let mut fast_req = base_request.clone();
+                    fast_req.backend = resolved_backend;
+                    fast_req.model = Some(fast_model.clone());
+                    let mut quality_req = base_request.clone();
+                    quality_req.backend = resolved_backend;
+                    quality_req.model = Some(quality_model.clone());
 
-        // Whether the pipeline succeeded or failed mid-window, forward any
-        // events it managed to emit so partial NDJSON traces remain useful.
-        let emitted = pipeline.events().to_vec();
-        let stats = pipeline.stats();
-        let merged = pipeline.merged_transcript();
-        result.map(|partial_result| (partial_result, emitted, stats, merged))
-    })
-    .await;
+                    let fast_execution = crate::backend::execute(
+                        &fast_req,
+                        &slice_path,
+                        &backend_dir,
+                        per_invocation_timeout,
+                        Some(&tok),
+                    );
+                    let fast_segments = match fast_execution {
+                        Ok(execution) => execution.result.segments,
+                        Err(error) => {
+                            let _ = std::fs::remove_file(&slice_path);
+                            return Err(error);
+                        }
+                    };
+                    if let Err(error) = tok.checkpoint() {
+                        let _ = std::fs::remove_file(&slice_path);
+                        return Err(error);
+                    }
+                    let quality_execution = crate::backend::execute(
+                        &quality_req,
+                        &slice_path,
+                        &backend_dir,
+                        per_invocation_timeout,
+                        Some(&tok),
+                    );
+                    let quality_segments = match quality_execution {
+                        Ok(execution) => execution.result.segments,
+                        Err(error) => {
+                            let _ = std::fs::remove_file(&slice_path);
+                            return Err(error);
+                        }
+                    };
+                    let _ = std::fs::remove_file(&slice_path);
+                    Ok((fast_segments, quality_segments))
+                },
+            );
 
-    match execution {
-        Ok((spec_result, events, stats, merged)) => {
-            for event in events {
-                log.push(&event.stage, &event.code, &event.message, event.payload);
-            }
-            // Use the speculation pipeline's merged transcript and resulting
-            // language hint; downstream stages will receive this exactly as if
-            // a single-backend invocation had produced it.
+            // Always carry partial events + stats + merged segments out, so
+            // the outer handler can forward speculation events to the NDJSON
+            // log regardless of whether the pipeline succeeded or failed.
+            let emitted = pipeline.events().to_vec();
+            let stats = pipeline.stats();
+            let merged = pipeline.merged_transcript();
+            Ok((inner_result, emitted, stats, merged))
+        })
+        .await;
+
+    let (inner_result, emitted_events, stats, merged) = match outcome {
+        Ok(value) => value,
+        Err(error) => {
+            // `run_stage_with_budget` itself failed (stage-budget timeout, panic,
+            // …). No events to forward; just emit the terminal backend.* event.
+            let code = stage_failure_code("backend", &error);
+            log.push(
+                "backend",
+                &code,
+                stage_failure_message(&error, "speculative backend execution failed"),
+                json!({
+                    "error": error.to_string(),
+                    "budget_ms": stage_budgets.backend_ms,
+                    "execution_mode": "speculative_streaming",
+                    "resolved_backend": resolved_backend.as_str(),
+                }),
+            );
+            return Err(error);
+        }
+    };
+
+    // Forward any speculation events that the pipeline produced before
+    // returning (success OR failure). These are the partial transcripts,
+    // confirmations, retractions, corrections, and the aggregate stats
+    // event the speculation pipeline emits internally.
+    for event in emitted_events {
+        log.push(&event.stage, &event.code, &event.message, event.payload);
+    }
+
+    match inner_result {
+        Ok(spec_result) => {
             let language = spec_result.language.or_else(|| Some("en".to_owned()));
             let transcript = merged
                 .iter()
                 .map(|seg| seg.text.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
+
+            // Record backend identity/version so the run's ReplayEnvelope is
+            // populated even for speculative runs. Speculative streams are
+            // bridge-backed today (native engines don't yet participate in
+            // dual-model dispatch).
+            let backend_runtime = backend::runtime_metadata(resolved_backend);
+            let output_payload_hash = sha256_segments(&merged);
+
             log.push(
                 "backend",
                 "backend.ok",
                 "speculative streaming backend completed",
                 json!({
-                    "backend": backend_kind.as_str(),
+                    "backend": resolved_backend.as_str(),
                     "segments_emitted": merged.len(),
                     "windows_processed": stats.windows_processed,
                     "confirmations_emitted": stats.confirmations_emitted,
@@ -2179,11 +2260,15 @@ async fn execute_backend_speculative(
                     "execution_mode": "speculative_streaming",
                     "native_rollout_stage": serde_json::Value::Null,
                     "native_fallback_error": serde_json::Value::Null,
+                    "backend_identity": backend_runtime.identity,
+                    "backend_version": backend_runtime.version,
                 }),
             );
 
+            inter.backend_runtime = Some(backend_runtime);
+            inter.backend_output_sha256 = output_payload_hash;
             inter.result = Some(crate::model::TranscriptionResult {
-                backend: backend_kind,
+                backend: resolved_backend,
                 transcript,
                 language,
                 segments: merged,
@@ -2213,11 +2298,22 @@ async fn execute_backend_speculative(
                     "error": error.to_string(),
                     "budget_ms": stage_budgets.backend_ms,
                     "execution_mode": "speculative_streaming",
+                    "resolved_backend": resolved_backend.as_str(),
+                    "windows_processed_before_failure": stats.windows_processed,
                 }),
             );
             Err(error)
         }
     }
+}
+
+/// SHA-256 hex digest over a deterministic serialization of the speculative
+/// run's merged segments. Used as the `output_payload_hash` for replay
+/// envelopes when the regular bridge-output-hash path is bypassed (speculative
+/// streaming has no single raw backend JSON to hash).
+fn sha256_segments(segments: &[crate::model::TranscriptionSegment]) -> Option<String> {
+    let serialized = serde_json::to_vec(segments).ok()?;
+    Some(sha256_bytes_hex(&serialized))
 }
 
 async fn execute_accelerate(

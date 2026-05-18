@@ -3685,7 +3685,9 @@ fn speculative_cli_dispatch_emits_partial_confirm_and_stats_events() {
         "speculative pipeline should land on run_complete (got {last:?})"
     );
 
-    // The speculative backend stage MUST advertise execution_mode=speculative_streaming.
+    // The speculative backend stage MUST advertise execution_mode=speculative_streaming
+    // and report the sticky resolved backend (so callers don't see "auto" leaking
+    // through when the actual engine choice has been fixed for the run).
     let backend_ok = events
         .iter()
         .find(|event| event["event"] == "stage" && event["code"] == "backend.ok")
@@ -3693,6 +3695,24 @@ fn speculative_cli_dispatch_emits_partial_confirm_and_stats_events() {
     assert_eq!(
         backend_ok["payload"]["execution_mode"], "speculative_streaming",
         "backend.ok must mark execution_mode=speculative_streaming when --speculative was set"
+    );
+    assert_eq!(
+        backend_ok["payload"]["backend"], "whisper_cpp",
+        "backend.ok must report the resolved sticky backend (whisper_cpp), not e.g. \"auto\""
+    );
+    // bd-spec-cli.replay: ReplayEnvelope-feeding fields must be present so the
+    // run-wide ReplayEnvelope is fully populated even for speculative runs.
+    assert!(
+        backend_ok["payload"]["backend_identity"].is_string(),
+        "backend.ok must carry a string backend_identity for the ReplayEnvelope"
+    );
+    let backend_start = events
+        .iter()
+        .find(|event| event["event"] == "stage" && event["code"] == "backend.start")
+        .expect("backend.start must be emitted");
+    assert_eq!(
+        backend_start["payload"]["resolved_backend"], "whisper_cpp",
+        "backend.start must announce the sticky-resolved backend kind"
     );
 
     // The speculation pipeline MUST emit at least one transcript.partial event
