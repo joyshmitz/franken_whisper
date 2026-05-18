@@ -787,6 +787,78 @@ fn hound_error_to_fw(error: hound::Error) -> FwError {
     FwError::Io(std::io::Error::other(error.to_string()))
 }
 
+/// Slice a normalized WAV file at the byte-exact sample range corresponding
+/// to `[start_ms, end_ms)` and write the result to a new file in `dest_dir`.
+///
+/// Returns the path of the slice. The source file must be a PCM WAV
+/// (integer samples). The slice preserves the source's sample rate, channel
+/// count, and bit depth so the slice is interchangeable with the source
+/// for downstream backends that consume 16 kHz mono PCM.
+///
+/// Bounds are clamped: `start_ms` is clamped to `[0, total_duration]`,
+/// `end_ms` is clamped to `[start_ms, total_duration]`. A request whose
+/// clamped range is empty (`start_ms == end_ms`) still writes a valid
+/// (zero-length) WAV so callers don't need to special-case it.
+///
+/// Used by [`crate::orchestrator`] to feed per-window audio slices into
+/// the speculative streaming pipeline.
+pub fn slice_pcm_wav_to_temp_path(
+    source: &Path,
+    dest_dir: &Path,
+    start_ms: u64,
+    end_ms: u64,
+) -> FwResult<PathBuf> {
+    let reader = hound::WavReader::open(source).map_err(hound_error_to_fw)?;
+    let spec = reader.spec();
+    if spec.sample_format != hound::SampleFormat::Int {
+        return Err(FwError::Unsupported(format!(
+            "slice_pcm_wav_to_temp_path: source `{}` is not integer PCM (sample_format={:?})",
+            source.display(),
+            spec.sample_format,
+        )));
+    }
+    let samples: Vec<i32> = reader
+        .into_samples::<i32>()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(hound_error_to_fw)?;
+
+    let channels = u64::from(spec.channels.max(1));
+    let sample_rate = u64::from(spec.sample_rate.max(1));
+    let total_frames = (samples.len() as u64) / channels;
+    let total_duration_ms = (total_frames * 1000) / sample_rate;
+
+    let clamped_start = start_ms.min(total_duration_ms);
+    let clamped_end = end_ms.max(clamped_start).min(total_duration_ms);
+    let start_frame = (clamped_start * sample_rate) / 1000;
+    let end_frame = (clamped_end * sample_rate) / 1000;
+    let start_sample = (start_frame * channels) as usize;
+    let end_sample = ((end_frame * channels) as usize).min(samples.len());
+    let slice = &samples[start_sample..end_sample];
+
+    let slice_path = dest_dir.join(format!("slice_{clamped_start}_{clamped_end}.wav"));
+    let mut writer = hound::WavWriter::create(&slice_path, spec).map_err(hound_error_to_fw)?;
+    let max_value: i64 = match spec.bits_per_sample {
+        8 => i64::from(i8::MAX),
+        16 => i64::from(i16::MAX),
+        24 => (1_i64 << 23) - 1,
+        32 => i64::from(i32::MAX),
+        other => {
+            return Err(FwError::Unsupported(format!(
+                "slice_pcm_wav_to_temp_path: unsupported bits_per_sample={other}",
+            )));
+        }
+    };
+    let min_value: i64 = -max_value - 1;
+    for &sample in slice {
+        let clamped = i64::from(sample).clamp(min_value, max_value);
+        writer
+            .write_sample(clamped as i32)
+            .map_err(hound_error_to_fw)?;
+    }
+    writer.finalize().map_err(hound_error_to_fw)?;
+    Ok(slice_path)
+}
+
 pub fn probe_duration_seconds(input: &Path) -> Option<f64> {
     probe_duration_seconds_with_timeout(input, ffprobe_timeout())
 }
@@ -1133,6 +1205,116 @@ mod tests {
             std::time::Duration::from_secs(5),
         );
         assert!(result.is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // slice_pcm_wav_to_temp_path: feeds the speculative streaming dispatch
+    // -------------------------------------------------------------------
+
+    /// Helper: write a 16 kHz mono PCM WAV whose samples are an ascending
+    /// counter so each window can verify it received the expected slice.
+    fn write_counter_wav(path: &std::path::Path, total_samples: usize, sample_rate: u32) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create wav");
+        for idx in 0..total_samples {
+            // Wrap modulo i16::MAX so the counter fits inside the integer range.
+            let value = (idx as i32 % i32::from(i16::MAX)) as i16;
+            writer.write_sample(value).expect("write sample");
+        }
+        writer.finalize().expect("finalize wav");
+    }
+
+    #[test]
+    fn slice_pcm_wav_to_temp_path_preserves_sample_range_and_spec() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.wav");
+        // 16 kHz × 1 s = 16,000 samples.
+        write_counter_wav(&source, 16_000, 16_000);
+
+        // Slice the middle 500 ms: [250 ms, 750 ms).
+        let slice =
+            super::slice_pcm_wav_to_temp_path(&source, dir.path(), 250, 750).expect("slice");
+        assert!(slice.exists());
+
+        let reader = hound::WavReader::open(&slice).expect("open slice");
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.sample_rate, 16_000);
+        assert_eq!(spec.bits_per_sample, 16);
+        let samples: Vec<i16> = reader
+            .into_samples::<i16>()
+            .collect::<Result<_, _>>()
+            .expect("read samples");
+
+        // 250 ms .. 750 ms at 16 kHz = samples 4000..12000 (8000 samples).
+        assert_eq!(samples.len(), 8_000);
+        // First slice sample must equal source sample at offset 4000.
+        assert_eq!(samples[0], 4_000_i16);
+        // Last slice sample must equal source sample at offset 11999.
+        assert_eq!(samples[samples.len() - 1], 11_999_i16);
+    }
+
+    #[test]
+    fn slice_pcm_wav_to_temp_path_clamps_oob_range() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.wav");
+        // 16 kHz × 0.5 s = 8,000 samples → 500 ms total.
+        write_counter_wav(&source, 8_000, 16_000);
+
+        // Request a slice past the end of the audio: [400 ms, 9_000 ms).
+        let slice = super::slice_pcm_wav_to_temp_path(&source, dir.path(), 400, 9_000)
+            .expect("slice (clamped)");
+        let reader = hound::WavReader::open(&slice).expect("open slice");
+        let samples: Vec<i16> = reader
+            .into_samples::<i16>()
+            .collect::<Result<_, _>>()
+            .expect("read samples");
+        // Clamped range is [400 ms, 500 ms) = 100 ms at 16 kHz = 1600 samples.
+        assert_eq!(samples.len(), 1_600);
+        // First sample at offset 6400 (400 ms × 16 samples/ms).
+        assert_eq!(samples[0], 6_400_i16);
+    }
+
+    #[test]
+    fn slice_pcm_wav_to_temp_path_empty_range_writes_zero_length_wav() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.wav");
+        write_counter_wav(&source, 4_000, 16_000);
+
+        // start == end: empty slice.
+        let slice =
+            super::slice_pcm_wav_to_temp_path(&source, dir.path(), 100, 100).expect("empty slice");
+        let reader = hound::WavReader::open(&slice).expect("open slice");
+        let samples: Vec<i16> = reader
+            .into_samples::<i16>()
+            .collect::<Result<_, _>>()
+            .expect("read samples");
+        assert_eq!(samples.len(), 0);
+    }
+
+    #[test]
+    fn slice_pcm_wav_to_temp_path_rejects_float_wav() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("float.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&source, spec).expect("create float wav");
+        for _ in 0..1_000 {
+            writer.write_sample(0.0_f32).expect("write");
+        }
+        writer.finalize().expect("finalize");
+
+        let result = super::slice_pcm_wav_to_temp_path(&source, dir.path(), 0, 50);
+        assert!(matches!(result, Err(crate::FwError::Unsupported(_))));
     }
 
     #[test]

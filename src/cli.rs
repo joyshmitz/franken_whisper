@@ -661,12 +661,6 @@ pub enum TtyAudioControlCommand {
 
 impl TranscribeArgs {
     pub fn to_request(&self) -> FwResult<TranscribeRequest> {
-        if self.speculative {
-            return Err(FwError::InvalidRequest(
-                "--speculative streaming is currently a library-only feature and not yet integrated into the CLI orchestrator".to_owned(),
-            ));
-        }
-
         let mut mode_count = 0usize;
         if self.input.is_some() {
             mode_count += 1;
@@ -831,6 +825,7 @@ impl TranscribeArgs {
             alignment: None,
             punctuation: None,
             source_separation: None,
+            speculative: self.to_speculative_request(),
         };
 
         Ok(TranscribeRequest {
@@ -891,6 +886,37 @@ impl TranscribeArgs {
             },
             adaptive: !self.no_adaptive,
             emit_events: true,
+        })
+    }
+
+    /// Build a serde-friendly [`SpeculativeRequest`] for storage in
+    /// `BackendParams.speculative`. Returns `None` if `--speculative` is not set.
+    ///
+    /// The orchestrator converts this into a
+    /// [`crate::streaming::SpeculativeConfig`] at dispatch time, keeping
+    /// `model.rs` free of any dependency on `streaming.rs`.
+    #[must_use]
+    pub fn to_speculative_request(&self) -> Option<crate::model::SpeculativeRequest> {
+        if !self.speculative {
+            return None;
+        }
+        let window_size_ms = self.speculative_window_ms.unwrap_or(3000);
+        let raw_overlap_ms = self.speculative_overlap_ms.unwrap_or(500);
+        let overlap_ms = raw_overlap_ms.min(window_size_ms.saturating_sub(1));
+        Some(crate::model::SpeculativeRequest {
+            window_size_ms,
+            overlap_ms,
+            fast_model_name: self
+                .fast_model
+                .clone()
+                .unwrap_or_else(|| "auto-fast".to_owned()),
+            quality_model_name: self
+                .quality_model
+                .clone()
+                .unwrap_or_else(|| "auto-quality".to_owned()),
+            max_wer_tolerance: self.correction_tolerance_wer,
+            adaptive: !self.no_adaptive,
+            always_correct: self.always_correct,
         })
     }
 }
@@ -2295,6 +2321,108 @@ mod tests {
         assert_eq!(config.fast_model_name, "auto-fast");
         assert_eq!(config.quality_model_name, "auto-quality");
         assert!(config.emit_events);
+    }
+
+    // ---------------------------------------------------------------
+    // Speculative CLI integration: to_request() now succeeds with
+    // --speculative and propagates a SpeculativeRequest through
+    // BackendParams instead of bailing with FW-INVALID-REQUEST.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn to_request_with_speculative_flag_populates_backend_params() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        args.fast_model = Some("whisper-tiny".to_owned());
+        args.quality_model = Some("whisper-large".to_owned());
+        args.speculative_window_ms = Some(2500);
+        args.speculative_overlap_ms = Some(400);
+        args.correction_tolerance_wer = Some(0.2);
+        args.no_adaptive = false;
+        args.always_correct = false;
+
+        let request = args.to_request().expect("speculative request should build");
+        let spec = request
+            .backend_params
+            .speculative
+            .as_ref()
+            .expect("backend_params.speculative should be populated when --speculative is set");
+        assert_eq!(spec.fast_model_name, "whisper-tiny");
+        assert_eq!(spec.quality_model_name, "whisper-large");
+        assert_eq!(spec.window_size_ms, 2500);
+        assert_eq!(spec.overlap_ms, 400);
+        assert_eq!(spec.max_wer_tolerance, Some(0.2));
+        assert!(spec.adaptive);
+        assert!(!spec.always_correct);
+    }
+
+    #[test]
+    fn to_request_without_speculative_flag_leaves_backend_params_none() {
+        let args = minimal_args();
+        let request = args
+            .to_request()
+            .expect("non-speculative request should build");
+        assert!(
+            request.backend_params.speculative.is_none(),
+            "BackendParams.speculative must be None when --speculative is not set"
+        );
+    }
+
+    #[test]
+    fn to_request_speculative_overlap_is_clamped_below_window_size() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        // overlap > window: must clamp to window - 1 (matches to_speculative_config behavior).
+        args.speculative_window_ms = Some(1_000);
+        args.speculative_overlap_ms = Some(5_000);
+        let request = args.to_request().expect("should build");
+        let spec = request.backend_params.speculative.as_ref().expect("set");
+        assert_eq!(spec.window_size_ms, 1_000);
+        assert_eq!(spec.overlap_ms, 999);
+    }
+
+    #[test]
+    fn to_request_speculative_always_correct_propagates_to_request() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        args.always_correct = true;
+        args.no_adaptive = true;
+        let request = args.to_request().expect("should build");
+        let spec = request.backend_params.speculative.as_ref().expect("set");
+        assert!(spec.always_correct);
+        assert!(!spec.adaptive);
+    }
+
+    #[test]
+    fn to_speculative_request_matches_to_speculative_config_for_user_visible_knobs() {
+        let mut args = minimal_args();
+        args.speculative = true;
+        args.fast_model = Some("alpha".to_owned());
+        args.quality_model = Some("omega".to_owned());
+        args.speculative_window_ms = Some(4_321);
+        args.speculative_overlap_ms = Some(123);
+        args.correction_tolerance_wer = Some(0.07);
+        args.no_adaptive = false;
+        args.always_correct = false;
+
+        let request_form = args.to_speculative_request().expect("request form");
+        let config_form = args.to_speculative_config().expect("config form");
+        assert_eq!(request_form.fast_model_name, config_form.fast_model_name);
+        assert_eq!(
+            request_form.quality_model_name,
+            config_form.quality_model_name
+        );
+        assert_eq!(request_form.window_size_ms, config_form.window_size_ms);
+        assert_eq!(request_form.overlap_ms, config_form.overlap_ms);
+        assert_eq!(
+            request_form.max_wer_tolerance,
+            Some(config_form.tolerance.max_wer)
+        );
+        assert_eq!(request_form.adaptive, config_form.adaptive);
+        assert_eq!(
+            request_form.always_correct,
+            config_form.tolerance.always_correct
+        );
     }
 
     #[test]

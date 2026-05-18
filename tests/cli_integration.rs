@@ -3595,3 +3595,245 @@ fn robot_routing_history_filters_by_run_id() {
         .expect("load missing");
     assert!(missing.is_none(), "non-existent run_id should return None");
 }
+
+// ---------------------------------------------------------------------------
+// Speculative CLI integration: end-to-end exercise of the dispatch path that
+// routes `--speculative` requests through `SpeculativeStreamingPipeline` in
+// `execute_backend_speculative()`. The bridged whisper.cpp invocation is
+// stubbed to return canned segments so the test stays hermetic and fast.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn speculative_cli_dispatch_emits_partial_confirm_and_stats_events() {
+    use std::fs;
+
+    // Skip if ffmpeg/ffprobe aren't available — the speculation pipeline calls
+    // `probe_duration_seconds_with_timeout` which shells out to ffprobe, and the
+    // normalize stage uses ffmpeg as a fallback (even though our input is
+    // already 16 kHz mono and should bypass it).
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let state_root = dir.path().join("state");
+    fs::create_dir_all(&state_root).expect("state root");
+
+    // Pre-normalized 16 kHz mono WAV so the Normalize stage detects passthrough.
+    let input_wav = dir.path().join("speculative_input.wav");
+    generate_voiced_wav(&input_wav);
+
+    // Stub whisper.cpp: writes a canned JSON-encoded transcript for each invocation.
+    // The speculative pipeline calls this twice per window (fast lane, then quality
+    // lane); both invocations write to the work directory and the bridge reads the
+    // most recent one for each lane.
+    let bin_dir = dir.path().join("bin");
+    let stub_bin = write_whisper_cpp_stub_binary(&bin_dir);
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_franken_whisper"))
+        .args([
+            "robot",
+            "run",
+            "--input",
+            input_wav.to_str().expect("utf-8 path"),
+            "--backend",
+            "whisper_cpp",
+            "--no-persist",
+            // Single window so the stub only fires twice (fast + quality).
+            "--speculative",
+            "--fast-model",
+            "tiny",
+            "--quality-model",
+            "large",
+            "--speculative-window-ms",
+            "10000",
+            "--speculative-overlap-ms",
+            "0",
+        ])
+        .env("FRANKEN_WHISPER_STATE_DIR", &state_root)
+        .env("FRANKEN_WHISPER_WHISPER_CPP_BIN", &stub_bin)
+        .output()
+        .expect("robot transcribe should execute");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf-8");
+    assert!(
+        output.status.success(),
+        "speculative dispatch should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.is_empty() && trimmed.starts_with('{')
+        })
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert!(
+        events.len() >= 5,
+        "expected run_start + several stage lines + run_complete, got {} events",
+        events.len()
+    );
+
+    // run_start MUST be first; run_complete MUST be last.
+    assert_eq!(events.first().expect("first")["event"], "run_start");
+    let last = events.last().expect("last");
+    assert_eq!(
+        last["event"], "run_complete",
+        "speculative pipeline should land on run_complete (got {last:?})"
+    );
+
+    // The speculative backend stage MUST advertise execution_mode=speculative_streaming.
+    let backend_ok = events
+        .iter()
+        .find(|event| event["event"] == "stage" && event["code"] == "backend.ok")
+        .expect("backend.ok must be emitted");
+    assert_eq!(
+        backend_ok["payload"]["execution_mode"], "speculative_streaming",
+        "backend.ok must mark execution_mode=speculative_streaming when --speculative was set"
+    );
+
+    // The speculation pipeline MUST emit at least one transcript.partial event
+    // (the fast-lane result) and at least one terminal confirmation or correction
+    // (transcript.confirm OR transcript.correct, depending on drift). With the
+    // whisper.cpp stub returning identical text for both lanes, drift is zero and
+    // we expect a confirm.
+    let partial_count = events
+        .iter()
+        .filter(|event| event["code"] == "transcript.partial")
+        .count();
+    assert!(
+        partial_count >= 1,
+        "expected at least one transcript.partial, got 0 (events: {})",
+        events
+            .iter()
+            .map(|event| event["code"].as_str().unwrap_or("?"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let resolved_count = events
+        .iter()
+        .filter(|event| {
+            event["code"] == "transcript.confirm" || event["code"] == "transcript.correct"
+        })
+        .count();
+    assert!(
+        resolved_count >= 1,
+        "expected at least one transcript.confirm or transcript.correct, got 0"
+    );
+
+    // The aggregate speculation_stats event MUST be emitted at the end of the
+    // speculative backend phase with the contract-required field set.
+    let stats = events
+        .iter()
+        .find(|event| event["code"] == "transcript.speculation_stats")
+        .expect("speculation_stats must be emitted at end of speculative backend phase");
+    let stats_payload = &stats["payload"];
+    for field in [
+        "windows_processed",
+        "corrections_emitted",
+        "confirmations_emitted",
+        "correction_rate",
+        "current_window_size_ms",
+        "mean_drift_wer",
+    ] {
+        assert!(
+            stats_payload.get(field).is_some(),
+            "speculation_stats payload missing required field `{field}`"
+        );
+    }
+    assert_eq!(
+        stats_payload["windows_processed"], 1,
+        "single-window run should report exactly one window processed"
+    );
+
+    // The final transcript must reflect the merged segments from the
+    // speculation pipeline (the stub emits "stub transcript").
+    assert_eq!(
+        last["transcript"], "stub transcript",
+        "merged transcript should equal the stub's canned text"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn speculative_cli_without_flag_uses_single_backend_dispatch() {
+    // Sanity counterpart: without `--speculative`, the same input should NOT
+    // emit any transcript.partial / speculation_stats events. This guards
+    // against future regressions in the dispatch branch that would otherwise
+    // silently route every transcription through the speculative path.
+
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let state_root = dir.path().join("state");
+    std::fs::create_dir_all(&state_root).expect("state root");
+
+    let input_wav = dir.path().join("plain_input.wav");
+    generate_voiced_wav(&input_wav);
+
+    let bin_dir = dir.path().join("bin");
+    let stub_bin = write_whisper_cpp_stub_binary(&bin_dir);
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_franken_whisper"))
+        .args([
+            "robot",
+            "run",
+            "--input",
+            input_wav.to_str().expect("utf-8"),
+            "--backend",
+            "whisper_cpp",
+            "--no-persist",
+        ])
+        .env("FRANKEN_WHISPER_STATE_DIR", &state_root)
+        .env("FRANKEN_WHISPER_WHISPER_CPP_BIN", &stub_bin)
+        .output()
+        .expect("robot transcribe should execute");
+
+    assert!(
+        output.status.success(),
+        "non-speculative transcribe should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.is_empty() && trimmed.starts_with('{')
+        })
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    let backend_ok = events
+        .iter()
+        .find(|event| event["event"] == "stage" && event["code"] == "backend.ok")
+        .expect("backend.ok must be emitted");
+    assert_ne!(
+        backend_ok["payload"]["execution_mode"], "speculative_streaming",
+        "non-speculative request must NOT take the speculative dispatch branch"
+    );
+
+    let partial_count = events
+        .iter()
+        .filter(|event| event["code"] == "transcript.partial")
+        .count();
+    assert_eq!(
+        partial_count, 0,
+        "non-speculative request should emit zero transcript.partial events"
+    );
+    let stats_count = events
+        .iter()
+        .filter(|event| event["code"] == "transcript.speculation_stats")
+        .count();
+    assert_eq!(
+        stats_count, 0,
+        "non-speculative request should emit zero speculation_stats events"
+    );
+}

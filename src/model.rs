@@ -236,6 +236,58 @@ pub struct BackendParams {
     pub punctuation: Option<PunctuationConfig>,
     /// Source separation (Demucs) parameters (whisper-diarization).
     pub source_separation: Option<SourceSeparationConfig>,
+    // -----------------------------------------------------------------
+    // Speculative cancel-correct streaming request.
+    //
+    // When set, the orchestrator routes the run through the
+    // `streaming::SpeculativeStreamingPipeline` instead of the
+    // single-backend `Backend` stage. The request shape is a
+    // serde-friendly mirror of the user-visible CLI knobs; the
+    // dispatch path converts it into a `streaming::SpeculativeConfig`
+    // at runtime.
+    // -----------------------------------------------------------------
+    pub speculative: Option<SpeculativeRequest>,
+}
+
+/// Serde-friendly mirror of the speculative-streaming request configuration.
+///
+/// `BackendParams.speculative` carries this struct to thread CLI flags through
+/// to the orchestrator, which converts it into the execution-shape
+/// [`crate::streaming::SpeculativeConfig`] at dispatch time. Kept separate from
+/// `SpeculativeConfig` so that `model.rs` does not need to depend on
+/// `streaming.rs` (which would create a circular module dependency).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeculativeRequest {
+    /// Initial speculation window size in milliseconds.
+    pub window_size_ms: u64,
+    /// Window overlap in milliseconds.
+    pub overlap_ms: u64,
+    /// Model name passed to the fast lane (low latency).
+    pub fast_model_name: String,
+    /// Model name passed to the quality lane (correction / verification).
+    pub quality_model_name: String,
+    /// Maximum word-error-rate tolerance before correction triggers.
+    /// `None` falls back to the [`CorrectionTolerance::default`] value (0.1).
+    pub max_wer_tolerance: Option<f64>,
+    /// Whether to enable adaptive window sizing via
+    /// [`crate::speculation::SpeculationWindowController`].
+    pub adaptive: bool,
+    /// Force a correction on every window (evaluation mode).
+    pub always_correct: bool,
+}
+
+impl Default for SpeculativeRequest {
+    fn default() -> Self {
+        Self {
+            window_size_ms: 3000,
+            overlap_ms: 500,
+            fast_model_name: "auto-fast".to_owned(),
+            quality_model_name: "auto-quality".to_owned(),
+            max_wer_tolerance: None,
+            adaptive: true,
+            always_correct: false,
+        }
+    }
 }
 
 /// Describes the capabilities of a specific engine implementation.
