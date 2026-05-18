@@ -308,10 +308,9 @@ fn parse_srt_time(value: &str) -> Option<f64> {
     // Support both standard ',' and fallback '.' millisecond separator.
     let (hms, ms_str) = if let Some(pos) = value.rfind(',') {
         (&value[..pos], &value[pos + 1..])
-    } else if let Some(pos) = value.rfind('.') {
-        (&value[..pos], &value[pos + 1..])
     } else {
-        return None;
+        let pos = value.rfind('.')?;
+        (&value[..pos], &value[pos + 1..])
     };
 
     let ms = ms_str.parse::<f64>().ok()?;

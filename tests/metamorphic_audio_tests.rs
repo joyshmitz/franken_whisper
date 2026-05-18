@@ -32,6 +32,7 @@ fn generate_sine_wave(freq_hz: f32, sample_rate: u32, duration_secs: f32) -> Vec
 }
 
 /// Generate silence (zeros) for the given duration.
+#[allow(dead_code)]
 fn generate_silence(sample_rate: u32, duration_secs: f32) -> Vec<f32> {
     let num_samples = (sample_rate as f32 * duration_secs) as usize;
     vec![0.0; num_samples]
@@ -70,7 +71,7 @@ fn prepend_silence(samples: &[f32], silence_samples: usize) -> Vec<f32> {
 /// Append silence to audio.
 fn append_silence(samples: &[f32], silence_samples: usize) -> Vec<f32> {
     let mut result = samples.to_vec();
-    result.extend(std::iter::repeat(0.0).take(silence_samples));
+    result.extend(std::iter::repeat_n(0.0, silence_samples));
     result
 }
 

@@ -693,10 +693,9 @@ fn parse_srt_block_for_fixture(block: &str) -> Option<TranscriptionSegment> {
 fn parse_srt_time_for_fixture(value: &str) -> Option<f64> {
     let (hms, ms_str) = if let Some(pos) = value.rfind(',') {
         (&value[..pos], &value[pos + 1..])
-    } else if let Some(pos) = value.rfind('.') {
-        (&value[..pos], &value[pos + 1..])
     } else {
-        return None;
+        let pos = value.rfind('.')?;
+        (&value[..pos], &value[pos + 1..])
     };
 
     let mut hms_parts = hms.split(':');
