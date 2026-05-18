@@ -4616,8 +4616,11 @@ mod tests {
         let store = RunStore::open(&db_path).expect("store");
         drop(store);
 
-        // Each thread retries the full open+persist cycle since fsqlite's
-        // MVCC can return "database is busy" during concurrent access.
+        // Each thread retries the full open+persist cycle to absorb the
+        // benign "database is busy" return that any SQLite implementation can
+        // emit briefly under concurrent writer startup. The underlying MVCC
+        // concurrent-persistence support in `fsqlite` is now correct, so this
+        // test requires **every** writer thread to land its run durably.
         let handles: Vec<_> = (0..10)
             .map(|i| {
                 let path = db_path.clone();
@@ -4653,9 +4656,12 @@ mod tests {
                                 continue;
                             }
                             Err(e) => {
-                                // Under heavy concurrent startup, opening a fresh connection may
-                                // repeatedly hit snapshot/busy windows. Treat this as a non-fatal
-                                // miss for this thread; the test validates majority persistence.
+                                // Open exhausted the retry budget. We bubble this up via the
+                                // `false` thread-return so the outer aggregate assert names
+                                // exactly which thread couldn't make progress. The aggregate
+                                // assert requires all 10 threads to succeed; this branch only
+                                // exists to surface a precise diagnostic instead of a panic
+                                // from an unwrap deep inside the retry loop.
                                 if super::is_busy_storage_error(&e) {
                                     return false;
                                 }
@@ -4670,9 +4676,10 @@ mod tests {
                                 ));
                             }
                             Err(e) => {
-                                // fsqlite MVCC can report repeated snapshot conflicts under high
-                                // contention; treat busy exhaustion as a dropped write (non-fatal)
-                                // and let majority assertions verify stability.
+                                // Persist exhausted the retry budget. As with the open path
+                                // above, this is surfaced as a `false` thread-return so the
+                                // aggregate assertion below names which thread didn't land its
+                                // run durably; durability itself is required for ALL threads.
                                 if super::is_busy_storage_error(&e) {
                                     return false;
                                 }
@@ -4706,23 +4713,25 @@ mod tests {
             let store = RunStore::open(&db_path).expect("store");
             let runs = store.list_recent_runs(100).expect("list");
             final_runs_count = runs.len();
-            if final_runs_count >= 5 {
+            if final_runs_count == 10 {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        // fsqlite's current MVCC may lose some writes under high contention.
-        // Once bd-3i1.2 (MVCC concurrent persistence) lands, this should be
-        // exactly 10. For now, verify at least a majority persisted.
-        assert!(
-            final_runs_count >= 5,
-            "at least 5 of 10 concurrent runs should persist, got {}",
+        // Durability requirement: every one of the 10 concurrent persists
+        // must be observable from a fresh reader. Anything less is a
+        // regression in the storage layer (formerly tolerated as an
+        // `fsqlite` MVCC limitation that has since been fixed upstream;
+        // see `docs/operational-playbook.md` for the history).
+        assert_eq!(
+            final_runs_count, 10,
+            "all 10 concurrent runs must persist; got {}. Listing the run IDs that DID land helps name the dropped writes.",
             final_runs_count
         );
-        assert!(
-            successful_threads >= 5,
-            "at least 5 of 10 concurrent writer threads should report success, got {}",
+        assert_eq!(
+            successful_threads, 10,
+            "all 10 writer threads must report success; got {}. A `false` thread-return means that thread exhausted the open/persist retry budget — investigate host load + the fsqlite busy-window behavior.",
             successful_threads
         );
 
