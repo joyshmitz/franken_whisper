@@ -10,7 +10,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Commit 
 
 ## [Unreleased] (since v0.1.0)
 
-150 commits since v0.1.0
+152 commits since v0.1.0
 
 Compare: [`v0.1.0...main`](https://github.com/Dicklesworthstone/franken_whisper/compare/v0.1.0...main)
 
@@ -295,7 +295,7 @@ SHA-256 checksums: [`checksums-sha256.txt`](https://github.com/Dicklesworthstone
 
 ### Testing
 
-- 2,939 tests passing at release (now ~3,860 unit + integration tests at HEAD)
+- 2,939 tests passing at release (now ~3,668 unit + integration tests at HEAD; see `[Unreleased] → Documentation Refresh` for the marker-vs-runner count correction)
 - Unit test coverage expanded across orchestrator, error, model, accelerate, robot, and process modules ([`1ed8429`](https://github.com/Dicklesworthstone/franken_whisper/commit/1ed8429b9e751190566b080cc5b294fcfaa29793))
 - Conformance harness with 50ms cross-engine timestamp tolerance and drift detection
 
@@ -315,8 +315,8 @@ SHA-256 checksums: [`checksums-sha256.txt`](https://github.com/Dicklesworthstone
 <!-- agent-metadata
   repo: Dicklesworthstone/franken_whisper
   generated: 2026-05-18
-  commits_analyzed: 209
-  commits_since_v0.1.0: 150
+  commits_analyzed: 211
+  commits_since_v0.1.0: 152
   added_since_prior_generation:
     - speculative_cli_integration (4f54fbd + hardening 2dbab6f)
     - storage_durability_test_tightening (eede00a; fsqlite MVCC fixed upstream)

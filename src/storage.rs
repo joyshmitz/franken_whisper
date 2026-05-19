@@ -4562,22 +4562,20 @@ mod tests {
         let store = RunStore::open(&db_path).expect("store");
         drop(store);
 
-        // Serialize writes through a mutex. Frankensqlite's MVCC can report
-        // busy/lock contention when multiple connections are open during
-        // parallel tests, so we serialize the open + persist sequence to
-        // keep the test deterministic under load.
-        let write_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
-
+        // Threads race to persist concurrently. `persist_with_retry` absorbs
+        // the benign `SQLITE_BUSY` returns that any SQLite implementation
+        // emits transiently under contention. The underlying MVCC
+        // concurrent-persistence support in `fsqlite` is correct, so we
+        // expect ALL five runs to be durable (no fake-serialization mutex,
+        // and the assertion below is exact).
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
         let handles: Vec<_> = (0..5)
             .map(|i| {
                 let path = db_path.clone();
                 let b = barrier.clone();
-                let wl = write_lock.clone();
                 std::thread::spawn(move || {
                     let report = minimal_report(&format!("concurrent-{i}"), &path);
-                    b.wait(); // Synchronize thread readiness.
-                    let _guard = wl.lock().expect("write lock");
+                    b.wait(); // Maximize true concurrency at persist time.
                     let store = RunStore::open(&path).expect("thread store");
                     persist_with_retry(&store, &report, 10);
                 })
@@ -4591,9 +4589,10 @@ mod tests {
         // Re-open and verify all 5 runs are present.
         let store = RunStore::open(&db_path).expect("store");
         let runs = store.list_recent_runs(100).expect("list");
-        assert!(
-            runs.len() >= 5,
-            "all 5 concurrent runs should be present, got {}",
+        assert_eq!(
+            runs.len(),
+            5,
+            "all 5 concurrent runs must be durable, got {}",
             runs.len(),
         );
 
