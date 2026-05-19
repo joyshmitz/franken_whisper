@@ -9,7 +9,7 @@
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg)](./LICENSE)
 [![Rust Edition](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
-[![Tests](https://img.shields.io/badge/tests-3%2C860%2B-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-3%2C660%2B-brightgreen.svg)](#testing)
 [![Latest Release](https://img.shields.io/github/v/release/Dicklesworthstone/franken_whisper.svg)](https://github.com/Dicklesworthstone/franken_whisper/releases)
 
 </div>
@@ -2503,10 +2503,10 @@ With the aggressive release profile (`opt-level = "z"`, LTO, stripped):
 |--------|-------|
 | Total source lines (`src/`) | ~90,000 |
 | Total test lines (`tests/`) | ~17,500 |
-| Library tests | 3,229 |
-| Integration tests | 631 |
-| **Total tests** | **3,860** |
-| Integration test files (`tests/*.rs`) | 27 |
+| Library tests | 3,030 |
+| Integration tests | 638 |
+| **Total tests** | **3,668** |
+| Integration test files (`tests/*.rs`) | 26 |
 | Benchmark suites | 5 (Criterion) |
 | Public modules | 18 |
 | Error variants | 12 (each with structured code) |
@@ -2532,7 +2532,7 @@ With the aggressive release profile (`opt-level = "z"`, LTO, stripped):
 
 ## Testing
 
-~107,500 lines of Rust with **3,860+ tests** across unit, integration, conformance, metamorphic, and doc-test suites.
+~107,500 lines of Rust with **3,660+ tests** across unit, integration, conformance, metamorphic, and doc-test suites.
 
 ```bash
 # run all library tests
@@ -2691,7 +2691,6 @@ rm .franken_whisper/locks/sync.lock
 - **Native engines under rollout governance.** Native Rust engine implementations are conformance-gated pilots. They execute in-process only when `FRANKEN_WHISPER_NATIVE_EXECUTION=1` and the rollout stage is `primary` or `sole`; otherwise bridge adapters remain active.
 - **One-way sync.** JSONL export / import is one-way. There is no bidirectional merge beyond the explicit `--conflict-policy` flag.
 - **Single-machine.** Designed for single-machine use with local SQLite. No distributed or multi-node support.
-- **frankensqlite MVCC limitation.** Under extreme concurrent multi-connection WAL writes, frankensqlite may silently lose committed data. Production workloads should serialize writes through a single connection (the concurrent session API does exactly this).
 - **ffmpeg auto-provisioning is Linux x86_64 only.** On other platforms (`macOS`, Windows, Linux ARM) you must install ffmpeg manually for the formats `symphonia` cannot decode and for microphone capture.
 
 ---

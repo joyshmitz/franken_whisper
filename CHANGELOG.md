@@ -10,9 +10,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Commit 
 
 ## [Unreleased] (since v0.1.0)
 
-144 commits since v0.1.0 | 354 files changed | +38,883 / -3,117 lines
+150 commits since v0.1.0
 
 Compare: [`v0.1.0...main`](https://github.com/Dicklesworthstone/franken_whisper/compare/v0.1.0...main)
+
+### Speculative Streaming: CLI Integration (post-2026-03-21)
+
+- **`--speculative` flag wired through the CLI orchestrator** ([`4f54fbd`](https://github.com/Dicklesworthstone/franken_whisper/commit/4f54fbd0750565135f3c49c446b09b6615b57802)) — previously `TranscribeArgs::to_request()` rejected every speculative request with `FW-INVALID-REQUEST` and the documentation-vs-behavior gap was wide. The integration adds:
+  - `SpeculativeRequest` to `BackendParams` (a serde-friendly mirror of the CLI knobs that the orchestrator converts to `streaming::SpeculativeConfig` at dispatch time, keeping `model.rs` free of any dependency on `streaming.rs`).
+  - `audio::slice_pcm_wav_to_temp_path()` — in-memory `hound` slicer producing per-window WAVs from a normalized 16 kHz mono PCM source. Preserves source spec, clamps OOB ranges, rejects non-PCM input.
+  - `execute_backend_speculative()` in the orchestrator, replacing the regular `Backend` stage when `request.backend_params.speculative.is_some()`. Drives `SpeculativeStreamingPipeline::process_file_with_models()` with a per-window runner that calls `backend::execute()` for the fast and quality lanes; forwards every `transcript.partial / confirm / retract / correct / speculation_stats` event into the run-wide NDJSON log.
+- **Speculative dispatch hardening** ([`2dbab6f`](https://github.com/Dicklesworthstone/franken_whisper/commit/2dbab6fadbd059973b86124354e39989129476a4)) — three follow-up correctness fixes against the first cut:
+  1. *Sticky backend*: the new `backend::resolve_static_backend()` walks the static priority list once and returns a single concrete `BackendKind`; the dispatch path forces that kind onto every per-window invocation so `--backend auto` runs are engine-consistent end to end instead of letting per-window Bayesian routing produce a mixed-engine transcript.
+  2. *Partial event preservation on failure*: the inner `Result` is now returned wrapped in an always-`Ok` outer carrier so the outer match can forward `emitted_events` whether the speculation pipeline succeeded or failed mid-window. The `backend.error` event also gains a `windows_processed_before_failure` field.
+  3. *Populated `ReplayEnvelope` for speculative runs*: `inter.backend_runtime = Some(backend::runtime_metadata(resolved))` and `inter.backend_output_sha256 = sha256_segments(&merged)`, so speculative runs land replay envelopes that downstream drift detection / conformance tooling can meaningfully diff.
+
+### Storage: Concurrent-Persist Durability Contract (post-2026-03-21)
+
+- **`storage::tests::concurrent_persist_10_threads_with_segments_and_events` tightened to require 10/10 successful persists** ([`eede00a`](https://github.com/Dicklesworthstone/franken_whisper/commit/eede00a7838c4ac4aba47f0c6a00cfaddbafbb8f)) — the test was previously written defensively against an older `fsqlite` MVCC limitation that silently dropped some concurrent writes; its assertions accepted "majority survives" (`>= 5 of 10`) as success. The underlying MVCC concurrent-persistence gap has since been resolved upstream in `fsqlite-mvcc`, so the test now enforces full durability instead of legitimizing data loss. Per-thread `false` returns from the retry-exhaustion paths are now described as diagnostics (so the aggregate assertion can name which thread didn't land) rather than as accepted dropped writes.
+
+### Documentation Refresh (post-2026-03-21)
+
+- **README comprehensive rewrite** ([`9ddb9db`](https://github.com/Dicklesworthstone/franken_whisper/commit/9ddb9dbab2528fdd2c2f2b10cc82ff6bd74de6a3)) — full top-to-bottom rewrite (~4,300 lines) reflecting the current architecture and capabilities, with worked examples (Bayesian routing arithmetic, mu-law encoding, Brier-score decomposition), anatomy walkthroughs (routing decision, TTY audio session, conformance check, speculative window), operational topics (state directory layout, CLI exit codes, threat model, performance tuning, disk usage growth, extension guides, debugging recipes), a use-cases gallery, JSON schema reference, and embedding-in-other-languages patterns.
+- **Removed stale "frankensqlite MVCC limitation" Limitations entry** from the README, since the underlying bug has been resolved upstream in the current `/dp/frankensqlite` checkout that the path dependency picks up.
+- **README test count corrected** from the marker-derived 3,860 to the runner-derived 3,668 (3,030 library + 638 integration across 26 integration test files).
+
+### Workspace Hygiene (post-2026-03-21)
+
+- **Pre-existing clippy gate failures fixed** ([`47fe23b`](https://github.com/Dicklesworthstone/franken_whisper/commit/47fe23b4699b766864c73244d4e2b814cdcc9e7d)) — `src/backend/whisper_diarization.rs:311` and `tests/conformance_harness.rs:696` `?`-operator rewrites; `tests/metamorphic_audio_tests.rs:35` unused `generate_silence` annotated `#[allow(dead_code)]`; `tests/metamorphic_audio_tests.rs:73` `repeat().take()` modernized to `repeat_n()` per `clippy::manual_repeat_n` on Rust 1.82+.
+- **`Cargo.lock` refresh** ([`7855910`](https://github.com/Dicklesworthstone/franken_whisper/commit/7855910e8cfc6d43c91d1ec2f9b7b07e38d32c89)) tracking upstream workspace bumps from sibling-agent commits that touched workspace crates while this branch was off the build path.
+
+---
 
 ### Release Pipeline and Distribution
 
@@ -286,9 +314,14 @@ SHA-256 checksums: [`checksums-sha256.txt`](https://github.com/Dicklesworthstone
 
 <!-- agent-metadata
   repo: Dicklesworthstone/franken_whisper
-  generated: 2026-05-17
-  commits_analyzed: 203
-  commits_since_v0.1.0: 144
+  generated: 2026-05-18
+  commits_analyzed: 209
+  commits_since_v0.1.0: 150
+  added_since_prior_generation:
+    - speculative_cli_integration (4f54fbd + hardening 2dbab6f)
+    - storage_durability_test_tightening (eede00a; fsqlite MVCC fixed upstream)
+    - readme_rewrite_and_drift_corrections (9ddb9db + README test-count + stale-MVCC-limit removal)
+    - workspace_hygiene (47fe23b clippy + 7855910 Cargo.lock)
   tags: v0.1.0 (lightweight, on 6a51618)
   releases: v0.1.0 (GitHub Release, published 2026-03-04)
   schema_version_at_HEAD: 3
