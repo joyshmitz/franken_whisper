@@ -803,7 +803,8 @@ ensure_rust() {
     log_warn "cargo not found: about to install Rust via the official rustup.rs"
     log_warn "bootstrap (a second remote script, auto-accepted). Ctrl-C now to"
     log_warn "abort and install Rust yourself if you prefer."
-    sleep 3
+    # The grace period only makes sense when the warning was visible.
+    [ "$QUIET" -eq 1 ] || sleep 3
     curl -fsSL "${PROXY_ARGS[@]}" https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
     export PATH="$HOME/.cargo/bin:$PATH"
     # shellcheck disable=SC1091  # rustup-generated env file not present at lint time
@@ -902,7 +903,10 @@ download_release() {
                 # sidecar entry (e.g. "<asset>.sig") can never shadow the real
                 # checksum, and `|| true` keeps a no-match grep from killing the
                 # script under `set -euo pipefail` (we fall through to the
-                # honest "checksum not available" warning instead).
+                # honest "checksum not available" warning instead). Note:
+                # `awk -v` interprets backslash escapes in the value; our asset
+                # names never contain backslashes, and a hostile name would
+                # merely fail to match -> visible skip-verification warning.
                 expected=$(awk -v name="$archive_name" '$2 == name { print $1; exit }' \
                     "$TMP/checksums-sha256.txt" 2>/dev/null || true)
             fi

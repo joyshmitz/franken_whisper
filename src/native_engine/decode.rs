@@ -159,8 +159,12 @@ pub struct DecodeParams {
     /// Thread-count hint passed through to the encoder/decoder (the FrankenTorch
     /// kernels manage their own pool; this is informational).
     pub n_threads: usize,
-    /// Optional cap on decoded tokens per window. `None` uses whisper's
-    /// `n_text_ctx/2 - 4` default.
+    /// Optional per-window token *budget* — the port of whisper.cpp's
+    /// `params.max_tokens` (default off). When set, the EOT-forcing logit
+    /// filter (whisper.cpp 6234) closes the window once this many tokens have
+    /// been sampled, and the decode loop completes once the count exceeds it
+    /// (whisper.cpp 7388). The structural `n_text_ctx/2 - 4` bound always
+    /// applies regardless; values above it are clamped.
     pub max_text_ctx: Option<usize>,
     /// When `true`, record cross-attention weights of the model's alignment
     /// heads during decode and compute real **word-level timestamps** via DTW
@@ -686,6 +690,29 @@ fn tail_enc_ctx(real_frames: usize, is_first: bool, enabled: bool) -> usize {
 // Top-level transcription (port of whisper_full_with_state greedy path)
 // ---------------------------------------------------------------------------
 
+/// Port of whisper.cpp lines 7745-7756. Does the decoded window end in a
+/// SINGLE unpaired timestamp (the model cut itself off mid-chunk), meaning
+/// the seek should skip the remainder of the chunk?
+///
+/// The `max_tokens_timestamp_ending` guard (7749-7751) suppresses this when
+/// the window only closed because the user token budget's EOT-forcing filter
+/// fired (`decoded.len() > budget` — the forced closer pushed the count past
+/// the budget): that trailing timestamp is artificial, not a model decision.
+/// Upstream gates the guard on `!params.single_segment`; our no-timestamps
+/// mode is the analog, hence `timestamps`.
+fn single_timestamp_ending(
+    decoded: &[i32],
+    timestamp_begin: i32,
+    timestamps: bool,
+    user_budget: Option<usize>,
+) -> bool {
+    let budget_forced = timestamps && user_budget.is_some_and(|mt| decoded.len() > mt);
+    decoded.len() > 1
+        && !budget_forced
+        && decoded[decoded.len() - 2] < timestamp_begin
+        && decoded[decoded.len() - 1] > timestamp_begin
+}
+
 /// Transcribe 16 kHz mono PCM `samples` with the greedy / temperature-0 path of
 /// whisper, returning timed segments + per-window QC statistics.
 ///
@@ -750,14 +777,20 @@ pub fn transcribe_samples(
         None
     };
 
-    // Per-window decode budget (whisper.cpp 7205: n_text_ctx/2 - 4), with the
-    // optional caller override.
+    // Two DISTINCT per-window numbers, as upstream (the original port
+    // conflated them, which made the EOT-forcing filter unreachable):
+    // - the STRUCTURAL decode bound (whisper.cpp 7330: n_max = n_text_ctx/2-4)
+    //   that sizes the sampling loop, and
+    // - the optional USER token budget (whisper.cpp `params.max_tokens`,
+    //   default off) that the EOT-forcing filter + budget-break act on while
+    //   the loop continues, so the forced closing timestamp can still be
+    //   sampled (whisper.cpp 6234 + 7388).
     let n_text_ctx = m.decoder.n_text_ctx();
-    let default_budget = (n_text_ctx / 2).saturating_sub(4).max(1);
-    let max_tokens = params
+    let n_max_tokens = (n_text_ctx / 2).saturating_sub(4).max(1);
+    let user_max_tokens = params
         .max_text_ctx
-        .unwrap_or(default_budget)
-        .min(default_budget);
+        .filter(|&mt| mt > 0)
+        .map(|mt| mt.min(n_max_tokens));
 
     let cfg = FilterConfig {
         suppress_blank: true,
@@ -765,8 +798,9 @@ pub fn transcribe_samples(
         suppress_nst: false, // whisper.cpp default (5970).
         no_timestamps: !params.timestamps,
         max_initial_tid,
-        // EOT-forcing budget (fix #6): only meaningful with timestamps on.
-        max_tokens: Some(max_tokens),
+        // EOT-forcing budget (fix #6): the user budget, off when unset —
+        // mirroring upstream's `params.max_tokens > 0` gate.
+        max_tokens: user_max_tokens,
     };
     // Prompt context cap (whisper.cpp 6927): n_text_ctx/2.
     let max_prompt_ctx = n_text_ctx / 2;
@@ -880,7 +914,7 @@ pub fn transcribe_samples(
         let mut result_len = 0usize;
         let mut step_logits = prefill_logits;
 
-        for i in 0..max_tokens {
+        for i in 0..n_max_tokens {
             let (filtered, logprobs) = process_logits(
                 tk,
                 &cfg,
@@ -906,9 +940,14 @@ pub fn transcribe_samples(
                 has_ts = true;
             }
 
-            // End of segment (whisper.cpp 7387-7410).
+            // End of segment (whisper.cpp 7387-7410). `budget_reached` is the
+            // `params.max_tokens > 0 && i >= params.max_tokens` clause: the
+            // EOT-forcing filter masked text from sampled-token index `mt`
+            // onward, so the token at index `i == mt` is the forced closer and
+            // the window completes here with `decoded.len() == mt + 1`.
+            let budget_reached = user_max_tokens.is_some_and(|mt| i >= mt);
             let reached_end = has_ts && seek_cs + seek_delta_cs + DELTA_MIN >= seek_end_cs;
-            if tok == tk.eot || reached_end {
+            if tok == tk.eot || budget_reached || reached_end {
                 if result_len == 0 && params.timestamps {
                     if reached_end {
                         result_len = i + 1;
@@ -958,18 +997,12 @@ pub fn transcribe_samples(
             &format!("\"tokens\":{}", decoded.len()),
         );
         // and compute a separate `seek_advance_cs` for the window step.
-        //
-        // Upstream guard (whisper.cpp 7749-7751): when the EOT-forcing budget
-        // (fix #6) cut the window short — i.e. the decode ran PAST max_tokens
-        // and only closed because the filter masked every text token — the
-        // trailing timestamp is artificial, so it must NOT trigger the
-        // whole-chunk skip below. Mirrors `max_tokens_timestamp_ending`,
-        // gated on timestamps being enabled like the filter itself.
-        let max_tokens_ts_ending = params.timestamps && decoded.len() > max_tokens;
-        let single_ts_ending = decoded.len() > 1
-            && !max_tokens_ts_ending
-            && decoded[decoded.len() - 2] < tk.timestamp_begin
-            && decoded[decoded.len() - 1] > tk.timestamp_begin;
+        let single_ts_ending = single_timestamp_ending(
+            &decoded,
+            tk.timestamp_begin,
+            params.timestamps,
+            user_max_tokens,
+        );
         let seek_advance_cs = if single_ts_ending {
             (seek_end_cs - seek_cs).min(CHUNK_CS)
         } else {
@@ -1684,6 +1717,59 @@ mod tests {
     }
 
     // ----- Rule 8: max_tokens EOT-forcing filter (fix #6) -----
+
+    #[test]
+    fn single_timestamp_ending_matches_upstream_semantics() {
+        let beg = 100i32; // synthetic timestamp_begin
+        // Paired/normal ending: ... text, ts, eot — eot (< beg) last => false.
+        assert!(!single_timestamp_ending(
+            &[5, beg + 10, 50],
+            beg,
+            true,
+            None
+        ));
+        // Unpaired trailing timestamp, no budget => true (skip rest of chunk).
+        assert!(single_timestamp_ending(&[5, beg + 10], beg, true, None));
+        // Same shape but the count EXCEEDS the user budget => the closer was
+        // forced by the EOT filter, guard suppresses the skip (wcpp 7749-51).
+        assert!(!single_timestamp_ending(&[5, beg + 10], beg, true, Some(1)));
+        // Count == budget (not exceeded): closer was a genuine model choice.
+        assert!(single_timestamp_ending(&[5, beg + 10], beg, true, Some(2)));
+        // No-timestamps mode (upstream single_segment): guard inapplicable,
+        // but the shape check itself still governs.
+        assert!(single_timestamp_ending(&[5, beg + 10], beg, false, Some(1)));
+        // Degenerate lengths.
+        assert!(!single_timestamp_ending(&[beg + 10], beg, true, None));
+        assert!(!single_timestamp_ending(&[], beg, true, None));
+    }
+
+    #[test]
+    fn user_budget_filter_fires_at_loop_boundary() {
+        // Regression for the conflated-bounds bug: with the loop running to
+        // the structural n_max and the filter keyed to the USER budget, the
+        // filter must engage at tokens_in_window == budget — the exact value
+        // the live loop passes on sampled-token index `mt` (pre-push count).
+        let tk = synth_tokenizer();
+        let cfg = FilterConfig {
+            suppress_blank: false,
+            space_token: None,
+            suppress_nst: false,
+            no_timestamps: false,
+            max_initial_tid: None,
+            max_tokens: Some(3),
+        };
+        // A strong text logit, so the timestamp-FORCING rule (logsumexp over
+        // all ts tokens vs max text logit) cannot mask text on its own — we
+        // want to observe the budget filter in isolation.
+        let mut logits = vec![-20.0f32; tk.vocab_size() as usize];
+        logits[5] = 10.0;
+        // At 2 sampled tokens (< budget): text token 5 must remain available.
+        let (out, _) = process_logits(&tk, &cfg, logits.clone(), &[], false, 0, 2);
+        assert!(!is_suppressed(&out, 5), "text open below the budget");
+        // At exactly the budget: every text token below eot must be masked.
+        let (out, _) = process_logits(&tk, &cfg, logits, &[], false, 0, 3);
+        assert!(is_suppressed(&out, 5), "text masked at the budget boundary");
+    }
 
     #[test]
     fn max_tokens_forces_eot_when_budget_reached() {

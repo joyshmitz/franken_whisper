@@ -2543,7 +2543,7 @@ With the aggressive release profile (`opt-level = "z"`, LTO, stripped):
 
 ## Testing
 
-Over 100,000 lines of Rust with **3,100+ tests** across unit, integration, conformance, metamorphic, and doc-test suites (the count *dropped* in v0.2.0 — the mock-pilot test suites were deleted along with the mocks they tested).
+Over 100,000 lines of Rust with **3,100+ tests** across unit, integration, conformance, metamorphic, and doc-test suites (the count *dropped* in v0.2.0 — the mock-pilot test suites were deleted along with the pilot mocks they tested; the test-support backend mocks in `tests/mocks/` are unrelated and remain).
 
 ```bash
 # run all library tests
