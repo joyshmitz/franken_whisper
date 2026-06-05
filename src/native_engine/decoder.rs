@@ -387,12 +387,16 @@ impl DecoderWeights {
 pub struct DecoderState {
     /// One self-attention KV cache per layer.
     kv: Vec<KvCache>,
-    /// Precomputed cross-attention keys per layer, `[enc_frames, n_state]`,
-    /// already scaled by `d_head^-0.25` (so the local cross path scales only
-    /// the query — see [`forward_step`]).
-    cross_k: Vec<Mat>,
-    /// Precomputed cross-attention values per layer, `[enc_frames, n_state]`.
-    cross_v: Vec<Mat>,
+    /// Per-`(layer, head)` pre-transposed cross-key head `[d_head, enc_frames]`
+    /// (in `layer * n_head + head` order). The cross K/V are fixed for the
+    /// whole window, so the per-step cross path's key transpose and value
+    /// gather are hoisted here once at construction instead of being rebuilt
+    /// every decode step (a large per-step scatter on wide models — `enc_frames`
+    /// is ~1500). Byte-for-byte the per-step gather the old path produced.
+    cross_kh_t: Vec<Mat>,
+    /// Per-`(layer, head)` gathered cross-value head `[enc_frames, d_head]`
+    /// (in `layer * n_head + head` order). See [`Self::cross_kh_t`].
+    cross_vh: Vec<Mat>,
     /// Number of tokens currently in the self-attention cache.
     len: usize,
     /// Number of encoder frames (cross-attention key/value length).
@@ -502,10 +506,44 @@ impl DecoderState {
             .map(|_| KvCache::new(w.n_text_ctx, w.n_state))
             .collect();
 
+        // Hoist the per-head cross-key transpose ([d_head, enc_frames]) and
+        // cross-value gather ([enc_frames, d_head]) out of the per-step loop:
+        // the cross K/V are constant for the whole window, so building these
+        // once here makes the per-step cross path a pure matmul→softmax→matmul
+        // with no scatter. The gathers reproduce exactly the bytes the old
+        // per-step path computed (same indexing, same order → bit-identical).
+        let n_head = w.n_head;
+        let d_head = w.n_state / n_head;
+        let mut cross_kh_t: Vec<Mat> = Vec::with_capacity(n_layer * n_head);
+        let mut cross_vh: Vec<Mat> = Vec::with_capacity(n_layer * n_head);
+        for li in 0..n_layer {
+            let ck = &cross_k[li];
+            let cv = &cross_v[li];
+            for h in 0..n_head {
+                let base = h * d_head;
+                // kh_t [d_head, enc_frames]: kh_t[d][j] = ck.row(j)[base + d].
+                let mut kh_t = vec![0.0f32; d_head * enc_frames];
+                for j in 0..enc_frames {
+                    let src = &ck.row(j)[base..base + d_head];
+                    for (d, &s) in src.iter().enumerate() {
+                        kh_t[d * enc_frames + j] = s;
+                    }
+                }
+                cross_kh_t.push(Mat::from_vec(d_head, enc_frames, kh_t));
+                // vh [enc_frames, d_head]: row j = cv.row(j)[base..base+d_head].
+                let mut vh = vec![0.0f32; enc_frames * d_head];
+                for j in 0..enc_frames {
+                    let src = &cv.row(j)[base..base + d_head];
+                    vh[j * d_head..(j + 1) * d_head].copy_from_slice(src);
+                }
+                cross_vh.push(Mat::from_vec(enc_frames, d_head, vh));
+            }
+        }
+
         Ok(Self {
             kv,
-            cross_k,
-            cross_v,
+            cross_kh_t,
+            cross_vh,
             len: 0,
             enc_frames,
             n_state: w.n_state,
@@ -597,8 +635,9 @@ fn embed_tokens(w: &DecoderWeights, tokens: &[i32], cache_len: usize) -> FwResul
 /// `[tokens, enc_frames]` matrix per head (in head order).
 fn cross_attention(
     q: &Mat,
-    cross_k: &Mat,
-    cross_v: &Mat,
+    cross_kh_t: &[Mat],
+    cross_vh: &[Mat],
+    tk: usize,
     n_head: usize,
     record: bool,
     recorded: &mut Vec<Mat>,
@@ -610,14 +649,17 @@ fn cross_attention(
         )));
     }
     let tq = q.rows;
-    let tk = cross_k.rows;
     let d_head = n_state / n_head;
     let q_scale = (d_head as f32).powf(-0.25);
 
     // Compute one head's scores [tq, tk] and output [tq, d_head]. Per-head
     // math (scaled q·k^T → softmax → @v) is byte-for-byte the serial path;
     // returned so the caller can either record `scores` (serial path) or
-    // scatter `out_h` (parallel path) deterministically.
+    // scatter `out_h` (parallel path) deterministically. The key transpose
+    // ([d_head, tk]) and value gather ([tk, d_head]) are precomputed once per
+    // window in `DecoderState::new` (cross K/V are window-constant) and passed
+    // in as `cross_kh_t[h]` / `cross_vh[h]`, so the per-step path only scales
+    // the query and runs the two matmuls + softmax.
     let compute_head = |h: usize| -> FwResult<(Mat, Mat)> {
         let base = h * d_head;
 
@@ -632,28 +674,12 @@ fn cross_attention(
         }
         let qh = Mat::from_vec(tq, d_head, qh);
 
-        // Key head transposed [d_head, tk] for a contiguous matmul.
-        let mut kh_t = vec![0.0f32; d_head * tk];
-        for j in 0..tk {
-            let src = &cross_k.row(j)[base..base + d_head];
-            for (d, &s) in src.iter().enumerate() {
-                kh_t[d * tk + j] = s;
-            }
-        }
-        let kh_t = Mat::from_vec(d_head, tk, kh_t);
-
         // scores = qh @ kh^T -> [tq, tk], softmax per query row (no mask).
-        let mut scores = nn::matmul(&qh, &kh_t)?;
+        let mut scores = nn::matmul(&qh, &cross_kh_t[h])?;
         nn::softmax_rows(&mut scores);
 
-        // Value head [tk, d_head]; out_h = scores @ vh.
-        let mut vh = vec![0.0f32; tk * d_head];
-        for j in 0..tk {
-            let src = &cross_v.row(j)[base..base + d_head];
-            vh[j * d_head..(j + 1) * d_head].copy_from_slice(src);
-        }
-        let vh = Mat::from_vec(tk, d_head, vh);
-        let out_h = nn::matmul(&scores, &vh)?; // [tq, d_head]
+        // out_h = scores @ vh  ([tk, d_head] precomputed).
+        let out_h = nn::matmul(&scores, &cross_vh[h])?; // [tq, d_head]
         Ok((scores, out_h))
     };
 
@@ -683,9 +709,12 @@ fn cross_attention(
     // head owns a disjoint column band of `out`; like nn::attention, the
     // merged output is strided per head, so workers scatter into private
     // buffers which we then disjoint-merge (every position written by exactly
-    // one head, so `0.0 + x == x` exactly — bit-identical). Small decode-step
-    // shapes (tq=1) fall below the threshold and stay serial.
-    const PAR_THRESHOLD: usize = 1 << 18; // tq*tk*n_head MACs
+    // one head, so `0.0 + x == x` exactly — bit-identical). The work metric is
+    // `tq*tk*n_head`; at decode time (tq=1) the wide cross frames (tk≈1500) on
+    // many-head models (n_head≈20) still make per-step head parallelism worth
+    // the spawn, so the threshold is tuned to engage there while keeping the
+    // cheap few-head cases (e.g. tiny's 6 heads) serial.
+    const PAR_THRESHOLD: usize = 1 << 13; // tq*tk*n_head MACs
     let work = tq.saturating_mul(tk).saturating_mul(n_head);
     let workers = nn::worker_count();
     if n_head < 2 || work < PAR_THRESHOLD || workers < 2 {
@@ -774,9 +803,12 @@ pub fn forward_step(
         // ── self-attention (causal, over the KV cache) ──
         let mut h = x.clone();
         layer.attn_ln.apply(&mut h);
-        let q = layer.attn_q.forward(&h)?;
-        let k = layer.attn_k.forward(&h)?; // no bias
-        let v = layer.attn_v.forward(&h)?;
+        // Q/K/V are three independent projections of the same `h`. On wide
+        // models each is a serial GEMV (`[1,n_state] x [n_state,n_state]`, below
+        // the kernel's parallel threshold), so running them on separate threads
+        // turns three sequential single-core matmuls into one concurrent pass.
+        // Each `forward` is unchanged, so the outputs are bit-identical.
+        let (q, k, v) = project_qkv(&layer.attn_q, &layer.attn_k, &layer.attn_v, &h)?;
         let attn = nn::attention_with_cache(&q, &k, &v, w.n_head, &mut st.kv[li])?;
         let attn_out = layer.attn_out.forward(&attn)?;
         add_into(&mut x, &attn_out);
@@ -785,10 +817,12 @@ pub fn forward_step(
         let mut hc = x.clone();
         layer.cross_attn_ln.apply(&mut hc);
         let qc = layer.cross_attn_q.forward(&hc)?;
+        let h0 = li * w.n_head;
         let cross = cross_attention(
             &qc,
-            &st.cross_k[li],
-            &st.cross_v[li],
+            &st.cross_kh_t[h0..h0 + w.n_head],
+            &st.cross_vh[h0..h0 + w.n_head],
+            st.enc_frames,
             w.n_head,
             st.record_cross_attn,
             &mut st.cross_attn_weights,
@@ -858,8 +892,11 @@ fn logits_last(w: &DecoderWeights, x_last: &Mat) -> FwResult<Vec<f32>> {
             let r1 = (r0 + band).min(n_vocab);
             let x_t = &x_t;
             handles.push(s.spawn(move || -> FwResult<(usize, Vec<f32>)> {
-                let sub = Mat::from_vec(r1 - r0, n_state, emb[r0 * n_state..r1 * n_state].to_vec());
-                let part = nn::matmul(&sub, x_t)?; // [(r1-r0), 1]
+                // Multiply the embedding row band in place (no per-token copy of
+                // the band — the embedding is the model's largest tensor, so
+                // copying each band out per step dominated the step's memmove).
+                let sub = &emb[r0 * n_state..r1 * n_state];
+                let part = nn::matmul_raw_lhs(sub, r1 - r0, x_t)?; // [(r1-r0), 1]
                 Ok((r0, part.data))
             }));
             r0 = r1;
@@ -873,6 +910,29 @@ fn logits_last(w: &DecoderWeights, x_last: &Mat) -> FwResult<Vec<f32>> {
         logits[r0..r0 + part.len()].copy_from_slice(&part);
     }
     Ok(logits)
+}
+
+/// Project `h` through three independent linears (`q`, `k`, `v`) concurrently.
+///
+/// The self-attention Q/K/V projections share the same input `h` and have no
+/// data dependency on each other, so they run on three threads instead of
+/// serially. Each [`Linear::forward`] is the unchanged matmul, so the results
+/// are bit-identical to computing them in sequence. `k` returns first in the
+/// tuple-build order but ordering is irrelevant (disjoint outputs).
+fn project_qkv(
+    q_lin: &Linear,
+    k_lin: &Linear,
+    v_lin: &Linear,
+    h: &Mat,
+) -> FwResult<(Mat, Mat, Mat)> {
+    // Two workers + the current thread: k and v on spawned threads while q
+    // computes here, so all three run concurrently.
+    std::thread::scope(|s| {
+        let kh = s.spawn(|| k_lin.forward(h));
+        let vh = s.spawn(|| v_lin.forward(h));
+        let q = q_lin.forward(h)?;
+        Ok((q, kh.join().unwrap()?, vh.join().unwrap()?))
+    })
 }
 
 /// In-place `dst += src` (same shape assumed; residual add).

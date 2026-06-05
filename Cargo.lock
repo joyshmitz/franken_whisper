@@ -890,6 +890,7 @@ dependencies = [
  "fj-ad",
  "fj-core",
  "fj-dispatch",
+ "fj-interpreters",
  "fj-trace",
 ]
 
@@ -919,6 +920,7 @@ name = "fj-core"
 version = "0.1.0"
 dependencies = [
  "half",
+ "rustc-hash",
  "serde",
  "smallvec",
 ]

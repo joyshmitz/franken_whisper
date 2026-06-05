@@ -103,6 +103,35 @@ pub fn matmul(a: &Mat, b: &Mat) -> FwResult<Mat> {
     Ok(Mat::from_vec(m, n, data))
 }
 
+/// `[m,k] x [k,n] -> [m,n]` where the LHS is a **raw row-major slice**.
+///
+/// Identical to [`matmul`] but the left operand is a flat `[m, k]` slice
+/// rather than a [`Mat`], so a caller holding the LHS as a sub-band of a
+/// larger backing buffer (e.g. a row band of the token-embedding matrix in
+/// the tied logits product) can multiply without first copying the band out
+/// into its own `Mat`. The sgemm sees the identical contiguous bytes, so the
+/// output is bit-identical to `matmul(&Mat::from_vec(m, k, lhs.to_vec()), b)`.
+///
+/// # Errors
+/// [`FwError::InvalidRequest`] if `lhs.len() != m * b.rows` or the kernel
+/// rejects the shapes.
+pub fn matmul_raw_lhs(lhs: &[f32], m: usize, b: &Mat) -> FwResult<Mat> {
+    let k = b.rows;
+    if lhs.len() != m * k {
+        return Err(FwError::InvalidRequest(format!(
+            "matmul_raw_lhs: lhs len {} != m*k {}",
+            lhs.len(),
+            m * k
+        )));
+    }
+    let n = b.cols;
+    let lhs_meta = meta_2d(m, k);
+    let rhs_meta = meta_2d(k, n);
+    let data = ft_kernel_cpu::matmul_tensor_contiguous_f32(lhs, &b.data, &lhs_meta, &rhs_meta)
+        .map_err(kernel_err)?;
+    Ok(Mat::from_vec(m, n, data))
+}
+
 /// Affine projection `x @ w_t (+ bias)`.
 ///
 /// Whisper linear layers are `y = x @ W^T + b` with `W` shaped
@@ -523,6 +552,20 @@ impl KvCache {
             self.v[..self.len * self.n_state].to_vec(),
         )
     }
+
+    /// Borrow the populated key prefix as a contiguous `[len, n_state]`
+    /// row-major slice (no copy). Same bytes as [`Self::keys`]`.data`.
+    #[must_use]
+    pub fn key_slice(&self) -> &[f32] {
+        &self.k[..self.len * self.n_state]
+    }
+
+    /// Borrow the populated value prefix as a contiguous `[len, n_state]`
+    /// row-major slice (no copy). Same bytes as [`Self::values`]`.data`.
+    #[must_use]
+    pub fn value_slice(&self) -> &[f32] {
+        &self.v[..self.len * self.n_state]
+    }
 }
 
 /// Multi-head scaled-dot-product attention.
@@ -561,16 +604,10 @@ pub fn attention(
     n_head: usize,
     causal_offset: Option<usize>,
 ) -> FwResult<Mat> {
-    let n_state = q.cols;
-    if n_head == 0 || !n_state.is_multiple_of(n_head) {
+    if k.cols != q.cols || v.cols != q.cols {
         return Err(FwError::InvalidRequest(format!(
-            "attention: n_head {n_head} must divide n_state {n_state}"
-        )));
-    }
-    if k.cols != n_state || v.cols != n_state {
-        return Err(FwError::InvalidRequest(format!(
-            "attention: width mismatch q={n_state} k={} v={}",
-            k.cols, v.cols
+            "attention: width mismatch q={} k={} v={}",
+            q.cols, k.cols, v.cols
         )));
     }
     if k.rows != v.rows {
@@ -579,8 +616,44 @@ pub fn attention(
             k.rows, v.rows
         )));
     }
+    attention_raw(q, &k.data, &v.data, k.rows, n_head, causal_offset)
+}
+
+/// Core multi-head attention over **raw row-major K/V slices**.
+///
+/// Identical math to [`attention`], but `k`/`v` are flat `[tk, n_state]`
+/// row-major slices rather than [`Mat`]s, so a caller holding the K/V in a
+/// larger backing buffer (e.g. a [`KvCache`]'s populated prefix) can attend
+/// without first copying out a `[len, n_state]` `Mat`. Every per-head gather
+/// reads the exact same bytes in the exact same order as [`attention`], so
+/// results are bit-identical to the `Mat`-based path.
+///
+/// # Errors
+/// [`FwError::InvalidRequest`] if `n_head == 0`, `n_state % n_head != 0`, or
+/// the K/V slice lengths disagree with `tk * n_state`.
+fn attention_raw(
+    q: &Mat,
+    k: &[f32],
+    v: &[f32],
+    tk: usize,
+    n_head: usize,
+    causal_offset: Option<usize>,
+) -> FwResult<Mat> {
+    let n_state = q.cols;
+    if n_head == 0 || !n_state.is_multiple_of(n_head) {
+        return Err(FwError::InvalidRequest(format!(
+            "attention: n_head {n_head} must divide n_state {n_state}"
+        )));
+    }
+    if k.len() != tk * n_state || v.len() != tk * n_state {
+        return Err(FwError::InvalidRequest(format!(
+            "attention: k/v slice len {}/{} != tk*n_state {}",
+            k.len(),
+            v.len(),
+            tk * n_state
+        )));
+    }
     let tq = q.rows;
-    let tk = k.rows;
     let d_head = n_state / n_head;
     if d_head == 0 {
         return Err(FwError::InvalidRequest("attention: d_head == 0".into()));
@@ -608,7 +681,7 @@ pub fn attention(
         }
         let mut kh = vec![0.0f32; tk * d_head];
         for j in 0..tk {
-            let src = &k.row(j)[base..base + d_head];
+            let src = &k[j * n_state + base..j * n_state + base + d_head];
             let dst = &mut kh[j * d_head..(j + 1) * d_head];
             for (d, &s) in dst.iter_mut().zip(src) {
                 *d = s * scale;
@@ -645,7 +718,7 @@ pub fn attention(
         // Gather this head's V [Tk, d_head] (unscaled), out_h = scores @ V.
         let mut vh = vec![0.0f32; tk * d_head];
         for j in 0..tk {
-            let src = &v.row(j)[base..base + d_head];
+            let src = &v[j * n_state + base..j * n_state + base + d_head];
             let dst = &mut vh[j * d_head..(j + 1) * d_head];
             dst.copy_from_slice(src);
         }
@@ -737,9 +810,20 @@ pub fn attention_with_cache(
 ) -> FwResult<Mat> {
     let past_len = cache.len();
     cache.append(k_new, v_new)?;
-    let k_all = cache.keys();
-    let v_all = cache.values();
-    attention(q, &k_all, &v_all, n_head, Some(past_len))
+    // Attend directly over the cache's populated prefix — no `[len, n_state]`
+    // copy-out per step (the old `keys()`/`values()` each `.to_vec()`'d the
+    // whole prefix, the dominant per-step memmove on wide models). The raw
+    // path reads the identical bytes in the identical order, so the result is
+    // bit-identical to the `Mat`-based attention.
+    let tk = cache.len();
+    attention_raw(
+        q,
+        cache.key_slice(),
+        cache.value_slice(),
+        tk,
+        n_head,
+        Some(past_len),
+    )
 }
 
 /// Cache-blocked, multi-threaded out-of-place transpose: `data` viewed as
@@ -1270,6 +1354,63 @@ mod tests {
         assert!(cache.is_empty());
         cache.append(&row, &row).unwrap();
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn matmul_raw_lhs_bit_identical_to_matmul() {
+        // The tied-logits band path multiplies an embedding row band in place
+        // via `matmul_raw_lhs`; it must be byte-for-byte the copy-then-matmul.
+        let mut rng = Lcg::new(101);
+        for (m, k, n) in [(1usize, 384usize, 1usize), (6483, 1280, 1), (5, 64, 3)] {
+            let a = rng.mat(m, k);
+            let b = rng.mat(k, n);
+            let raw = matmul_raw_lhs(&a.data, m, &b).unwrap();
+            let copied = matmul(&a, &b).unwrap();
+            assert_eq!(raw.rows, m);
+            assert_eq!(raw.cols, n);
+            assert_eq!(
+                raw.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                copied.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "matmul_raw_lhs differs bitwise at {m}x{k}x{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn matmul_raw_lhs_len_mismatch_errors() {
+        let b = Mat::zeros(3, 2);
+        assert!(matmul_raw_lhs(&[1.0, 2.0], 1, &b).is_err());
+    }
+
+    #[test]
+    fn attention_raw_bit_identical_to_mat_path() {
+        // `attention_with_cache` attends over the KvCache's raw prefix slice via
+        // `attention_raw`; it must be byte-for-byte the `Mat`-based `attention`.
+        let mut rng = Lcg::new(202);
+        let n_head = 4;
+        let n_state = 32;
+        let q = rng.mat(1, n_state);
+        let k = rng.mat(7, n_state);
+        let v = rng.mat(7, n_state);
+        for off in [None, Some(0usize), Some(3usize)] {
+            let viamat = attention(&q, &k, &v, n_head, off).unwrap();
+            let viaraw = attention_raw(&q, &k.data, &v.data, k.rows, n_head, off).unwrap();
+            assert_eq!(
+                viamat.data.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                viaraw.data.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "attention_raw differs bitwise (offset {off:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn key_value_slice_match_keys_values() {
+        let mut cache = KvCache::new(4, 6);
+        let mut rng = Lcg::new(303);
+        let r = rng.mat(2, 6);
+        cache.append(&r, &r).unwrap();
+        assert_eq!(cache.key_slice(), cache.keys().data.as_slice());
+        assert_eq!(cache.value_slice(), cache.values().data.as_slice());
     }
 
     #[test]
