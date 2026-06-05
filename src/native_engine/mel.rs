@@ -73,6 +73,18 @@ fn hann_window() -> [f32; N_FFT] {
     w
 }
 
+/// The length-`N_FFT` periodic Hann window, computed once and cached for the
+/// life of the process.
+///
+/// The window is a pure function of `N_FFT`, but [`log_mel`] used to recompute
+/// it (400 `cos` calls) on every call. whisper.cpp likewise caches its window
+/// globally. We memoize behind a [`OnceLock`](std::sync::OnceLock) so the cosine
+/// loop runs at most once regardless of how many clips are processed.
+fn cached_hann_window() -> &'static [f32; N_FFT] {
+    static HANN: std::sync::OnceLock<[f32; N_FFT]> = std::sync::OnceLock::new();
+    HANN.get_or_init(hann_window)
+}
+
 /// Naive O(N^2) DFT of a real input. `out` is interleaved complex,
 /// length `2*N`: `out[2k] = Re`, `out[2k+1] = Im`. Mirrors whisper.cpp `dft`.
 fn dft(input: &[f32], out: &mut [f32]) {
@@ -264,7 +276,7 @@ pub fn log_mel(samples: &[f32], filters: &MelFilterbank, n_threads: usize) -> Fw
         ));
     }
 
-    let hann = hann_window();
+    let hann = cached_hann_window();
     let (padded, valid_len) = build_padded(samples);
     let n_frames = (padded.len() - N_FFT) / HOP;
     let n_mel = filters.n_mel;
@@ -290,7 +302,9 @@ pub fn log_mel(samples: &[f32], filters: &MelFilterbank, n_threads: usize) -> Fw
             }
             let end = (start + frames_per_thread).min(n_frames);
             let padded_ref = &padded;
-            let hann_ref = &hann;
+            // `hann` is already a `&'static [f32; N_FFT]`; copy the reference
+            // into the worker closure.
+            let hann_ref = hann;
             let filters_ref = filters;
             handles.push(scope.spawn(move || {
                 let len = end - start;

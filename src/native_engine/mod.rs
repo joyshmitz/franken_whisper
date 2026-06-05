@@ -384,9 +384,13 @@ pub fn default_threads() -> usize {
 /// `large-v3-turbo` is well over 1 GB. The global cache holds only [`Weak`]
 /// references, so the weights live exactly as long as some caller holds an
 /// `Arc<NativeWhisperModel>`. When the last `Arc` drops, the memory is freed
-/// immediately and the cache slot becomes a dangling `Weak` that the next
-/// [`load`](Self::load) call replaces. Hold an `Arc` for the duration of a run
-/// (or longer to keep the model warm); drop it to reclaim the RAM.
+/// immediately and the cache slot becomes a dangling `Weak`. Every
+/// [`load`](Self::load) that inserts a new entry also prunes **all** dead
+/// `Weak`s from the cache (not just the slot being re-loaded), so the
+/// `HashMap` cannot accumulate entries for models that have all been dropped —
+/// even when those models are never loaded again. Hold an `Arc` for the
+/// duration of a run (or longer to keep the model warm); drop it to reclaim the
+/// RAM.
 pub struct NativeWhisperModel {
     /// Parsed, inference-ready weights + tokenizer + filters + hparams.
     inner: decode::LoadedModel,
@@ -450,6 +454,10 @@ impl NativeWhisperModel {
         {
             return Ok(existing);
         }
+        // Prune every dead `Weak` (models whose last `Arc` has dropped), not
+        // just the slot we are about to overwrite, so the cache cannot grow
+        // unbounded with stale entries for models that are never reloaded.
+        cache.retain(|_, w| w.strong_count() > 0);
         cache.insert(canonical, Arc::downgrade(&model));
         Ok(model)
     }

@@ -131,6 +131,16 @@ impl SafetensorsFile {
     /// Overlapping spans are *not* rejected (the format permits aliasing); only
     /// in-bounds and exact-width are required.
     ///
+    /// # Duplicate tensor names
+    ///
+    /// The safetensors spec disallows duplicate keys in the JSON header, but we
+    /// do not reject them: the header is parsed with [`serde_json`], whose
+    /// object [`Map`](serde_json::Map) keeps the **last** value for a repeated
+    /// key. A header containing the same tensor name twice therefore resolves
+    /// *last-wins* — the final occurrence's `dtype`/`shape`/`data_offsets` are
+    /// the ones validated and exposed; earlier duplicates are silently dropped
+    /// before this function ever sees them.
+    ///
     /// # Errors
     ///
     /// [`FwError::Io`] on read failure; [`FwError::Json`] on a malformed header
@@ -142,6 +152,11 @@ impl SafetensorsFile {
 
     /// Parse from an in-memory safetensors byte buffer (the testable core of
     /// [`load`](Self::load)).
+    ///
+    /// Duplicate tensor names in the JSON header resolve *last-wins* via
+    /// [`serde_json::Map`] semantics — the spec disallows duplicate keys, but we
+    /// accept them and keep the final occurrence. See [`load`](Self::load) for
+    /// the full contract.
     ///
     /// # Errors
     ///

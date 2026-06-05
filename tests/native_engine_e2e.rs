@@ -437,3 +437,98 @@ fn gated_diarization_native_through_dispatch() {
         "diarizer must be honestly tagged as the text/temporal heuristic"
     );
 }
+
+// ===========================================================================
+// (f) double-diarization regression: --backend whisper-diarization --diarize
+//     must NOT diarize twice. The backend owns diarization, so the pipeline
+//     Diarize stage must emit a `diarize.skip` event with the structured
+//     `backend_owns_diarization` reason, while segments still carry the
+//     backend's SPEAKER_ labels.
+// ===========================================================================
+
+#[test]
+fn gated_diarize_flag_with_diarization_backend_skips_pipeline_diarize() {
+    if !tiny_en_available() {
+        eprintln!(
+            "SKIP gated_diarize_flag_with_diarization_backend_skips_pipeline_diarize: tiny.en model missing"
+        );
+        return;
+    }
+    let state = tempfile::tempdir().expect("tempdir");
+    let wav = jfk_wav();
+
+    let mut env = vec![
+        ("FRANKEN_WHISPER_NATIVE_EXECUTION", "1"),
+        ("FRANKEN_WHISPER_NATIVE_ROLLOUT_STAGE", "sole"),
+    ];
+    env.extend(bridge_bins_missing());
+
+    let run = run_transcribe(
+        &[
+            "--input",
+            wav.to_str().expect("utf8"),
+            "--backend",
+            "whisper-diarization",
+            "--diarize",
+            "--model",
+            "tiny.en",
+            "--no-persist",
+            "--json",
+        ],
+        &env,
+        state.path(),
+    );
+
+    // (a) success
+    assert!(
+        run.status.success(),
+        "diarize-flag + diarization-backend run failed\nstdout:\n{}\nstderr:\n{}",
+        run.stdout,
+        run.stderr
+    );
+    let report = run.report();
+
+    // (b) the events array contains a diarize skip with the backend-owns reason.
+    let events = report["events"].as_array().expect("report events array");
+    let diarize_skip = events
+        .iter()
+        .find(|e| e["code"].as_str() == Some("diarize.skip"))
+        .unwrap_or_else(|| {
+            let codes: Vec<&str> = events.iter().filter_map(|e| e["code"].as_str()).collect();
+            panic!("no diarize.skip event; codes seen: {codes:?}");
+        });
+    assert_eq!(
+        diarize_skip["payload"]["reason"], "backend_owns_diarization",
+        "pipeline diarize stage must be skipped because the backend owns diarization"
+    );
+    assert_eq!(
+        diarize_skip["payload"]["details"]["backend"],
+        "whisper_diarization"
+    );
+
+    // Defensively prove there was no SECOND diarize pass: exactly one
+    // diarize-stage event total, and it is the skip.
+    let diarize_events: Vec<&str> = events
+        .iter()
+        .filter(|e| e["stage"].as_str() == Some("diarize"))
+        .filter_map(|e| e["code"].as_str())
+        .collect();
+    assert_eq!(
+        diarize_events,
+        vec!["diarize.skip"],
+        "the pipeline diarize stage must run exactly once as a skip, never re-diarizing"
+    );
+
+    // (c) segments still carry SPEAKER_ labels (from the backend's diarizer).
+    let segments = report["result"]["segments"]
+        .as_array()
+        .expect("segments array");
+    assert!(!segments.is_empty(), "diarization produced no segments");
+    for seg in segments {
+        let speaker = seg["speaker"].as_str().unwrap_or_default();
+        assert!(
+            speaker.starts_with("SPEAKER_"),
+            "segment speaker `{speaker}` must be a SPEAKER_NN label from the backend"
+        );
+    }
+}

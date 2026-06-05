@@ -172,7 +172,12 @@ impl GgmlModel {
         let n_filter = n_mel
             .checked_mul(n_fft_bins)
             .ok_or_else(|| FwError::InvalidRequest("mel filterbank size overflow".to_owned()))?;
-        let mut data = Vec::with_capacity(n_filter);
+        // Clamp the capacity hint to what the remaining blob could actually
+        // supply (each filter element is one 4-byte f32). A crafted header that
+        // claims an absurd `n_mel * n_fft` must not force a multi-GB allocation
+        // before the per-element reads reach EOF and error out.
+        let filter_cap = n_filter.min(cur.remaining() / 4);
+        let mut data = Vec::with_capacity(filter_cap);
         for _ in 0..n_filter {
             data.push(cur.read_f32()?);
         }
@@ -185,7 +190,11 @@ impl GgmlModel {
         // Vocab — raw byte-level BPE tokens.
         let n_vocab_file = cur.read_i32()?;
         let n_vocab_file = usize_from_i32(n_vocab_file, "file vocab count")?;
-        let mut vocab_tokens = Vec::with_capacity(n_vocab_file);
+        // Clamp the capacity hint: every token costs at least its 4-byte u32
+        // length prefix, so no more than `remaining / 4` tokens can possibly
+        // follow. This bounds a crafted vocab count to the blob's real size.
+        let vocab_cap = n_vocab_file.min(cur.remaining() / 4);
+        let mut vocab_tokens = Vec::with_capacity(vocab_cap);
         for _ in 0..n_vocab_file {
             let len = cur.read_u32()? as usize;
             vocab_tokens.push(cur.read_bytes(len)?.to_vec());
@@ -403,6 +412,13 @@ impl<'a> Cursor<'a> {
         self.pos >= self.buf.len()
     }
 
+    /// Bytes left to read from the current position. Used to clamp speculative
+    /// `Vec::with_capacity` hints so a crafted header count cannot force a huge
+    /// allocation before the per-element reads hit EOF.
+    fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
+    }
+
     fn read_bytes(&mut self, len: usize) -> FwResult<&'a [u8]> {
         let end = self
             .pos
@@ -559,6 +575,67 @@ mod tests {
         assert_eq!(model.filters.n_mel, 2);
         assert_eq!(model.filters.n_fft_bins, 3);
         assert_eq!(model.filters.data, vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5]);
+    }
+
+    #[test]
+    fn absurd_filterbank_count_errors_without_huge_allocation() {
+        // A crafted header with a valid magic + hparams that then claims an
+        // absurd filterbank size (n_mel * n_fft ≈ 1 billion floats ≈ 4 GiB)
+        // but provides no actual filter data. The clamp must keep the
+        // speculative `Vec::with_capacity` bounded by the (tiny) remaining
+        // blob, so we get a clean truncation error instead of an OOM-scale
+        // allocation.
+        let mut b = SyntheticModel { bytes: Vec::new() };
+        b.push_u32(GGML_MAGIC);
+        for v in [5i32, 1500, 384, 6, 4, 448, 384, 6, 4, 80, 1] {
+            b.push_i32(v);
+        }
+        // filterbank: claim 32768 x 32768 ≈ 1.07e9 elements, but append nothing.
+        b.push_i32(32_768);
+        b.push_i32(32_768);
+        // No filter data follows: the very first read_f32 hits EOF.
+        let blob_len = b.bytes.len();
+        let err = GgmlModel::parse(b.bytes).expect_err("absurd filterbank must error");
+        match err {
+            FwError::InvalidRequest(msg) => {
+                assert!(
+                    msg.contains("end of file") || msg.contains("overflow"),
+                    "expected a truncation/overflow error, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+        // Sanity: the blob itself is tiny (header-only), proving the claimed
+        // count vastly exceeded available bytes and the clamp was load-bearing.
+        assert!(blob_len < 128, "header-only blob should be tiny");
+    }
+
+    #[test]
+    fn absurd_vocab_count_errors_without_huge_allocation() {
+        // Valid header + a real (small) filterbank, then an absurd vocab count
+        // with no token data. The vocab capacity clamp bounds the allocation;
+        // the first token-length read hits EOF for a clean error.
+        let mut b = SyntheticModel { bytes: Vec::new() };
+        b.push_u32(GGML_MAGIC);
+        for v in [5i32, 1500, 384, 6, 4, 448, 384, 6, 4, 80, 1] {
+            b.push_i32(v);
+        }
+        // filterbank 1x1 with one real float so we reach the vocab section.
+        b.push_i32(1);
+        b.push_i32(1);
+        b.push_f32(0.0);
+        // vocab: claim ~1 billion tokens, append nothing.
+        b.push_i32(1_000_000_000);
+        let err = GgmlModel::parse(b.bytes).expect_err("absurd vocab must error");
+        match err {
+            FwError::InvalidRequest(msg) => {
+                assert!(
+                    msg.contains("end of file") || msg.contains("overflow"),
+                    "expected a truncation/overflow error, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]

@@ -96,9 +96,11 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 ///
 /// We scan the preceding lines for the **nearest** structural marker. If that
 /// marker is a `#[cfg(test)]` attribute (with `mod`/`fn`/block following), the
-/// line is test-only. If it is a `pub fn` / `fn` / `impl` / `pub struct` /
-/// `struct` / `const` at column 0 *without* a `#[cfg(test)]` above it, the line
-/// is production. This deliberately simple line-based heuristic matches the
+/// line is test-only. If it is any column-0 item keyword (`fn`, `struct`,
+/// `enum`, `trait`, `impl`, `const`, `static`, `type`, `mod`, `use`, `union`,
+/// `macro_rules!`, with or without a `pub` / `pub(crate)` prefix — see
+/// [`line_starts_production_item`]) *without* a `#[cfg(test)]` above it, the
+/// line is production. This deliberately simple line-based heuristic matches the
 /// project's conventions (test code lives in `#[cfg(test)] mod tests { ... }`
 /// at the bottom of each file, or in clearly-attributed test fns) and is good
 /// enough for an honesty guard; it errs toward flagging (treating ambiguous
@@ -115,17 +117,7 @@ fn line_is_in_cfg_test(contents: &str, target_line: usize) -> bool {
         // A column-0 (un-indented) item that is NOT preceded by #[cfg(test)]
         // marks the start of a production item: stop here.
         let at_col0 = !lines[i].starts_with(char::is_whitespace) && !lines[i].is_empty();
-        let is_item = at_col0
-            && (trimmed.starts_with("pub fn ")
-                || trimmed.starts_with("fn ")
-                || trimmed.starts_with("pub struct ")
-                || trimmed.starts_with("struct ")
-                || trimmed.starts_with("impl ")
-                || trimmed.starts_with("pub const ")
-                || trimmed.starts_with("const ")
-                || trimmed.starts_with("pub mod ")
-                || trimmed.starts_with("mod "));
-        if is_item {
+        if at_col0 && line_starts_production_item(trimmed) {
             // Only treat as a production boundary if the line just above it is
             // not a #[cfg(test)] attribute.
             if i > 0 && lines[i - 1].trim_start().starts_with("#[cfg(test)]") {
@@ -135,4 +127,176 @@ fn line_is_in_cfg_test(contents: &str, target_line: usize) -> bool {
         }
     }
     false
+}
+
+/// Does `trimmed` (a column-0 line, already left-trimmed) begin a top-level
+/// Rust item that marks a production boundary?
+///
+/// The list must cover **every** item kind that can legally sit at column 0,
+/// because a production item appearing *below* a trailing `#[cfg(test)] mod`
+/// would otherwise be misclassified as test-only: the backward scan must hit
+/// the production item's own keyword before it ever reaches the test module's
+/// `#[cfg(test)]`. We therefore include not just `fn`/`struct`/`impl`/`const`/
+/// `mod` but also `static`, `type`, `enum`, `trait`, `use`, and
+/// `macro_rules!` — with their `pub` / `pub(crate)` visibility prefixes.
+fn line_starts_production_item(trimmed: &str) -> bool {
+    // Strip an optional leading visibility modifier so we match the item keyword
+    // regardless of `pub`, `pub(crate)`, `pub(super)`, `pub(in ...)`, etc.
+    let rest = strip_visibility(trimmed);
+    // `macro_rules!` has no trailing space before `!`; handle it explicitly.
+    if rest.starts_with("macro_rules!") {
+        return true;
+    }
+    const ITEM_KEYWORDS: &[&str] = &[
+        "fn ", "struct ", "enum ", "trait ", "impl ", "const ", "static ", "type ", "mod ", "use ",
+        "union ",
+    ];
+    ITEM_KEYWORDS.iter().any(|kw| rest.starts_with(kw))
+}
+
+/// Strip a leading `pub`, `pub(crate)`, `pub(super)`, `pub(self)`, or
+/// `pub(in path)` visibility modifier (and the following whitespace) from a
+/// left-trimmed line, returning the remainder. Lines without a visibility
+/// prefix are returned unchanged.
+fn strip_visibility(trimmed: &str) -> &str {
+    let Some(after_pub) = trimmed.strip_prefix("pub") else {
+        return trimmed;
+    };
+    // Bare `pub ` (e.g. `pub fn`).
+    if let Some(rest) = after_pub.strip_prefix(' ') {
+        return rest.trim_start();
+    }
+    // Restricted `pub(...)` — skip the balanced parenthesis group.
+    if after_pub.starts_with('(')
+        && let Some(close) = after_pub.find(')')
+    {
+        return after_pub[close + 1..].trim_start();
+    }
+    // `pub` immediately followed by something unexpected: leave as-is.
+    trimmed
+}
+
+#[cfg(test)]
+mod classifier_tests {
+    use super::{line_is_in_cfg_test, line_starts_production_item, strip_visibility};
+
+    #[test]
+    fn strip_visibility_handles_all_forms() {
+        assert_eq!(strip_visibility("pub fn foo()"), "fn foo()");
+        assert_eq!(strip_visibility("pub(crate) struct S;"), "struct S;");
+        assert_eq!(
+            strip_visibility("pub(super) static X: u8 = 0;"),
+            "static X: u8 = 0;"
+        );
+        assert_eq!(strip_visibility("pub(in crate::a) enum E {}"), "enum E {}");
+        assert_eq!(strip_visibility("fn bare()"), "fn bare()");
+        // `pubfoo` is not a visibility modifier.
+        assert_eq!(strip_visibility("pubfoo"), "pubfoo");
+    }
+
+    #[test]
+    fn production_item_keywords_are_recognized() {
+        for line in [
+            "fn f() {}",
+            "pub fn f() {}",
+            "struct S;",
+            "pub struct S;",
+            "enum E {}",
+            "pub enum E {}",
+            "trait T {}",
+            "pub trait T {}",
+            "impl S {}",
+            "const C: u8 = 0;",
+            "pub const C: u8 = 0;",
+            "static S: u8 = 0;",
+            "pub static S: u8 = 0;",
+            "type Alias = u8;",
+            "pub type Alias = u8;",
+            "mod m {}",
+            "pub mod m {}",
+            "use crate::Foo;",
+            "pub use crate::Foo;",
+            "union U { a: u8 }",
+            "macro_rules! mac { () => {} }",
+            "pub(crate) fn f() {}",
+        ] {
+            assert!(
+                line_starts_production_item(line),
+                "should be recognized as a production item: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_items_are_not_production_boundaries() {
+        // `line_starts_production_item` is only ever called on a left-trimmed
+        // line that the caller has already confirmed sits at column 0, so each
+        // case here is the trimmed form of a non-item line.
+        for line in [
+            "let x = 5;",
+            "// a comment",
+            "#[derive(Debug)]",
+            "return Ok(());",
+            "}",
+            "usize_value += 1;",    // starts with "us" but not the `use ` keyword
+            "structure.field = 1;", // starts with "struct" but not `struct `
+            "fnord();",             // starts with "fn" but not `fn `
+        ] {
+            assert!(
+                !line_starts_production_item(line),
+                "should NOT be a production item: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_item_below_trailing_test_mod_is_not_test_only() {
+        // The motivating case: a production `static`/`enum`/`use` placed AFTER a
+        // trailing `#[cfg(test)] mod tests`. Without the extended keyword list,
+        // the backward scan would skip past the production item and reach the
+        // test module's `#[cfg(test)]`, misclassifying the production line as
+        // test-only. With the extension it correctly stops at the item.
+        let src = "\
+#[cfg(test)]
+mod tests {
+    fn helper() {}
+}
+
+static PRODUCTION_TABLE: &[&str] = &[
+    \"The quick brown fox jumps over the lazy dog\",
+];
+";
+        let lines: Vec<&str> = src.lines().collect();
+        let target = lines
+            .iter()
+            .position(|l| l.contains("The quick brown fox"))
+            .expect("fixture line present");
+        assert!(
+            !line_is_in_cfg_test(src, target),
+            "a production static below a trailing test mod must NOT be classified test-only"
+        );
+    }
+
+    #[test]
+    fn line_inside_real_test_mod_is_test_only() {
+        let src = "\
+fn production() {}
+
+#[cfg(test)]
+mod tests {
+    fn t() {
+        let _ = \"Hello world, this is a test transcription\";
+    }
+}
+";
+        let lines: Vec<&str> = src.lines().collect();
+        let target = lines
+            .iter()
+            .position(|l| l.contains("Hello world"))
+            .expect("fixture line present");
+        assert!(
+            line_is_in_cfg_test(src, target),
+            "a line inside #[cfg(test)] mod tests must be classified test-only"
+        );
+    }
 }

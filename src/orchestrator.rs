@@ -1418,6 +1418,18 @@ fn optional_stage_skip(
                         json!({"diarize": request.diarize}),
                     ),
                 ))
+            } else if request.backend == crate::model::BackendKind::WhisperDiarization {
+                // The whisper-diarization backend performs speaker diarization
+                // internally (see whisper_diarization_native.rs); running the
+                // pipeline Diarize stage as well would diarize the segments a
+                // second time. Skip it and let the backend own diarization.
+                Some((
+                    "backend_owns_diarization".to_owned(),
+                    stage_skip_payload(
+                        "backend_owns_diarization",
+                        json!({"backend": request.backend.as_str()}),
+                    ),
+                ))
             } else {
                 None
             }
@@ -7526,6 +7538,42 @@ mod tests {
         let separate_skip = optional_stage_skip(PipelineStage::Separate, &request)
             .expect("no_stem should skip source separation");
         assert_eq!(separate_skip.0, "source_separation_disabled");
+    }
+
+    #[test]
+    fn optional_stage_skip_diarize_skipped_when_backend_owns_diarization() {
+        // When diarization is requested AND the whisper-diarization backend is
+        // selected, the backend performs diarization internally. The pipeline
+        // Diarize stage must be skipped to avoid diarizing the segments twice.
+        let request = TranscribeRequest {
+            input: InputSource::File {
+                path: PathBuf::from("input.wav"),
+            },
+            backend: BackendKind::WhisperDiarization,
+            model: None,
+            language: None,
+            translate: false,
+            diarize: true,
+            persist: false,
+            db_path: PathBuf::from("db.sqlite3"),
+            timeout_ms: None,
+            backend_params: BackendParams::default(),
+        };
+
+        let (reason, payload) = optional_stage_skip(PipelineStage::Diarize, &request)
+            .expect("whisper-diarization backend should skip the pipeline diarize stage");
+        assert_eq!(reason, "backend_owns_diarization");
+        assert_eq!(payload["reason"], "backend_owns_diarization");
+        assert_eq!(payload["details"]["backend"], "whisper_diarization");
+
+        // Sanity: a non-diarization backend still runs the diarize stage when
+        // diarization is requested.
+        let mut other = request.clone();
+        other.backend = BackendKind::WhisperCpp;
+        assert!(
+            optional_stage_skip(PipelineStage::Diarize, &other).is_none(),
+            "non-diarization backend should still run the diarize stage"
+        );
     }
 
     #[test]

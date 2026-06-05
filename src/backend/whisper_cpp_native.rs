@@ -37,7 +37,8 @@
 //! linear interpolation with attention-DTW and flips the flag to `"dtw"`.
 
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -107,8 +108,69 @@ pub(crate) fn word_timestamp_mode(params: Option<&WordTimestampParams>) -> WordT
 ///    router stays bridge-only.
 ///
 /// Never panics or performs any network access (header-only sniffing).
+///
+/// # Caching
+///
+/// The underlying probe ([`is_available_uncached`]) re-scans up to five model
+/// directories and header-sniffs every `ggml-*.bin` it finds. That is cheap in
+/// isolation but the router calls `is_available` on *every* routing decision and
+/// the robot health endpoint iterates all three engines, so the same scan was
+/// being repeated many times per second under load. We memoize the result
+/// behind a process-global [`Mutex`] with a short [`AVAILABILITY_TTL`] so bursts
+/// of probes collapse to one scan, while a freshly-provisioned model file still
+/// becomes visible within the TTL window — important for tests that create a
+/// model file mid-process and then probe availability. Tests that need the cache
+/// cleared immediately can call [`reset_availability_cache`] (test-only).
 #[must_use]
 pub fn is_available() -> bool {
+    let now = Instant::now();
+    {
+        let guard = availability_cache()
+            .lock()
+            .expect("availability cache lock");
+        if let Some((stamped, value)) = *guard
+            && now.duration_since(stamped) < AVAILABILITY_TTL
+        {
+            return value;
+        }
+    }
+    let value = is_available_uncached();
+    let mut guard = availability_cache()
+        .lock()
+        .expect("availability cache lock");
+    *guard = Some((Instant::now(), value));
+    value
+}
+
+/// Time-to-live for the [`is_available`] memoization. Two seconds is short
+/// enough that a model file created mid-process (the worst case is a test that
+/// drops a `ggml-*.bin` in a search dir and immediately re-probes) is observed
+/// promptly, yet long enough that the per-routing-decision and per-health-check
+/// probe bursts collapse to a single directory scan.
+const AVAILABILITY_TTL: Duration = Duration::from_secs(2);
+
+/// Process-global cache of the most recent availability probe: `(taken_at,
+/// available)`. Lazily initialized; guarded by a [`Mutex`] because probes can
+/// race across the async runtime's worker threads.
+fn availability_cache() -> &'static Mutex<Option<(Instant, bool)>> {
+    static CACHE: std::sync::OnceLock<Mutex<Option<(Instant, bool)>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Clear the [`is_available`] memoization so the next probe re-scans the model
+/// search dirs. Test-only: in-process tests that toggle availability (e.g. by
+/// creating or removing a model file) need a deterministic flip without waiting
+/// for [`AVAILABILITY_TTL`].
+#[cfg(test)]
+pub(crate) fn reset_availability_cache() {
+    *availability_cache()
+        .lock()
+        .expect("availability cache lock") = None;
+}
+
+/// The uncached availability probe. Performs the actual directory scan and
+/// header sniffing; see [`is_available`] for the memoizing wrapper.
+fn is_available_uncached() -> bool {
     if let Some(spec) = native_engine::default_model_spec()
         && native_engine::native_model_available(&spec)
     {
@@ -894,6 +956,38 @@ mod tests {
         assert!(
             msg.contains("ggml-definitely-not-a-real-model-zzz.bin"),
             "message names the searched filename: {msg}"
+        );
+    }
+
+    #[test]
+    fn is_available_is_memoized_within_ttl() {
+        // The memoized and uncached probes must agree, and repeated calls within
+        // the TTL must be served from the cache (proven by a populated cache
+        // entry after the first call). We do not mutate env (forbidden under
+        // edition 2024), so we assert consistency rather than a flip.
+        reset_availability_cache();
+        let direct = is_available_uncached();
+        let memoized = is_available();
+        assert_eq!(
+            direct, memoized,
+            "memoized availability must match the uncached probe"
+        );
+        // A cache entry now exists and a second call returns the same value.
+        {
+            let guard = availability_cache().lock().expect("lock");
+            assert!(guard.is_some(), "first probe must populate the cache");
+            assert_eq!(guard.expect("entry").1, memoized);
+        }
+        assert_eq!(
+            is_available(),
+            memoized,
+            "second probe within TTL must return the cached value"
+        );
+        // The reset helper clears the cache for the next test.
+        reset_availability_cache();
+        assert!(
+            availability_cache().lock().expect("lock").is_none(),
+            "reset must clear the cache"
         );
     }
 

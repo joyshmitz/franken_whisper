@@ -60,7 +60,7 @@ use super::decoder::{self, DecoderState, DecoderWeights};
 use super::dtw::{self, WordTiming};
 use super::encoder::{self, EncoderWeights};
 use super::ggml::GgmlModel;
-use super::mel::{self, FRAMES_PER_CHUNK, HOP, SAMPLE_RATE};
+use super::mel::{self, FRAMES_PER_CHUNK, SAMPLE_RATE};
 use super::tokenizer::{LANGUAGES, Tokenizer};
 use super::{Mel, MelFilterbank, WhisperHParams};
 
@@ -81,6 +81,14 @@ const LOGPROB_THRESHOLD: f64 = -1.0;
 
 /// Default maximum initial timestamp, in seconds (whisper.cpp 5973).
 const MAX_INITIAL_TS_SEC: f32 = 1.0;
+
+/// Finite sentinel for `avg_logprob` on an empty-result window (fix #9). A true
+/// `f64::NEG_INFINITY` serializes to JSON `null` (serde_json has no infinity
+/// representation), making `windows[].avg_logprob` non-numeric. `-999.0` is far
+/// below any real average log-probability and below [`LOGPROB_THRESHOLD`], so it
+/// keeps the no-speech/failed-window gate behavior identical while remaining a
+/// finite, serializable number.
+const EMPTY_WINDOW_AVG_LOGPROB: f64 = -999.0;
 
 // ---------------------------------------------------------------------------
 // Public model bundle + parameters + output (the bd-hsbx interface contract)
@@ -199,6 +207,13 @@ struct FilterConfig {
     /// steps allowed on the initial step (whisper.cpp 6321-6327). `None`
     /// disables the clamp.
     max_initial_tid: Option<i32>,
+    /// Per-window token budget for the `max_tokens` EOT-forcing filter (fix #6 —
+    /// whisper.cpp 6234-6238). When timestamps are enabled and the running
+    /// in-window token count reaches this budget, every text token below `eot`
+    /// is masked, forcing a timestamp/eot to close the window. `None` (or `0`)
+    /// disables the filter (matching upstream's `params.max_tokens > 0` guard).
+    /// Inert in no-timestamps mode (the `!params.no_timestamps` guard).
+    max_tokens: Option<usize>,
 }
 
 /// Apply whisper's logit-filter suite IN ORDER and return the (mutated) logits
@@ -215,6 +230,7 @@ fn process_logits(
     prev_tokens: &[i32],
     has_ts: bool,
     seek_delta_cs: i64,
+    tokens_in_window: usize,
 ) -> (Vec<f32>, Vec<f32>) {
     let n = logits.len();
     let beg = tk.timestamp_begin;
@@ -241,6 +257,20 @@ fn process_logits(
     set(&mut logits, tk.no_timestamps);
     if cfg.no_timestamps {
         for i in beg..(n as i32) {
+            set(&mut logits, i);
+        }
+    }
+
+    // max_tokens EOT-forcing filter (fix #6 — whisper.cpp 6234-6238): when
+    // timestamps are enabled, the window is not a single segment, and the
+    // running token count has reached the budget, mask every text token below
+    // `eot` so the next step must emit a timestamp/eot and close the window.
+    if !cfg.no_timestamps
+        && let Some(max_tokens) = cfg.max_tokens
+        && max_tokens > 0
+        && tokens_in_window >= max_tokens
+    {
+        for i in 0..tk.eot {
             set(&mut logits, i);
         }
     }
@@ -400,26 +430,37 @@ fn argmax(logits: &[f32], logprobs: &[f32]) -> (i32, f32) {
 /// In `single_segment` / no-timestamps mode (`split == false`) a single segment
 /// spanning `[seek_cs, seek_cs + seek_delta_cs]` is produced (whisper.cpp
 /// 7402-7405, 7645 guard).
+///
+/// All emitted segment bounds are clamped to `[seek_cs, seek_end_cs]` (fix #1):
+/// a timestamp token can point into the zero-padded tail of the final window
+/// (worst on a hard-cut last clip), which would otherwise yield an `end_sec`
+/// past the real clip duration. `seek_end_cs` is the real (unpadded) audio
+/// length in centiseconds — whisper.cpp's `n_len_org` (6859-6860).
 fn build_segments(
     tk: &Tokenizer,
     tokens: &[i32],
     plogs: &[f32],
     seek_cs: i64,
     seek_delta_cs: i64,
+    seek_end_cs: i64,
     split: bool,
 ) -> Vec<TranscriptionSegment> {
     let beg = tk.timestamp_begin;
     let mut segments = Vec::new();
+
+    // Clamp a window-relative + seek-offset centisecond bound to the real audio
+    // length, never below the window start (fix #1).
+    let clamp = |t: i64| t.clamp(seek_cs, seek_end_cs.max(seek_cs));
 
     if !split {
         // Single segment spanning the whole window (whisper.cpp 7402-7405).
         let text = tk.decode(tokens).trim().to_string();
         if !text.is_empty() {
             segments.push(make_segment(
-                seek_cs,
-                seek_cs + seek_delta_cs,
+                clamp(seek_cs),
+                clamp(seek_cs + seek_delta_cs),
                 text,
-                confidence(plogs),
+                text_confidence(tk, tokens, plogs),
             ));
         }
         return segments;
@@ -429,7 +470,7 @@ fn build_segments(
     // t0 starts at the first token's implied timestamp (whisper.cpp 7626);
     // in greedy the first decoded token is normally the opening <|0.00|> ts.
     let mut i0 = 0usize;
-    let mut t0 = seek_cs + ts_offset_cs(tokens.first().copied(), beg);
+    let mut t0 = clamp(seek_cs + ts_offset_cs(tokens.first().copied(), beg));
     let mut i = 0usize;
 
     while i < tokens.len() {
@@ -437,17 +478,21 @@ fn build_segments(
         // A timestamp token strictly greater than `beg` closes a segment
         // (whisper.cpp 7645: `id > token_beg`). The bare `beg` (<|0.00|>) opens.
         if tok > beg {
-            let t1 = seek_cs + 2 * i64::from(tok - beg);
+            let t1 = clamp(seek_cs + 2 * i64::from(tok - beg));
             let text = tk.decode(&tokens[i0..=i]).trim().to_string();
             if !text.is_empty() {
-                let conf = confidence(plogs.get(i0..=i).unwrap_or(&[]));
+                let conf = text_confidence(
+                    tk,
+                    tokens.get(i0..=i).unwrap_or(&[]),
+                    plogs.get(i0..=i).unwrap_or(&[]),
+                );
                 segments.push(make_segment(t0, t1, text, conf));
             }
             t0 = t1;
             // Skip a run of consecutive timestamp tokens (whisper.cpp 7684-7690).
             while i + 1 < tokens.len() && tokens[i + 1] > beg {
                 i += 1;
-                t0 = seek_cs + 2 * i64::from(tokens[i] - beg);
+                t0 = clamp(seek_cs + 2 * i64::from(tokens[i] - beg));
             }
             i0 = i + 1;
         }
@@ -459,13 +504,36 @@ fn build_segments(
     if i0 < tokens.len() {
         let text = tk.decode(&tokens[i0..]).trim().to_string();
         if !text.is_empty() {
-            let t1 = seek_cs + seek_delta_cs;
-            let conf = confidence(plogs.get(i0..).unwrap_or(&[]));
+            let t1 = clamp(seek_cs + seek_delta_cs);
+            let conf = text_confidence(
+                tk,
+                tokens.get(i0..).unwrap_or(&[]),
+                plogs.get(i0..).unwrap_or(&[]),
+            );
             segments.push(make_segment(t0, t1, text, conf));
         }
     }
 
     segments
+}
+
+/// Whether the prompt context should be cleared before decoding a window with a
+/// very short audio tail (fix #2 — port of whisper.cpp 7046-7051):
+///
+/// ```text
+/// if (seek > seek_start && seek + 500 >= seek_end) {
+///     prompt_past0.clear();
+///     prompt_past1.clear();
+/// }
+/// ```
+///
+/// On a non-first window (`seek_cs > 0`, our `seek_start` is always 0) whose
+/// remaining audio is under 5 s (`seek_cs + 500 >= seek_end_cs`, 500 cs = 5 s),
+/// upstream drops the carried prompt because a short tail "tends to confuse the
+/// decoder and often make it repeat or hallucinate stuff". Extracted as a pure
+/// predicate so it can be unit-tested without a model.
+fn should_clear_short_tail_prompt(seek_cs: i64, seek_end_cs: i64) -> bool {
+    seek_cs > 0 && seek_cs + 500 >= seek_end_cs
 }
 
 /// Timestamp offset (centiseconds) implied by a (possibly text) token id, used
@@ -479,11 +547,42 @@ fn ts_offset_cs(tok: Option<i32>, beg: i32) -> i64 {
 }
 
 /// Per-segment confidence: `exp(mean token logprob)` clamped to `[0, 1]`.
+/// Superseded in production by [`text_confidence`] (fix #8, which excludes
+/// timestamp tokens); retained for the clamp/monotonicity unit test.
+#[cfg(test)]
 fn confidence(plogs: &[f32]) -> Option<f64> {
     if plogs.is_empty() {
         return None;
     }
     let mean = plogs.iter().map(|&p| f64::from(p)).sum::<f64>() / plogs.len() as f64;
+    Some(mean.exp().clamp(0.0, 1.0))
+}
+
+/// Per-segment **text** confidence (fix #8): `exp(mean text-token logprob)`
+/// clamped to `[0, 1]`, averaging only over the segment's *text* tokens —
+/// excluding the leading/closing timestamp tokens (and any special tokens). The
+/// metric documents itself as text confidence, so the closing `<|t|>` token's
+/// logprob (which can be high-confidence and unrelated to the words) must not
+/// dilute it. `tokens` and `plogs` are the segment's token ids and their chosen
+/// logprobs, 1:1. If a segment has no text tokens, returns `None`.
+fn text_confidence(tk: &Tokenizer, tokens: &[i32], plogs: &[f32]) -> Option<f64> {
+    let mut sum = 0.0f64;
+    let mut count = 0usize;
+    for (i, &tok) in tokens.iter().enumerate() {
+        // A text token is anything below the timestamp range that is not a
+        // special control token.
+        if tok < tk.timestamp_begin
+            && !tk.is_special(tok)
+            && let Some(&p) = plogs.get(i)
+        {
+            sum += f64::from(p);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let mean = sum / count as f64;
     Some(mean.exp().clamp(0.0, 1.0))
 }
 
@@ -538,11 +637,21 @@ pub fn transcribe_samples(
     // Window bounds in centiseconds: seek runs [0, seek_end) where seek_end is
     // the **original** (unpadded) audio length — whisper.cpp's `n_len_org`
     // (whisper.cpp 6859-6860). `log_mel` trails a full 30 s of silence padding,
-    // so `full_mel.n_frames` is NOT the right bound; the real length is
-    // `n_samples / HOP` frames, and one mel frame = 10 ms = 1 cs.
-    let seek_end_cs = i64::try_from(samples_16k_mono.len() / HOP)
-        .unwrap_or(i64::MAX)
-        .max(DELTA_MIN);
+    // so `full_mel.n_frames` is NOT the right bound. Upstream computes the real
+    // length as the mel `n_len_org` (whisper.cpp 3208):
+    //   n_len_org = 1 + (n_samples + stage_2_pad - frame_size) / frame_step
+    // with `stage_2_pad = 200`, `frame_size = 400`, `frame_step = 160`. One mel
+    // frame = 10 ms = 1 cs (fix #7). Guard underflow for `n_samples < 200` (the
+    // numerator `n_samples - 200` saturates to 0).
+    let seek_end_cs = {
+        let n_samples = samples_16k_mono.len() as i64;
+        const STAGE_2_PAD: i64 = 200;
+        const FRAME_SIZE: i64 = 400;
+        const FRAME_STEP: i64 = 160;
+        // n_samples + 200 - 400 = n_samples - 200, saturating at 0.
+        let numer = (n_samples + STAGE_2_PAD - FRAME_SIZE).max(0);
+        (1 + numer / FRAME_STEP).max(DELTA_MIN)
+    };
 
     // Resolve language: explicit, else auto-detect once (multilingual only).
     let mut used_language = resolve_language(m, params, &full_mel, checkpoint)?;
@@ -558,14 +667,6 @@ pub fn transcribe_samples(
         None
     };
 
-    let cfg = FilterConfig {
-        suppress_blank: true,
-        space_token,
-        suppress_nst: false, // whisper.cpp default (5970).
-        no_timestamps: !params.timestamps,
-        max_initial_tid,
-    };
-
     // Per-window decode budget (whisper.cpp 7205: n_text_ctx/2 - 4), with the
     // optional caller override.
     let n_text_ctx = m.decoder.n_text_ctx();
@@ -574,6 +675,16 @@ pub fn transcribe_samples(
         .max_text_ctx
         .unwrap_or(default_budget)
         .min(default_budget);
+
+    let cfg = FilterConfig {
+        suppress_blank: true,
+        space_token,
+        suppress_nst: false, // whisper.cpp default (5970).
+        no_timestamps: !params.timestamps,
+        max_initial_tid,
+        // EOT-forcing budget (fix #6): only meaningful with timestamps on.
+        max_tokens: Some(max_tokens),
+    };
     // Prompt context cap (whisper.cpp 6927): n_text_ctx/2.
     let max_prompt_ctx = n_text_ctx / 2;
 
@@ -600,6 +711,13 @@ pub fn transcribe_samples(
         let mel_window = mel::chunk_frames(&full_mel, frame_offset, FRAMES_PER_CHUNK);
         let enc = encoder::forward(&m.encoder, &mel_window, params.n_threads, checkpoint)?;
         let mut st = DecoderState::new(&m.decoder, &enc)?;
+
+        // Short-tail prompt clearing (fix #2 — whisper.cpp 7046-7051): a
+        // non-first window with under 5 s of audio left drops the carried prompt
+        // to avoid repetition/hallucination on the tail.
+        if should_clear_short_tail_prompt(seek_cs, seek_end_cs) {
+            prompt_past.clear();
+        }
 
         // Build the prompt: [sot_prev, ...past...] + sot_sequence (whisper.cpp
         // 7106-7133). prompt_init is the sot sequence for this language/task.
@@ -636,8 +754,15 @@ pub fn transcribe_samples(
         let mut step_logits = prefill_logits;
 
         for i in 0..max_tokens {
-            let (filtered, logprobs) =
-                process_logits(tk, &cfg, step_logits, &decoded, has_ts, seek_delta_cs);
+            let (filtered, logprobs) = process_logits(
+                tk,
+                &cfg,
+                step_logits,
+                &decoded,
+                has_ts,
+                seek_delta_cs,
+                decoded.len(),
+            );
             let (tok, plog) = argmax(&filtered, &logprobs);
             decoded.push(tok);
             plogs.push(plog);
@@ -686,7 +811,7 @@ pub fn transcribe_samples(
             &plogs[..]
         };
         let avg_logprob = if result_plogs.is_empty() {
-            f64::NEG_INFINITY
+            EMPTY_WINDOW_AVG_LOGPROB
         } else {
             result_plogs.iter().map(|&p| f64::from(p)).sum::<f64>() / result_plogs.len() as f64
         };
@@ -696,13 +821,19 @@ pub fn transcribe_samples(
         let is_no_speech = no_speech_prob > NO_SPEECH_THRESHOLD && avg_logprob < LOGPROB_THRESHOLD;
 
         // single-timestamp-ending: skip the rest of the chunk (whisper.cpp
-        // 7753-7760).
+        // 7753-7760). Ordering fix #5: upstream emits segments (7624-7730) and
+        // records DTW word timings with the ORIGINAL `seek_delta`, then applies
+        // this whole-chunk skip ONLY to the seek advance (7753-7760). So we keep
+        // `seek_delta_cs` untouched for build_segments/window_word_timings below
+        // and compute a separate `seek_advance_cs` for the window step.
         let single_ts_ending = decoded.len() > 1
             && decoded[decoded.len() - 2] < tk.timestamp_begin
             && decoded[decoded.len() - 1] > tk.timestamp_begin;
-        if single_ts_ending {
-            seek_delta_cs = (seek_end_cs - seek_cs).min(CHUNK_CS);
-        }
+        let seek_advance_cs = if single_ts_ending {
+            (seek_end_cs - seek_cs).min(CHUNK_CS)
+        } else {
+            seek_delta_cs
+        };
 
         windows.push(WindowStats {
             avg_logprob,
@@ -722,6 +853,7 @@ pub fn transcribe_samples(
                 result_token_plogs,
                 seek_cs,
                 seek_delta_cs,
+                seek_end_cs,
                 params.timestamps,
             );
 
@@ -768,8 +900,9 @@ pub fn transcribe_samples(
             prompt_past.clear();
         }
 
-        // Advance the window (whisper.cpp 7763).
-        seek_cs += seek_delta_cs.max(DELTA_MIN);
+        // Advance the window (whisper.cpp 7763) with the (possibly chunk-skip
+        // adjusted) advance, NOT the emission delta (fix #5).
+        seek_cs += seek_advance_cs.max(DELTA_MIN);
     }
 
     // English-only models never report a language; multilingual report the used
@@ -858,25 +991,35 @@ fn window_word_timings(
     // (1 cs = 1 mel frame = 10 ms); two mel frames per encoder frame.
     let n_audio_frames = (seek_delta_cs.clamp(0, CHUNK_CS) / 2) as usize;
 
-    // Per-(prompt)token start times over the whole batch.
-    let times = dtw::token_timestamps(
+    // Per-text-token END times (window-relative seconds), with normalization +
+    // DTW already restricted to the text rows (fix #3) and using upstream's
+    // END-boundary convention (fix #4). `first_text_row = sot_len`,
+    // `n_text_rows = text_tokens.len()` (the trailing eot row is excluded).
+    let text_ends = dtw::token_timestamps(
         &attn,
         m.hparams.n_text_head.max(0) as usize,
         align_heads,
+        sot_len,
+        text_tokens.len(),
         n_audio_frames,
         dtw::DEFAULT_MEDFILT_WIDTH,
     );
-    if times.is_empty() {
+    if text_ends.is_empty() {
         return Ok(vec![Vec::new(); win_segments.len()]);
     }
 
-    // Slice off the sot-sequence rows + the trailing eot row, leaving one start
-    // time per text token. Add the window seek offset (DTW times are relative to
-    // the window start).
+    // Reconcile END boundaries → token START times for word grouping (fix #4):
+    // a token's start is the previous token's END boundary; the first token
+    // starts at the window start (0, window-relative). Add the window seek
+    // offset (DTW times are relative to the window start).
     let seek_sec = seek_cs as f64 / 100.0;
     let text_starts: Vec<f32> = (0..text_tokens.len())
         .map(|i| {
-            let t = times.get(sot_len + i).copied().unwrap_or(0.0);
+            let t = if i == 0 {
+                0.0
+            } else {
+                text_ends.get(i - 1).copied().unwrap_or(0.0)
+            };
             (f64::from(t) + seek_sec) as f32
         })
         .collect();
@@ -986,19 +1129,20 @@ fn emit_segment_words(
         return;
     }
     // Skip whitespace-only spans the same way `build_segments` drops them.
+    // Build the span text by concatenating all token BYTES first, then a SINGLE
+    // `from_utf8_lossy` (fix #10) — matching `Tokenizer::decode`, which joins
+    // bytes before the lossy conversion. Per-token lossy decoding could split a
+    // multi-byte UTF-8 character across two BPE tokens into replacement
+    // characters, making this emptiness gate diverge from `build_segments`'s.
     let span_bytes: Vec<Vec<u8>> = text_tokens[start..end]
         .iter()
         .map(|&t| token_byte(t))
         .collect();
-    let span_text: String = span_bytes
-        .iter()
-        .flat_map(|b| {
-            String::from_utf8_lossy(b)
-                .into_owned()
-                .chars()
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let mut joined: Vec<u8> = Vec::new();
+    for b in &span_bytes {
+        joined.extend_from_slice(b);
+    }
+    let span_text = String::from_utf8_lossy(&joined);
     if span_text.trim().is_empty() {
         return;
     }
@@ -1178,6 +1322,7 @@ mod tests {
             suppress_nst: false,
             no_timestamps: false,
             max_initial_tid: None,
+            max_tokens: None,
         }
     }
 
@@ -1210,14 +1355,14 @@ mod tests {
     fn blank_and_eot_suppressed_at_step0() {
         let tk = synth_tokenizer();
         let cfg = base_cfg(&tk);
-        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &[], false, CHUNK_CS);
+        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &[], false, CHUNK_CS, 0);
         assert!(is_suppressed(&logits, tk.eot), "eot suppressed at step 0");
         assert!(is_suppressed(&logits, 1), "blank ' ' suppressed at step 0");
 
         // After one token, blank/eot are NOT suppressed by the blank rule.
         // (Use text-dominant logits so the timestamp-forcing rule doesn't mask
         // text/eot — see `text_dominant`.)
-        let (logits2, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS);
+        let (logits2, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS, 0);
         assert!(!is_suppressed(&logits2, tk.eot), "eot allowed after step 0");
         assert!(!is_suppressed(&logits2, 1), "blank allowed after step 0");
     }
@@ -1228,7 +1373,7 @@ mod tests {
     fn control_tokens_always_suppressed() {
         let tk = synth_tokenizer();
         let cfg = base_cfg(&tk);
-        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &[2], false, CHUNK_CS);
+        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &[2], false, CHUNK_CS, 0);
         for id in [tk.sot, tk.no_speech, tk.solm, tk.sot_prev, tk.no_timestamps] {
             assert!(is_suppressed(&logits, id), "control {id} suppressed");
         }
@@ -1245,11 +1390,11 @@ mod tests {
         let mut cfg = base_cfg(&tk);
         // Off by default: "(" (id 4) and " -" (id 5) are NOT suppressed.
         // Text-dominant logits keep the forcing rule from masking text.
-        let (off, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS);
+        let (off, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS, 0);
         assert!(!is_suppressed(&off, 4), "non-speech allowed when off");
         // On: they are suppressed.
         cfg.suppress_nst = true;
-        let (on, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS);
+        let (on, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS, 0);
         assert!(is_suppressed(&on, 4), "( suppressed when nst on");
         assert!(is_suppressed(&on, 5), "' -' suppressed when nst on");
     }
@@ -1262,7 +1407,7 @@ mod tests {
         let tk = synth_tokenizer();
         let cfg = base_cfg(&tk);
         let prev = [tk.timestamp_begin + 5, tk.timestamp_begin + 10];
-        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &prev, true, 20);
+        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &prev, true, 20, 0);
         assert!(
             is_suppressed(&logits, tk.timestamp_begin + 50),
             "timestamp suppressed when two ts precede"
@@ -1283,7 +1428,7 @@ mod tests {
         let prev = [2i32, tk.timestamp_begin + 10];
         let mut logits = vec![-5.0f32; tk.vocab_size() as usize];
         logits[tk.eot as usize] = 20.0; // eot clearly dominant
-        let (logits, _) = process_logits(&tk, &cfg, logits, &prev, true, 20);
+        let (logits, _) = process_logits(&tk, &cfg, logits, &prev, true, 20, 0);
         assert!(is_suppressed(&logits, 2), "text masked when one ts open");
         assert!(
             !is_suppressed(&logits, tk.eot),
@@ -1298,7 +1443,7 @@ mod tests {
         let tk = synth_tokenizer();
         let cfg = base_cfg(&tk);
         // has_ts with seek_delta=100cs => tid0 = 50; timestamps below beg+50 masked.
-        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &[2], true, 100);
+        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &[2], true, 100, 0);
         assert!(
             is_suppressed(&logits, tk.timestamp_begin + 10),
             "earlier timestamp masked"
@@ -1317,7 +1462,7 @@ mod tests {
         let mut cfg = base_cfg(&tk);
         // precision = 30/1500 = 0.02s; max_initial_ts=1.0s => tid0 = 50.
         cfg.max_initial_tid = Some(50);
-        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &[], false, CHUNK_CS);
+        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &[], false, CHUNK_CS, 0);
         // timestamps beyond beg+50 masked on the initial step.
         assert!(
             is_suppressed(&logits, tk.timestamp_begin + 51),
@@ -1346,7 +1491,7 @@ mod tests {
         for i in beg..(beg + 200).min(logits.len()) {
             logits[i] = 0.5;
         }
-        let (out, _) = process_logits(&tk, &cfg, logits, &[2], false, 0);
+        let (out, _) = process_logits(&tk, &cfg, logits, &[2], false, 0, 0);
         // All text logits (below beg) must be masked: a timestamp is forced.
         assert!(is_suppressed(&out, 2), "text masked: timestamp forced");
         assert!(is_suppressed(&out, 0), "all text masked");
@@ -1364,7 +1509,7 @@ mod tests {
         for l in &mut logits[beg..beg + 3] {
             *l = -5.0;
         }
-        let (out, lp) = process_logits(&tk, &cfg, logits, &[2], false, 0);
+        let (out, lp) = process_logits(&tk, &cfg, logits, &[2], false, 0, 0);
         assert!(!is_suppressed(&out, 2), "strong text not masked");
         let (tok, _) = argmax(&out, &lp);
         assert_eq!(tok, 2, "argmax selects the strong text token");
@@ -1377,10 +1522,58 @@ mod tests {
         let tk = synth_tokenizer();
         let mut cfg = base_cfg(&tk);
         cfg.no_timestamps = true;
-        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &[2], false, CHUNK_CS);
+        let (logits, _) = process_logits(&tk, &cfg, zeros(&tk), &[2], false, CHUNK_CS, 0);
         assert!(is_suppressed(&logits, tk.timestamp_begin));
         assert!(is_suppressed(&logits, tk.timestamp_begin + 100));
         assert!(!is_suppressed(&logits, 2), "text still allowed");
+    }
+
+    // ----- Rule 8: max_tokens EOT-forcing filter (fix #6) -----
+
+    #[test]
+    fn max_tokens_forces_eot_when_budget_reached() {
+        // Fix #6 (whisper.cpp 6234-6238): with timestamps on, once the running
+        // token count reaches the budget, all text (< eot) is masked, leaving
+        // only eot/timestamps selectable.
+        let tk = synth_tokenizer();
+        let mut cfg = base_cfg(&tk);
+        cfg.max_tokens = Some(4);
+        // Below budget: text still allowed (use text-dominant logits so the
+        // forcing rule doesn't mask text).
+        let (under, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS, 3);
+        assert!(!is_suppressed(&under, 2), "text allowed below budget");
+        // At budget: all text below eot masked.
+        let (at, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS, 4);
+        assert!(is_suppressed(&at, 2), "text masked at budget");
+        assert!(is_suppressed(&at, 0), "all text masked at budget");
+        // A timestamp remains selectable.
+        assert!(!is_suppressed(&at, tk.timestamp_begin + 1));
+    }
+
+    #[test]
+    fn max_tokens_filter_inert_in_no_timestamps_mode() {
+        // The EOT-force is guarded by `!no_timestamps` upstream.
+        let tk = synth_tokenizer();
+        let mut cfg = base_cfg(&tk);
+        cfg.no_timestamps = true;
+        cfg.max_tokens = Some(2);
+        let (out, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS, 5);
+        assert!(
+            !is_suppressed(&out, 2),
+            "text not masked in no-timestamps mode"
+        );
+    }
+
+    #[test]
+    fn max_tokens_filter_disabled_when_none_or_zero() {
+        let tk = synth_tokenizer();
+        let mut cfg = base_cfg(&tk);
+        cfg.max_tokens = None;
+        let (out, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS, 99);
+        assert!(!is_suppressed(&out, 2), "text allowed when budget is None");
+        cfg.max_tokens = Some(0);
+        let (out0, _) = process_logits(&tk, &cfg, text_dominant(&tk), &[2], false, CHUNK_CS, 99);
+        assert!(!is_suppressed(&out0, 2), "text allowed when budget is 0");
     }
 
     // -----------------------------------------------------------------------
@@ -1395,12 +1588,43 @@ mod tests {
         // 3.00s = 150 steps.
         let tokens = vec![beg, 2, 3, beg + 150];
         let plogs = vec![-0.1f32; tokens.len()];
-        let segs = build_segments(&tk, &tokens, &plogs, 0, 3000, true);
+        let segs = build_segments(&tk, &tokens, &plogs, 0, 3000, i64::MAX, true);
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].text, "hello world");
         assert!((segs[0].start_sec.unwrap() - 0.0).abs() < 1e-9);
         assert!((segs[0].end_sec.unwrap() - 3.0).abs() < 1e-9);
         assert!(segs[0].confidence.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn segment_confidence_excludes_closing_timestamp_token() {
+        // Fix #8: confidence averages only the segment's TEXT tokens (hello,
+        // world), not the leading/closing timestamp tokens. Give the timestamp
+        // tokens a very negative plog and the text tokens 0.0; the confidence
+        // must reflect only the text (exp(0)=1), proving the ts plogs are
+        // excluded. Observed delta vs the old all-token average: previously the
+        // closing/opening ts plogs (-5.0 each) dragged the mean to ~-2.5 →
+        // conf≈0.08; now text-only → conf=1.0.
+        let tk = synth_tokenizer();
+        let beg = tk.timestamp_begin;
+        let tokens = vec![beg, 2, 3, beg + 150];
+        // ts plogs very negative, text plogs perfect (0.0).
+        let plogs = vec![-5.0f32, 0.0, 0.0, -5.0f32];
+        let segs = build_segments(&tk, &tokens, &plogs, 0, 3000, i64::MAX, true);
+        assert_eq!(segs.len(), 1);
+        let conf = segs[0].confidence.unwrap();
+        assert!(
+            (conf - 1.0).abs() < 1e-9,
+            "text-only confidence should be exp(0)=1, got {conf}"
+        );
+    }
+
+    #[test]
+    fn text_confidence_none_for_timestamp_only_span() {
+        let tk = synth_tokenizer();
+        let beg = tk.timestamp_begin;
+        // A span with no text tokens → None.
+        assert!(text_confidence(&tk, &[beg, beg + 10], &[-0.1, -0.1]).is_none());
     }
 
     #[test]
@@ -1410,7 +1634,7 @@ mod tests {
         // <|0|> hello <|1|> world <|2|>
         let tokens = vec![beg, 2, beg + 50, 3, beg + 100];
         let plogs = vec![-0.2f32; tokens.len()];
-        let segs = build_segments(&tk, &tokens, &plogs, 0, 2000, true);
+        let segs = build_segments(&tk, &tokens, &plogs, 0, 2000, i64::MAX, true);
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].text, "hello");
         assert!((segs[0].end_sec.unwrap() - 1.0).abs() < 1e-9);
@@ -1427,7 +1651,7 @@ mod tests {
         // seek + seek_delta.
         let tokens = vec![beg, 2, beg + 50, 3];
         let plogs = vec![-0.2f32; tokens.len()];
-        let segs = build_segments(&tk, &tokens, &plogs, 0, 1500, true);
+        let segs = build_segments(&tk, &tokens, &plogs, 0, 1500, i64::MAX, true);
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[1].text, "world");
         // open tail end = seek_cs(0) + seek_delta(1500cs) = 15.0s.
@@ -1440,7 +1664,7 @@ mod tests {
         // No-timestamps mode: text tokens only, one segment spanning the window.
         let tokens = vec![2i32, 3];
         let plogs = vec![-0.3f32; 2];
-        let segs = build_segments(&tk, &tokens, &plogs, 500, 3000, false);
+        let segs = build_segments(&tk, &tokens, &plogs, 500, 3000, i64::MAX, false);
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].text, "hello world");
         assert!((segs[0].start_sec.unwrap() - 5.0).abs() < 1e-9);
@@ -1454,10 +1678,61 @@ mod tests {
         // Window starting at 30s (seek_cs=3000): <|0|> hello <|1|>.
         let tokens = vec![beg, 2, beg + 50];
         let plogs = vec![-0.1f32; tokens.len()];
-        let segs = build_segments(&tk, &tokens, &plogs, 3000, 3000, true);
+        let segs = build_segments(&tk, &tokens, &plogs, 3000, 3000, i64::MAX, true);
         assert_eq!(segs.len(), 1);
         assert!((segs[0].start_sec.unwrap() - 30.0).abs() < 1e-9);
         assert!((segs[0].end_sec.unwrap() - 31.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn segments_clamped_to_real_audio_length() {
+        // Fix #1: a closing timestamp token pointing past the real (unpadded)
+        // audio length must NOT yield an end_sec beyond the clip duration.
+        // Synthetic last window: <|0.00|> hello world <|10.00|> but the real
+        // audio is only 6.00 s (seek_end_cs = 600). The segment end must clamp
+        // to 6.00 s.
+        let tk = synth_tokenizer();
+        let beg = tk.timestamp_begin;
+        // <|0.00|> hello world <|10.00|> ; 10.00 s = 500 steps.
+        let tokens = vec![beg, 2, 3, beg + 500];
+        let plogs = vec![-0.1f32; tokens.len()];
+        // Window at seek 0, full 30 s delta, but real audio only 6.00 s.
+        let segs = build_segments(&tk, &tokens, &plogs, 0, 3000, 600, true);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "hello world");
+        assert!((segs[0].start_sec.unwrap() - 0.0).abs() < 1e-9);
+        // End clamped from 10.00 s to the real audio length 6.00 s.
+        assert!(
+            (segs[0].end_sec.unwrap() - 6.0).abs() < 1e-9,
+            "end {} clamped to real length 6.0",
+            segs[0].end_sec.unwrap()
+        );
+
+        // Open-tail clamp: text after the last timestamp pair, seek_delta beyond
+        // real length, must also clamp.
+        let tokens2 = vec![beg, 2, beg + 200, 3]; // <|0|> hello <|4|> world (open)
+        let plogs2 = vec![-0.1f32; tokens2.len()];
+        let segs2 = build_segments(&tk, &tokens2, &plogs2, 0, 3000, 600, true);
+        assert_eq!(segs2.len(), 2);
+        // open tail would close at seek_delta=30 s, clamped to 6.0 s.
+        assert!((segs2[1].end_sec.unwrap() - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn short_tail_prompt_clearing_predicate() {
+        // Fix #2 (whisper.cpp 7046-7051): clear on a non-first window whose
+        // remaining audio is < 5 s; never on the first window (seek == 0).
+        // seek_end = 1000 cs (10 s).
+        // First window: never clears.
+        assert!(!should_clear_short_tail_prompt(0, 1000));
+        // Non-first window, > 5 s left: no clear (seek 400 -> 6 s left).
+        assert!(!should_clear_short_tail_prompt(400, 1000));
+        // Non-first window, exactly 5 s left: clears (boundary `>=`).
+        assert!(should_clear_short_tail_prompt(500, 1000));
+        // Non-first window, < 5 s left: clears.
+        assert!(should_clear_short_tail_prompt(600, 1000));
+        // Last partial window near the very end.
+        assert!(should_clear_short_tail_prompt(900, 1000));
     }
 
     #[test]
