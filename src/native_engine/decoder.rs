@@ -64,6 +64,11 @@ use crate::error::{FwError, FwResult};
 /// Layer-norm epsilon used throughout whisper (`hparams.eps = 1e-5f`).
 const LN_EPS: f32 = 1e-5;
 
+/// One worker band's cross-K/V precompute result: the band's starting layer
+/// index plus its layers' `(Kcross, Vcross)` pairs, in layer order. Used to
+/// reassemble [`DecoderState::new`]'s parallel layer fan-out deterministically.
+type CrossKvBand = FwResult<(usize, Vec<(Mat, Mat)>)>;
+
 /// Pre-transposed linear weight `[in, out]` plus its optional bias `[out]`.
 ///
 /// Whisper linear layers are `y = x @ W^T + b` with `W` shaped `[out, in]`;
@@ -176,7 +181,11 @@ fn load_vec(
 
 /// Transpose a `[rows, cols]` matrix into a fresh `[cols, rows]` matrix.
 fn transpose(m: &Mat) -> Mat {
-    Mat::from_vec(m.cols, m.rows, nn::transpose_parallel(&m.data, m.rows, m.cols))
+    Mat::from_vec(
+        m.cols,
+        m.rows,
+        nn::transpose_parallel(&m.data, m.rows, m.cols),
+    )
 }
 
 /// Load a whisper linear layer (`[out, in]` weight) pre-transposed to
@@ -423,9 +432,16 @@ impl DecoderState {
         let d_head = w.n_state / w.n_head;
         let k_scale = (d_head as f32).powf(-0.25);
 
-        let mut cross_k = Vec::with_capacity(w.layers.len());
-        let mut cross_v = Vec::with_capacity(w.layers.len());
-        for layer in &w.layers {
+        // Per-layer cross K/V precompute. Each layer's K/V is an independent
+        // pair of `[enc_frames, n_state]` projections of the same encoder_out;
+        // the per-layer arithmetic is identical to the serial loop (same
+        // forward → same scale), only fanned out across layer bands. The
+        // results are reassembled in layer order, so `cross_k[li]`/`cross_v[li]`
+        // are bit-identical to the serial build. Threshold keeps tiny shapes
+        // (and the unit-test synthetic models) serial.
+        let n_layer = w.layers.len();
+        let compute_layer = |li: usize| -> FwResult<(Mat, Mat)> {
+            let layer = &w.layers[li];
             // Kcross = (encoder_out @ Wk^T) * d_head^-0.25  (no bias).
             let mut k = layer.cross_attn_k.forward(encoder_out)?;
             for val in &mut k.data {
@@ -433,8 +449,53 @@ impl DecoderState {
             }
             // Vcross = encoder_out @ Wv^T + bv.
             let v = layer.cross_attn_v.forward(encoder_out)?;
-            cross_k.push(k);
-            cross_v.push(v);
+            Ok((k, v))
+        };
+
+        const PAR_THRESHOLD: usize = 1 << 16; // enc_frames*n_state per projection
+        let work = enc_frames.saturating_mul(w.n_state);
+        let workers = nn::worker_count();
+        let mut cross_k: Vec<Mat> = Vec::with_capacity(n_layer);
+        let mut cross_v: Vec<Mat> = Vec::with_capacity(n_layer);
+        if n_layer < 2 || work < PAR_THRESHOLD || workers < 2 {
+            for li in 0..n_layer {
+                let (k, v) = compute_layer(li)?;
+                cross_k.push(k);
+                cross_v.push(v);
+            }
+        } else {
+            let workers = workers.min(n_layer);
+            let band = n_layer.div_ceil(workers).max(1);
+            let bands: Vec<CrossKvBand> = std::thread::scope(|s| {
+                let compute_layer = &compute_layer;
+                let mut handles = Vec::new();
+                let mut l0 = 0;
+                while l0 < n_layer {
+                    let l1 = (l0 + band).min(n_layer);
+                    handles.push(s.spawn(move || -> CrossKvBand {
+                        let mut local = Vec::with_capacity(l1 - l0);
+                        for li in l0..l1 {
+                            local.push(compute_layer(li)?);
+                        }
+                        Ok((l0, local))
+                    }));
+                    l0 = l1;
+                }
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            // Reassemble in layer order.
+            let mut ordered: Vec<Option<(Mat, Mat)>> = (0..n_layer).map(|_| None).collect();
+            for b in bands {
+                let (l0, local) = b?;
+                for (off, kv) in local.into_iter().enumerate() {
+                    ordered[l0 + off] = Some(kv);
+                }
+            }
+            for kv in ordered {
+                let (k, v) = kv.expect("every layer computed");
+                cross_k.push(k);
+                cross_v.push(v);
+            }
         }
 
         let kv = (0..w.layers.len())
@@ -553,8 +614,11 @@ fn cross_attention(
     let d_head = n_state / n_head;
     let q_scale = (d_head as f32).powf(-0.25);
 
-    let mut out = vec![0.0f32; tq * n_state];
-    for h in 0..n_head {
+    // Compute one head's scores [tq, tk] and output [tq, d_head]. Per-head
+    // math (scaled q·k^T → softmax → @v) is byte-for-byte the serial path;
+    // returned so the caller can either record `scores` (serial path) or
+    // scatter `out_h` (parallel path) deterministically.
+    let compute_head = |h: usize| -> FwResult<(Mat, Mat)> {
         let base = h * d_head;
 
         // Scaled query head [tq, d_head].
@@ -582,10 +646,6 @@ fn cross_attention(
         let mut scores = nn::matmul(&qh, &kh_t)?;
         nn::softmax_rows(&mut scores);
 
-        if record {
-            recorded.push(scores.clone());
-        }
-
         // Value head [tk, d_head]; out_h = scores @ vh.
         let mut vh = vec![0.0f32; tk * d_head];
         for j in 0..tk {
@@ -594,10 +654,73 @@ fn cross_attention(
         }
         let vh = Mat::from_vec(tk, d_head, vh);
         let out_h = nn::matmul(&scores, &vh)?; // [tq, d_head]
+        Ok((scores, out_h))
+    };
 
+    let scatter = |out: &mut [f32], h: usize, out_h: &Mat| {
+        let base = h * d_head;
         for i in 0..tq {
             let src = &out_h.data[i * d_head..(i + 1) * d_head];
             out[i * n_state + base..i * n_state + base + d_head].copy_from_slice(src);
+        }
+    };
+
+    let mut out = vec![0.0f32; tq * n_state];
+
+    // When recording (DTW word timestamps) we keep the serial head loop: it
+    // must push each head's softmax `scores` into `recorded` in head order,
+    // and recording is rarely hot (opt-in, off by default).
+    if record {
+        for h in 0..n_head {
+            let (scores, out_h) = compute_head(h)?;
+            recorded.push(scores);
+            scatter(&mut out, h, &out_h);
+        }
+        return Ok(Mat::from_vec(tq, n_state, out));
+    }
+
+    // Steady-state decode path (recording off): parallelize over heads. Each
+    // head owns a disjoint column band of `out`; like nn::attention, the
+    // merged output is strided per head, so workers scatter into private
+    // buffers which we then disjoint-merge (every position written by exactly
+    // one head, so `0.0 + x == x` exactly — bit-identical). Small decode-step
+    // shapes (tq=1) fall below the threshold and stay serial.
+    const PAR_THRESHOLD: usize = 1 << 18; // tq*tk*n_head MACs
+    let work = tq.saturating_mul(tk).saturating_mul(n_head);
+    let workers = nn::worker_count();
+    if n_head < 2 || work < PAR_THRESHOLD || workers < 2 {
+        for h in 0..n_head {
+            let (_, out_h) = compute_head(h)?;
+            scatter(&mut out, h, &out_h);
+        }
+        return Ok(Mat::from_vec(tq, n_state, out));
+    }
+
+    let workers = workers.min(n_head);
+    let band = n_head.div_ceil(workers).max(1);
+    let results: Vec<FwResult<Vec<f32>>> = std::thread::scope(|s| {
+        let compute_head = &compute_head;
+        let scatter = &scatter;
+        let mut handles = Vec::new();
+        let mut h0 = 0;
+        while h0 < n_head {
+            let h1 = (h0 + band).min(n_head);
+            handles.push(s.spawn(move || -> FwResult<Vec<f32>> {
+                let mut local = vec![0.0f32; tq * n_state];
+                for h in h0..h1 {
+                    let (_, out_h) = compute_head(h)?;
+                    scatter(&mut local, h, &out_h);
+                }
+                Ok(local)
+            }));
+            h0 = h1;
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for r in results {
+        let local = r?;
+        for (o, l) in out.iter_mut().zip(local.iter()) {
+            *o += *l;
         }
     }
     Ok(Mat::from_vec(tq, n_state, out))
@@ -706,8 +829,50 @@ pub fn forward_step(
 fn logits_last(w: &DecoderWeights, x_last: &Mat) -> FwResult<Vec<f32>> {
     // x_last^T is [n_state, 1].
     let x_t = Mat::from_vec(w.n_state, 1, x_last.data.clone());
-    let logits = nn::matmul(&w.token_embedding, &x_t)?; // [n_vocab, 1]
-    Ok(logits.data)
+
+    // This `[n_vocab, n_state] @ [n_state, 1]` GEMV is ~57% of tiny's
+    // per-token MACs (51864×384). Each output logit is an independent dot
+    // product over the n_state contraction; splitting the *vocab* dimension
+    // into row bands and running each band through the SAME `nn::matmul`
+    // (ft sgemm) leaves every output element's accumulation order untouched
+    // — bit-identical to the single full call — while distributing the rows
+    // across worker threads (the GEMV's n=1 inner shape barely rayon-splits
+    // on its own, hence the explicit row-band fan-out). Small n_vocab stays
+    // serial via the threshold.
+    let n_vocab = w.n_vocab;
+    let n_state = w.n_state;
+
+    const PAR_THRESHOLD: usize = 1 << 14; // n_vocab*n_state MACs
+    let workers = nn::worker_count();
+    if n_vocab.saturating_mul(n_state) < PAR_THRESHOLD || workers < 2 {
+        let logits = nn::matmul(&w.token_embedding, &x_t)?; // [n_vocab, 1]
+        return Ok(logits.data);
+    }
+
+    let band = n_vocab.div_ceil(workers).max(1);
+    let emb = &w.token_embedding.data; // [n_vocab, n_state], row-major
+    let bands: Vec<FwResult<(usize, Vec<f32>)>> = std::thread::scope(|s| {
+        let mut handles = Vec::new();
+        let mut r0 = 0;
+        while r0 < n_vocab {
+            let r1 = (r0 + band).min(n_vocab);
+            let x_t = &x_t;
+            handles.push(s.spawn(move || -> FwResult<(usize, Vec<f32>)> {
+                let sub = Mat::from_vec(r1 - r0, n_state, emb[r0 * n_state..r1 * n_state].to_vec());
+                let part = nn::matmul(&sub, x_t)?; // [(r1-r0), 1]
+                Ok((r0, part.data))
+            }));
+            r0 = r1;
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let mut logits = vec![0.0f32; n_vocab];
+    for b in bands {
+        let (r0, part) = b?;
+        logits[r0..r0 + part.len()].copy_from_slice(&part);
+    }
+    Ok(logits)
 }
 
 /// In-place `dst += src` (same shape assumed; residual add).

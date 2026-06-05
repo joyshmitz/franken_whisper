@@ -60,6 +60,20 @@ fn meta_2d(rows: usize, cols: usize) -> TensorMeta {
     TensorMeta::from_shape(vec![rows, cols], DType::F32, Device::Cpu)
 }
 
+/// House-style worker count: available parallelism capped at 8.
+///
+/// All the parallel-glue kernels below fan out across at most this many
+/// `std::thread::scope` workers, mirroring [`transpose_parallel`]. The cap
+/// keeps us from oversubscribing the (already rayon-parallel) inner sgemm and
+/// matches the empirically-tuned ceiling used elsewhere in this module.
+#[inline]
+pub(crate) fn worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(1)
+        .min(8)
+}
+
 /// Map a FrankenTorch `KernelError` into [`FwError`].
 ///
 /// Kernel failures here are almost always shape/contract violations from
@@ -140,7 +154,12 @@ pub fn layer_norm(x: &mut Mat, w: &[f32], b: &[f32], eps: f32) {
         return;
     }
     let eps = f64::from(eps);
-    for row in x.data.chunks_mut(cols) {
+    // Per-row mean/var/affine, with the exact same f64 accumulation order.
+    // Rows are independent, so we fan out over contiguous row bands; each
+    // band owns a disjoint slice of `x.data`. PAR_THRESHOLD is in elements
+    // (rows*cols) so tiny decoder shapes ([1..7, 384]) stay serial and never
+    // pay spawn overhead.
+    let norm_row = |row: &mut [f32]| {
         let mut sum = 0.0f64;
         for &v in row.iter() {
             sum += f64::from(v);
@@ -157,7 +176,27 @@ pub fn layer_norm(x: &mut Mat, w: &[f32], b: &[f32], eps: f32) {
             let normed = (f64::from(*v) - mean) * inv_std;
             *v = (normed * f64::from(wi) + f64::from(bi)) as f32;
         }
+    };
+
+    const PAR_THRESHOLD: usize = 1 << 16;
+    let rows = x.rows;
+    if rows * cols < PAR_THRESHOLD || worker_count() < 2 {
+        for row in x.data.chunks_mut(cols) {
+            norm_row(row);
+        }
+        return;
     }
+    let band_rows = rows.div_ceil(worker_count()).max(1);
+    std::thread::scope(|s| {
+        let norm_row = &norm_row;
+        for band in x.data.chunks_mut(band_rows * cols) {
+            s.spawn(move || {
+                for row in band.chunks_mut(cols) {
+                    norm_row(row);
+                }
+            });
+        }
+    });
 }
 
 /// whisper.cpp coefficient `sqrt(2/pi)` (`SQRT_2_OVER_PI` in ggml `vec.h`).
@@ -175,10 +214,34 @@ const GELU_COEF_A: f32 = 0.044_715;
 /// rather than ft's `gelu_value_f32`, which is the *erf* GELU and would
 /// diverge from whisper's activations.
 pub fn gelu(x: &mut Mat) {
-    for v in &mut x.data {
+    // Pure elementwise: each output depends only on its own input, so we
+    // split `data` into disjoint contiguous chunks across workers. The tanh
+    // transcendental dominates, so this scales well; threshold keeps small
+    // activations serial.
+    let apply = |v: &mut f32| {
         let x = *v;
         *v = 0.5 * x * (1.0 + (GELU_SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)).tanh());
+    };
+
+    const PAR_THRESHOLD: usize = 1 << 15;
+    let n = x.data.len();
+    if n < PAR_THRESHOLD || worker_count() < 2 {
+        for v in &mut x.data {
+            apply(v);
+        }
+        return;
     }
+    let chunk = n.div_ceil(worker_count()).max(1);
+    std::thread::scope(|s| {
+        let apply = &apply;
+        for band in x.data.chunks_mut(chunk) {
+            s.spawn(move || {
+                for v in band.iter_mut() {
+                    apply(v);
+                }
+            });
+        }
+    });
 }
 
 /// In-place numerically-stable per-row softmax (max-subtract).
@@ -192,11 +255,14 @@ pub fn softmax_rows(x: &mut Mat) {
     if cols == 0 {
         return;
     }
-    for row in x.data.chunks_mut(cols) {
+    // Per-row max-subtract / exp / normalize, order unchanged. Rows are
+    // independent, so fan out over contiguous row bands (disjoint slices of
+    // `x.data`). Threshold in elements keeps small score matrices serial.
+    let softmax_row = |row: &mut [f32]| {
         let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         if !max.is_finite() {
             // All -inf (e.g. fully masked row): leave as-is to avoid NaNs.
-            continue;
+            return;
         }
         let mut sum = 0.0f32;
         for v in row.iter_mut() {
@@ -210,7 +276,27 @@ pub fn softmax_rows(x: &mut Mat) {
                 *v *= inv;
             }
         }
+    };
+
+    const PAR_THRESHOLD: usize = 1 << 16;
+    let rows = x.rows;
+    if rows * cols < PAR_THRESHOLD || worker_count() < 2 {
+        for row in x.data.chunks_mut(cols) {
+            softmax_row(row);
+        }
+        return;
     }
+    let band_rows = rows.div_ceil(worker_count()).max(1);
+    std::thread::scope(|s| {
+        let softmax_row = &softmax_row;
+        for band in x.data.chunks_mut(band_rows * cols) {
+            s.spawn(move || {
+                for row in band.chunks_mut(cols) {
+                    softmax_row(row);
+                }
+            });
+        }
+    });
 }
 
 /// 1-D convolution via im2col + sgemm.
@@ -274,11 +360,14 @@ pub fn conv1d(
     let t_out = (padded - k) / stride + 1;
 
     // im2col: [T_out, Cin*K], column index = ci*K + kk.
+    // Pure gather: each output-time row `o` writes only its own
+    // `cols[o*patch..(o+1)*patch]` band, so the construction fans out over
+    // contiguous output-row bands. Each row reads disjoint output but shared
+    // (read-only) `x`. Threshold in elements keeps small convs serial.
     let patch = cin * k;
     let mut cols = vec![0.0f32; t_out * patch];
-    for o in 0..t_out {
+    let fill_row = |o: usize, row: &mut [f32]| {
         let start = o * stride; // position in the padded input
-        let row = &mut cols[o * patch..(o + 1) * patch];
         for kk in 0..k {
             let p = start + kk; // padded index
             // map padded index back to real input index
@@ -294,6 +383,26 @@ pub fn conv1d(
                 row[ci * k + kk] = src[ci];
             }
         }
+    };
+
+    const PAR_THRESHOLD: usize = 1 << 16;
+    if t_out * patch < PAR_THRESHOLD || worker_count() < 2 {
+        for (o, row) in cols.chunks_mut(patch).enumerate() {
+            fill_row(o, row);
+        }
+    } else {
+        let band_rows = t_out.div_ceil(worker_count()).max(1);
+        std::thread::scope(|s| {
+            let fill_row = &fill_row;
+            for (w, band) in cols.chunks_mut(band_rows * patch).enumerate() {
+                let o_base = w * band_rows;
+                s.spawn(move || {
+                    for (i, row) in band.chunks_mut(patch).enumerate() {
+                        fill_row(o_base + i, row);
+                    }
+                });
+            }
+        });
     }
     let im2col = Mat::from_vec(t_out, patch, cols);
 
@@ -481,11 +590,11 @@ pub fn attention(
 
     let mut out = vec![0.0f32; tq * n_state];
 
-    // Process each head independently (heads are embarrassingly parallel,
-    // but keep it serial-over-heads + parallel-inside-matmul so we don't
-    // oversubscribe rayon; the per-head qk^T and @v are the costly parts
-    // and already go through the parallel sgemm).
-    for h in 0..n_head {
+    // Compute one head's [Tq, d_head] output. Each head is independent and
+    // its math (gather → scaled qk^T → mask → softmax → @v) is byte-for-byte
+    // the serial computation; only the scheduling changes. The inner matmuls
+    // go through the (rayon-parallel) sgemm — see the parallelism note below.
+    let compute_head = |h: usize| -> FwResult<Mat> {
         let base = h * d_head;
 
         // Gather this head's scaled Q [Tq, d_head] and K [Tk, d_head].
@@ -506,14 +615,13 @@ pub fn attention(
             }
         }
         let qh = Mat::from_vec(tq, d_head, qh);
-        let kh = Mat::from_vec(tk, d_head, kh);
 
         // scores = qh @ kh^T -> [Tq, Tk]. kh^T is [d_head, Tk]; build it
         // explicitly so the matmul stays contiguous.
         let mut kh_t = vec![0.0f32; d_head * tk];
         for j in 0..tk {
             for d in 0..d_head {
-                kh_t[d * tk + j] = kh.data[j * d_head + d];
+                kh_t[d * tk + j] = kh[j * d_head + d];
             }
         }
         let kh_t = Mat::from_vec(d_head, tk, kh_t);
@@ -542,12 +650,67 @@ pub fn attention(
             dst.copy_from_slice(src);
         }
         let vh = Mat::from_vec(tk, d_head, vh);
-        let out_h = matmul(&scores, &vh)?; // [Tq, d_head]
+        matmul(&scores, &vh) // [Tq, d_head]
+    };
 
-        // Scatter head output back into the merged [Tq, n_state].
+    let scatter = |out: &mut [f32], h: usize, out_h: &Mat| {
+        let base = h * d_head;
         for i in 0..tq {
             let src = &out_h.data[i * d_head..(i + 1) * d_head];
             out[i * n_state + base..i * n_state + base + d_head].copy_from_slice(src);
+        }
+    };
+
+    // Parallelize over heads when the work is large enough to amortize the
+    // spawn (encoder windows: Tk≈1500, n_head 6..20). We split heads across
+    // workers and let each compute its head serially; the inner sgemm may
+    // still rayon-split, but head-level threads are the bigger win for the
+    // many small per-head matmuls and we accept the nested-pool interplay
+    // (measured net positive — see HOTSPOTS run). Small/decode-step shapes
+    // (Tq=1, tiny Tk) fall below the threshold and stay fully serial so they
+    // never pay spawn overhead.
+    //
+    // The merged `out` is strided per head (each head owns a column band,
+    // not a contiguous slice), so threads can't borrow disjoint `&mut out`
+    // sub-slices directly; instead each worker scatters its own heads into a
+    // private buffer and we sum the buffers (every position is written by
+    // exactly one head, so the "sum" is just a disjoint merge — no overlap,
+    // order-independent, bit-identical).
+    const PAR_THRESHOLD: usize = 1 << 18; // tq*tk*n_head elements of real work
+    let work = tq.saturating_mul(tk).saturating_mul(n_head);
+    if n_head < 2 || work < PAR_THRESHOLD || worker_count() < 2 {
+        for h in 0..n_head {
+            let out_h = compute_head(h)?;
+            scatter(&mut out, h, &out_h);
+        }
+        return Ok(Mat::from_vec(tq, n_state, out));
+    }
+
+    let workers = worker_count().min(n_head);
+    let band = n_head.div_ceil(workers);
+    let results: Vec<FwResult<Vec<f32>>> = std::thread::scope(|s| {
+        let compute_head = &compute_head;
+        let scatter = &scatter;
+        let mut handles = Vec::with_capacity(workers);
+        let mut h0 = 0;
+        while h0 < n_head {
+            let h1 = (h0 + band).min(n_head);
+            handles.push(s.spawn(move || -> FwResult<Vec<f32>> {
+                let mut local = vec![0.0f32; tq * n_state];
+                for h in h0..h1 {
+                    let out_h = compute_head(h)?;
+                    scatter(&mut local, h, &out_h);
+                }
+                Ok(local)
+            }));
+            h0 = h1;
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for r in results {
+        let local = r?;
+        for (o, l) in out.iter_mut().zip(local.iter()) {
+            *o += *l;
         }
     }
 
