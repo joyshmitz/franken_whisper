@@ -194,14 +194,7 @@ fn load_linear_transposed(
 /// the time-major `[T, Cin]` layout [`nn::conv1d`] expects. Kept private to
 /// this module: `mod.rs`/`nn.rs` are owned by other beads.
 fn transpose(data: &[f32], rows: usize, cols: usize) -> Mat {
-    debug_assert_eq!(data.len(), rows * cols, "transpose shape/data mismatch");
-    let mut out = vec![0.0f32; rows * cols];
-    for r in 0..rows {
-        for c in 0..cols {
-            out[c * rows + r] = data[r * cols + c];
-        }
-    }
-    Mat::from_vec(cols, rows, out)
+    Mat::from_vec(cols, rows, nn::transpose_parallel(data, rows, cols))
 }
 
 impl EncoderWeights {

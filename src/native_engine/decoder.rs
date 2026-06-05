@@ -176,15 +176,7 @@ fn load_vec(
 
 /// Transpose a `[rows, cols]` matrix into a fresh `[cols, rows]` matrix.
 fn transpose(m: &Mat) -> Mat {
-    let (r, c) = (m.rows, m.cols);
-    let mut out = vec![0.0f32; r * c];
-    for i in 0..r {
-        let src = m.row(i);
-        for j in 0..c {
-            out[j * r + i] = src[j];
-        }
-    }
-    Mat::from_vec(c, r, out)
+    Mat::from_vec(m.cols, m.rows, nn::transpose_parallel(&m.data, m.rows, m.cols))
 }
 
 /// Load a whisper linear layer (`[out, in]` weight) pre-transposed to

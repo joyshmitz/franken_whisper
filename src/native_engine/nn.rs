@@ -579,6 +579,77 @@ pub fn attention_with_cache(
     attention(q, &k_all, &v_all, n_head, Some(past_len))
 }
 
+/// Cache-blocked, multi-threaded out-of-place transpose: `data` viewed as
+/// row-major `[rows, cols]` becomes row-major `[cols, rows]`.
+///
+/// Used at model-load time to pre-transpose every linear weight (ggml stores
+/// PyTorch's `[out, in]`; the inference matmuls want `[in, out]`). The naive
+/// column-strided serial loop dominated `model_weights` time on large models
+/// (hotspot #5, tests/artifacts/perf/20260605T0218Z): ~3 GB of strided writes.
+/// 64x64 tiles keep both source reads and destination writes inside cache
+/// lines; independent row-bands fan out across threads.
+///
+/// Isomorphism: a pure permutation — every output element is the same
+/// `data[r * cols + c]` the serial loop wrote, so results are bit-identical.
+pub(crate) fn transpose_parallel(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    debug_assert_eq!(data.len(), rows * cols, "transpose shape/data mismatch");
+    const TILE: usize = 64;
+    const PAR_THRESHOLD: usize = 1 << 20;
+    let mut out = vec![0.0f32; rows * cols];
+
+    let tile_band = |band_rows: std::ops::Range<usize>, out: &mut [f32]| {
+        // `out` here is the FULL output buffer for serial mode, or a row-band
+        // is not separable for transpose outputs (writes scatter across all
+        // of `out`), so parallel mode splits by output row bands (i.e. source
+        // column bands) instead — see below.
+        for r0 in band_rows.clone().step_by(TILE) {
+            let r1 = (r0 + TILE).min(band_rows.end);
+            for c0 in (0..cols).step_by(TILE) {
+                let c1 = (c0 + TILE).min(cols);
+                for r in r0..r1 {
+                    for c in c0..c1 {
+                        out[c * rows + r] = data[r * cols + c];
+                    }
+                }
+            }
+        }
+    };
+
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(1)
+        .min(8);
+    if rows * cols < PAR_THRESHOLD || workers < 2 {
+        tile_band(0..rows, &mut out);
+        return out;
+    }
+
+    // Parallel split: each worker owns a contiguous band of OUTPUT rows
+    // (= source columns c in [c0, c1)), so output slices are disjoint.
+    let band = cols.div_ceil(workers);
+    std::thread::scope(|s| {
+        for (w, out_band) in out.chunks_mut(band * rows).enumerate() {
+            let c_start = w * band;
+            s.spawn(move || {
+                let c_end = (c_start + band).min(cols);
+                for c0 in (c_start..c_end).step_by(TILE) {
+                    let c1 = (c0 + TILE).min(c_end);
+                    for r0 in (0..rows).step_by(TILE) {
+                        let r1 = (r0 + TILE).min(rows);
+                        for c in c0..c1 {
+                            let dst_row = c - c_start;
+                            for r in r0..r1 {
+                                out_band[dst_row * rows + r] = data[r * cols + c];
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

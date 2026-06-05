@@ -363,14 +363,45 @@ impl GgmlModel {
                         n_elements
                     )));
                 }
-                raw.chunks_exact(2)
-                    .map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
-                    .collect()
+                dequant_f16_parallel(raw, n_elements)
             }
         };
 
         Ok((entry.shape.clone(), values))
     }
+}
+
+/// Dequantize a little-endian f16 byte stream to `f32`, splitting large
+/// tensors across threads. The big matmul weights (e.g. large-v3-turbo's
+/// 1.6 GB of f16) dominated model-load time when converted serially
+/// (~2.4 s measured; see tests/artifacts/perf/20260605T0218Z hotspot #5).
+/// Per-element conversion is pure and chunk boundaries are element-aligned,
+/// so the output is bit-identical to the serial loop regardless of thread
+/// count (isomorphism: same `f16_to_f32` on the same bytes in the same
+/// positions).
+fn dequant_f16_parallel(raw: &[u8], n_elements: usize) -> Vec<f32> {
+    const PAR_THRESHOLD: usize = 1 << 20; // 1M elements: below this, serial wins.
+    let serial = |bytes: &[u8], out: &mut [f32]| {
+        for (c, o) in bytes.chunks_exact(2).zip(out.iter_mut()) {
+            *o = f16_to_f32(u16::from_le_bytes([c[0], c[1]]));
+        }
+    };
+    let mut values = vec![0.0f32; n_elements];
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(1)
+        .min(8);
+    if n_elements < PAR_THRESHOLD || workers < 2 {
+        serial(raw, &mut values);
+        return values;
+    }
+    let chunk = n_elements.div_ceil(workers);
+    std::thread::scope(|s| {
+        for (bytes, out) in raw.chunks(chunk * 2).zip(values.chunks_mut(chunk)) {
+            s.spawn(move || serial(bytes, out));
+        }
+    });
+    values
 }
 
 /// Convert an IEEE-754 half-precision bit pattern to `f32`.
