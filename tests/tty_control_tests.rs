@@ -661,7 +661,7 @@ fn emit_retransmit_loop_emits_requests_then_response() {
             TtyControlFrame::RetransmitResponse { sequences } if sequences == &vec![1, 2]
         ),
         "expected RetransmitResponse, got {:?}",
-        &control_frames[2]
+        control_frames[2]
     );
 }
 
@@ -730,7 +730,7 @@ fn emit_retransmit_loop_with_integrity_failures() {
             TtyControlFrame::RetransmitRequest { sequences } if sequences.contains(&2)
         ),
         "expected RetransmitRequest, got {:?}",
-        &control_frames[0]
+        control_frames[0]
     );
 }
 

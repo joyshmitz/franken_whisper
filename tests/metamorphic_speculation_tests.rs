@@ -79,9 +79,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
             } else {
                 1
             };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -108,9 +106,7 @@ fn levenshtein_words(a: &[&str], b: &[&str]) -> usize {
         curr[0] = i;
         for j in 1..=n {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -325,10 +321,7 @@ fn mr_levenshtein_single_insertion_chars() {
     let inserted = "helloo"; // One extra 'o'
 
     let d = levenshtein(base, inserted);
-    assert_eq!(
-        d, 1,
-        "Single insertion should give distance 1, got {d}"
-    );
+    assert_eq!(d, 1, "Single insertion should give distance 1, got {d}");
 }
 
 #[test]
@@ -337,10 +330,7 @@ fn mr_levenshtein_single_deletion_chars() {
     let deleted = "helo"; // One 'l' removed
 
     let d = levenshtein(base, deleted);
-    assert_eq!(
-        d, 1,
-        "Single deletion should give distance 1, got {d}"
-    );
+    assert_eq!(d, 1, "Single deletion should give distance 1, got {d}");
 }
 
 #[test]
@@ -349,10 +339,7 @@ fn mr_levenshtein_single_substitution_chars() {
     let substituted = "hella"; // 'o' -> 'a'
 
     let d = levenshtein(base, substituted);
-    assert_eq!(
-        d, 1,
-        "Single substitution should give distance 1, got {d}"
-    );
+    assert_eq!(d, 1, "Single substitution should give distance 1, got {d}");
 }
 
 #[test]
@@ -424,14 +411,8 @@ fn mr_window_excludes_exterior_points() {
 #[test]
 fn mr_window_duration_is_end_minus_start() {
     for (start, end) in [(0, 1000), (500, 1500), (1000, 5000)] {
-        let window = SpeculationWindow::new(
-            1,
-            "run".to_string(),
-            start,
-            end,
-            100,
-            "hash".to_string(),
-        );
+        let window =
+            SpeculationWindow::new(1, "run".to_string(), start, end, 100, "hash".to_string());
 
         assert_eq!(
             window.duration_ms(),
@@ -477,5 +458,7 @@ fn mr_composite_levenshtein_sequence_of_edits() {
     assert_eq!(levenshtein(start, after_3), 3);
 
     // Also verify transitivity bounds
-    assert!(levenshtein(start, after_3) <= levenshtein(start, after_1) + levenshtein(after_1, after_3));
+    assert!(
+        levenshtein(start, after_3) <= levenshtein(start, after_1) + levenshtein(after_1, after_3)
+    );
 }

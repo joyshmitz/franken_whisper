@@ -490,6 +490,17 @@ impl CancellationToken {
         Ok(())
     }
 
+    /// Create a token with no deadline (never cancels on its own; still honors
+    /// the global Ctrl+C shutdown).
+    ///
+    /// `pub(crate)` so native backends can synthesize a token when a caller did
+    /// not supply one (e.g. the diarization stage inside
+    /// `whisper_diarization_native::run`).
+    #[must_use]
+    pub(crate) fn unbounded() -> Self {
+        Self { deadline: None }
+    }
+
     /// Create a token with a deadline relative to now.
     #[cfg(test)]
     pub(crate) fn with_deadline_from_now(duration: std::time::Duration) -> Self {
@@ -3588,20 +3599,24 @@ async fn execute_punctuate(
 // ---------------------------------------------------------------------------
 
 /// Report produced by the speaker diarization stage.
+///
+/// `pub(crate)` so native backends (e.g. `whisper_diarization_native`) can call
+/// [`diarize_segments`] directly and inspect its quality metrics for honest
+/// `raw_output` reporting.
 #[derive(Debug, Clone)]
-struct DiarizeReport {
+pub(crate) struct DiarizeReport {
     /// Number of segments processed.
-    segments_total: usize,
+    pub(crate) segments_total: usize,
     /// Number of distinct speakers detected.
-    speakers_detected: usize,
+    pub(crate) speakers_detected: usize,
     /// Number of segments assigned a speaker label.
-    segments_labeled: usize,
+    pub(crate) segments_labeled: usize,
     /// Silhouette score measuring cluster separation quality.
     /// Range: \[-1, 1\].  1 = perfect separation, 0 = overlapping,
     /// -1 = misassigned.  `None` when fewer than 2 clusters or 2 points.
-    silhouette_score: Option<f64>,
+    pub(crate) silhouette_score: Option<f64>,
     /// Notes about the diarization process.
-    notes: Vec<String>,
+    pub(crate) notes: Vec<String>,
 }
 
 /// Acoustic-heuristic feature vector for a segment.
@@ -3777,7 +3792,7 @@ fn resolve_speaker_target(constraints: Option<&crate::model::SpeakerConstraints>
 /// This is a heuristic-only implementation (no neural speaker encoder);
 /// accuracy improves significantly when combined with downstream
 /// model-backed diarization.
-fn diarize_segments(
+pub(crate) fn diarize_segments(
     segments: &mut [crate::model::TranscriptionSegment],
     audio_duration: Option<f64>,
     speaker_constraints: Option<&crate::model::SpeakerConstraints>,

@@ -7,7 +7,7 @@ mod whisper_cpp_native;
 mod whisper_diarization;
 mod whisper_diarization_native;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -1067,11 +1067,14 @@ impl Engine for WhisperDiarizationEngine {
 
 impl StreamingEngine for WhisperDiarizationEngine {}
 
-/// Unit struct for the native whisper-diarization engine (bd-1rj.11 pilot).
+/// Unit struct for the native whisper-diarization engine (bd-cidv).
 ///
-/// Per `docs/native_engine_contract.md` §1.2, the native engine uses a
-/// distinct name (`"whisper-diarization-native"`) but returns the same
-/// `BackendKind` as the bridge adapter.
+/// Runs real in-process ASR through [`crate::native_engine`] and then assigns
+/// speakers via the orchestrator's heuristic diarizer (no neural speaker
+/// encoder; ECAPA tracked in bd-ohex). Per `docs/native_engine_contract.md`
+/// §1.2, the native engine uses a distinct name
+/// (`"whisper-diarization-native"`) but returns the same `BackendKind` as the
+/// bridge adapter.
 pub struct WhisperDiarizationNativeEngine;
 
 impl Engine for WhisperDiarizationNativeEngine {
@@ -1105,7 +1108,26 @@ impl Engine for WhisperDiarizationNativeEngine {
     }
 }
 
-impl StreamingEngine for WhisperDiarizationNativeEngine {}
+impl StreamingEngine for WhisperDiarizationNativeEngine {
+    fn run_streaming(
+        &self,
+        request: &TranscribeRequest,
+        normalized_wav: &Path,
+        work_dir: &Path,
+        timeout: Duration,
+        token: Option<&crate::orchestrator::CancellationToken>,
+        on_segment: Box<dyn Fn(TranscriptionSegment) + Send>,
+    ) -> FwResult<TranscriptionResult> {
+        whisper_diarization_native::run_streaming(
+            request,
+            normalized_wav,
+            work_dir,
+            timeout,
+            token,
+            &on_segment,
+        )
+    }
+}
 
 /// Returns all registered engines as trait objects.
 pub fn all_engines() -> Vec<Box<dyn Engine>> {
@@ -3238,124 +3260,29 @@ pub fn compare_shadow_results(
 }
 
 // ---------------------------------------------------------------------------
-// bd-1rj.9: WhisperCppPilot — native-engine pilot (mock/placeholder)
+// bd-jryr / bd-s8w8 / bd-cidv: the mock native-engine "pilots" were DELETED.
+// All three native engines now run real in-process inference (see
+// `whisper_cpp_native.rs`, `insanely_fast_native.rs`, and
+// `whisper_diarization_native.rs` → `crate::native_engine`). Their former
+// canned-phrase placeholders — `WhisperCppPilot`, `InsanelyFastPilot`, and
+// `DiarizationPilot` (a fixed rotation of canned meeting phrases) — no longer
+// exist in production. `whisper_diarization_native` now performs real ASR and calls
+// the orchestrator's heuristic diarizer (`diarize_segments`), with an honest
+// `raw_output` diarizer tag (no neural-encoder claim; ECAPA tracked in bd-ohex).
+//
+// `TranscriptSegment` (below) survives the pilot purge because the two-lane
+// executors (`TwoLaneExecutor` / `ConcurrentTwoLaneExecutor`) and `streaming.rs`
+// use it as their lightweight cross-lane segment shape — it is NOT pilot-only.
+// The pilot-specific `DiarizedTranscript` / `DiarizedSegment` / `SpeakerInfo`
+// structs were deleted with the pilot (nothing else referenced them).
 // ---------------------------------------------------------------------------
 
-/// Pilot struct for a future native whisper.cpp engine implementation.
-///
-/// This is a placeholder that demonstrates the correct interface shape.
-/// All inference is mock/deterministic — no actual FFI calls are made.
-#[derive(Debug, Clone)]
-pub struct WhisperCppPilot {
-    /// Path to the whisper.cpp GGML model file.
-    pub model_path: String,
-    /// Number of threads to use for inference.
-    pub n_threads: usize,
-    /// Language code for transcription (e.g. "en"). `None` for auto-detect.
-    pub language: Option<String>,
-    /// If true, translate non-English speech to English.
-    pub translate: bool,
-    /// If true, output word-level timestamps instead of sentence-level.
-    pub word_timestamps: bool,
-    /// If true, split segments on words rather than phrases.
-    pub split_on_word: bool,
-}
-
-impl WhisperCppPilot {
-    /// Create a new pilot instance with the given configuration.
-    #[must_use]
-    pub fn new(
-        model_path: String,
-        n_threads: usize,
-        language: Option<String>,
-        translate: bool,
-        word_timestamps: bool,
-        split_on_word: bool,
-    ) -> Self {
-        Self {
-            model_path,
-            n_threads,
-            language,
-            translate,
-            word_timestamps,
-            split_on_word,
-        }
-    }
-
-    /// Mock transcription that generates deterministic segments based on
-    /// the given audio duration in milliseconds.
-    ///
-    /// For every 5000ms of input, one segment is produced. The text content
-    /// is deterministic and based on the segment index.
-    pub fn transcribe(&self, duration_ms: u64) -> Vec<TranscriptSegment> {
-        let segment_duration_ms: u64 = 5000;
-        let n_segments = if duration_ms == 0 {
-            0
-        } else {
-            duration_ms.div_ceil(segment_duration_ms) as usize
-        };
-
-        let phrases = [
-            "The quick brown fox jumps over the lazy dog.",
-            "Hello world, this is a test transcription.",
-            "Speech recognition is a fascinating field.",
-            "Artificial intelligence continues to advance.",
-        ];
-
-        let mut segments = Vec::new();
-        for i in 0..n_segments {
-            let start_ms = (i as u64) * segment_duration_ms;
-            let end_ms = std::cmp::min(start_ms + segment_duration_ms, duration_ms);
-            let text = phrases[i % phrases.len()].to_owned();
-            let confidence = 0.92 - (i as f64 * 0.01);
-
-            if self.split_on_word || self.word_timestamps {
-                let words: Vec<&str> = text.split_whitespace().collect();
-                if words.is_empty() {
-                    continue;
-                }
-                let ms_per_word = (end_ms - start_ms) / words.len() as u64;
-                for (j, word) in words.iter().enumerate() {
-                    let w_start_ms = start_ms + (j as u64) * ms_per_word;
-                    let w_end_ms = if j == words.len() - 1 {
-                        end_ms
-                    } else {
-                        w_start_ms + ms_per_word
-                    };
-                    segments.push(TranscriptSegment {
-                        start_ms: w_start_ms,
-                        end_ms: w_end_ms,
-                        text: (*word).to_owned(),
-                        confidence,
-                    });
-                }
-            } else {
-                segments.push(TranscriptSegment {
-                    start_ms,
-                    end_ms,
-                    text,
-                    confidence,
-                });
-            }
-        }
-        segments
-    }
-
-    /// Whether this pilot supports streaming transcription.
-    ///
-    /// Returns `false` for the pilot. A real implementation backed by
-    /// whisper.cpp would return `true` when compiled with streaming support.
-    #[must_use]
-    pub fn supports_streaming(&self) -> bool {
-        false
-    }
-}
-
-/// A single transcript segment produced by native-engine pilots.
+/// A single transcript segment used by the two-lane executors and streaming
+/// bridge.
 ///
 /// This is intentionally separate from `TranscriptionSegment` (used by the
-/// CLI/external-process backends) to allow the native-engine interface to
-/// evolve independently during the pilot phase.
+/// CLI/external-process backends): a compact `[start_ms, end_ms, text,
+/// confidence]` shape for the speculative/quality two-lane selection math.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptSegment {
     /// Segment start time in milliseconds.
@@ -3366,224 +3293,6 @@ pub struct TranscriptSegment {
     pub text: String,
     /// Confidence score in `[0.0, 1.0]`.
     pub confidence: f64,
-}
-
-// ---------------------------------------------------------------------------
-// bd-1rj.10: InsanelyFastPilot — GPU-first batched inference pilot (mock)
-// ---------------------------------------------------------------------------
-
-/// Pilot struct for a future GPU-first batched inference engine.
-///
-/// Simulates the interface of insanely-fast-whisper with native Rust
-/// batch processing. All inference is mock/deterministic.
-#[derive(Debug, Clone)]
-pub struct InsanelyFastPilot {
-    /// HuggingFace model identifier (e.g. "openai/whisper-large-v3").
-    pub model_id: String,
-    /// Number of audio files to process in a single batch.
-    pub batch_size: usize,
-    /// Target device (e.g. "cuda:0", "cpu").
-    pub device: String,
-    /// Data type for inference (e.g. "float16", "bfloat16").
-    pub dtype: String,
-}
-
-impl InsanelyFastPilot {
-    /// Create a new pilot instance with the given configuration.
-    #[must_use]
-    pub fn new(model_id: String, batch_size: usize, device: String, dtype: String) -> Self {
-        Self {
-            model_id,
-            batch_size,
-            device,
-            dtype,
-        }
-    }
-
-    /// Mock batched transcription. Each element in `durations_ms` represents
-    /// one audio file's duration. Returns one `Vec<TranscriptSegment>` per
-    /// input file, with deterministic content.
-    pub fn transcribe_batch(&self, durations_ms: &[u64]) -> Vec<Vec<TranscriptSegment>> {
-        durations_ms
-            .iter()
-            .enumerate()
-            .map(|(batch_idx, &dur)| {
-                let segment_duration_ms: u64 = 10_000;
-                let n_segments = if dur == 0 {
-                    0
-                } else {
-                    dur.div_ceil(segment_duration_ms) as usize
-                };
-
-                let phrases = [
-                    "Batch processing enables higher throughput.",
-                    "GPU acceleration reduces latency significantly.",
-                    "Parallel inference is the future of ASR.",
-                ];
-
-                (0..n_segments)
-                    .map(|i| {
-                        let start_ms = (i as u64) * segment_duration_ms;
-                        let end_ms = std::cmp::min(start_ms + segment_duration_ms, dur);
-                        let text = phrases[(batch_idx + i) % phrases.len()].to_owned();
-                        let confidence = 0.95 - (i as f64 * 0.005);
-
-                        TranscriptSegment {
-                            start_ms,
-                            end_ms,
-                            text,
-                            confidence,
-                        }
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-
-    /// Returns the optimal batch size for this pilot's configuration.
-    ///
-    /// In a real implementation this would be tuned based on GPU memory
-    /// and model size. The pilot simply returns the configured batch size.
-    #[must_use]
-    pub fn optimal_batch_size(&self) -> usize {
-        self.batch_size
-    }
-}
-
-// ---------------------------------------------------------------------------
-// bd-1rj.11: DiarizationPilot — ASR + alignment + punctuation + speaker ID
-// ---------------------------------------------------------------------------
-
-/// Information about a single identified speaker.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SpeakerInfo {
-    /// Unique speaker identifier (e.g. "SPEAKER_00").
-    pub id: String,
-    /// Human-readable label (e.g. "Speaker A").
-    pub label: String,
-    /// Total duration of speech attributed to this speaker, in milliseconds.
-    pub total_duration_ms: u64,
-}
-
-/// A single diarized transcript segment with speaker attribution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DiarizedSegment {
-    /// Transcribed text for this segment.
-    pub text: String,
-    /// Segment start time in milliseconds.
-    pub start_ms: u64,
-    /// Segment end time in milliseconds.
-    pub end_ms: u64,
-    /// Speaker identifier (references `SpeakerInfo::id`).
-    pub speaker_id: String,
-    /// Confidence score in `[0.0, 1.0]`.
-    pub confidence: f64,
-}
-
-/// Complete diarized transcript with speaker information.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DiarizedTranscript {
-    /// Time-ordered segments with speaker attribution.
-    pub segments: Vec<DiarizedSegment>,
-    /// Information about each identified speaker.
-    pub speakers: Vec<SpeakerInfo>,
-}
-
-/// Pilot struct that combines ASR, forced alignment, punctuation restoration,
-/// and speaker diarization into a single pipeline.
-///
-/// All processing is mock/deterministic — no actual models are loaded.
-#[derive(Debug, Clone)]
-pub struct DiarizationPilot {
-    /// ASR backend identifier (e.g. "whisper-large-v3").
-    pub asr_backend: String,
-    /// Forced alignment model identifier (e.g. "WAV2VEC2_ASR_LARGE_LV60K_960H").
-    pub alignment_model: String,
-    /// Expected number of speakers. `None` for automatic detection.
-    pub num_speakers: Option<usize>,
-    /// Language code (e.g. "en").
-    pub language: String,
-}
-
-impl DiarizationPilot {
-    /// Create a new diarization pilot with the given configuration.
-    #[must_use]
-    pub fn new(
-        asr_backend: String,
-        alignment_model: String,
-        num_speakers: Option<usize>,
-        language: String,
-    ) -> Self {
-        Self {
-            asr_backend,
-            alignment_model,
-            num_speakers,
-            language,
-        }
-    }
-
-    /// Run the full diarization pipeline on audio of the given duration.
-    ///
-    /// Produces deterministic mock output that demonstrates the pipeline
-    /// stages: ASR -> alignment -> punctuation -> speaker ID.
-    pub fn process(&self, duration_ms: u64) -> DiarizedTranscript {
-        let n_speakers = self.num_speakers.unwrap_or(2);
-        let segment_duration_ms: u64 = 3000;
-        let n_segments = if duration_ms == 0 {
-            0
-        } else {
-            duration_ms.div_ceil(segment_duration_ms) as usize
-        };
-
-        let utterances = [
-            "Good morning, everyone.",
-            "Thank you for joining us today.",
-            "Let's begin with the first topic.",
-            "I have a question about that.",
-            "That's an excellent point.",
-            "Could you elaborate further?",
-        ];
-
-        let segments: Vec<DiarizedSegment> = (0..n_segments)
-            .map(|i| {
-                let speaker_idx = i % n_speakers;
-                let start_ms = (i as u64) * segment_duration_ms;
-                let end_ms = std::cmp::min(start_ms + segment_duration_ms, duration_ms);
-
-                DiarizedSegment {
-                    text: utterances[i % utterances.len()].to_owned(),
-                    start_ms,
-                    end_ms,
-                    speaker_id: format!("SPEAKER_{speaker_idx:02}"),
-                    confidence: 0.88 - (i as f64 * 0.005),
-                }
-            })
-            .collect();
-
-        // Compute per-speaker total duration.
-        let mut speaker_durations = HashMap::new();
-        for seg in &segments {
-            *speaker_durations
-                .entry(seg.speaker_id.clone())
-                .or_insert(0u64) += seg.end_ms - seg.start_ms;
-        }
-
-        let mut speakers: Vec<SpeakerInfo> = (0..n_speakers)
-            .map(|i| {
-                let id = format!("SPEAKER_{i:02}");
-                let label = format!("Speaker {}", (b'A' + i as u8) as char);
-                let total_duration_ms = speaker_durations.get(&id).copied().unwrap_or(0);
-                SpeakerInfo {
-                    id,
-                    label,
-                    total_duration_ms,
-                }
-            })
-            .collect();
-        speakers.sort_by(|a, b| a.id.cmp(&b.id));
-
-        DiarizedTranscript { segments, speakers }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3933,13 +3642,12 @@ mod tests {
     use super::{
         ADAPTIVE_FALLBACK_CALIBRATION_THRESHOLD, ADAPTIVE_MIN_SAMPLES, BackendHealthReport,
         BackendImplementation, BackendSelectionContract, CANONICAL_SEGMENT_TOLERANCE_MS,
-        CalibrationState, DiarizationPilot, DiarizedSegment, DiarizedTranscript, Engine,
-        InsanelyFastEngine, InsanelyFastPilot, NativeEngineContract, QualitySelector,
+        CalibrationState, Engine, InsanelyFastEngine, NativeEngineContract, QualitySelector,
         ROUTER_HISTORY_WINDOW, RouterState, RoutingEvidenceLedger, RoutingEvidenceLedgerEntry,
         RoutingOutcomeRecord, SegmentConformanceReport, SegmentConformanceViolation,
         SegmentViolationKind, ShadowDivergenceKind, ShadowRunConfig, ShadowRunDivergence,
-        ShadowRunReport, SpeakerInfo, TranscriptSegment, TwoLaneExecutor, WhisperCppEngine,
-        WhisperCppPilot, WhisperDiarizationEngine, auto_priority, bridge_error_recoverable,
+        ShadowRunReport, TranscriptSegment, TwoLaneExecutor, WhisperCppEngine,
+        WhisperDiarizationEngine, auto_priority, bridge_error_recoverable,
         bridge_native_recovery_from_raw, check_segment_conformance, compare_shadow_results,
         duration_bucket, evaluate_backend_selection, extract_segments_from_json, is_hf_token_set,
         latency_proxy, native_runtime_metadata, number_millis_to_secs, number_to_secs,
@@ -7839,648 +7547,16 @@ mod tests {
         );
     }
 
-    // ── bd-1rj.9: WhisperCppPilot tests ──
+    // ── bd-jryr: the mock `WhisperCppPilot` unit tests were DELETED here.
+    // The struct no longer exists in production; the native whisper.cpp engine
+    // is now real in-process inference, covered by tests in
+    // `whisper_cpp_native.rs` (helper unit tests + gated e2e against tiny.en)
+    // and the honesty guard in `tests/no_canned_phrases.rs`.
 
-    #[test]
-    fn whisper_cpp_pilot_new_stores_fields() {
-        let pilot = WhisperCppPilot::new(
-            "/models/ggml-large-v3.bin".to_owned(),
-            8,
-            Some("en".to_owned()),
-            false,
-            false,
-            false,
-        );
-        assert_eq!(pilot.model_path, "/models/ggml-large-v3.bin");
-        assert_eq!(pilot.n_threads, 8);
-        assert_eq!(pilot.language.as_deref(), Some("en"));
-        assert!(!pilot.translate);
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_transcribe_deterministic() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        let segments_a = pilot.transcribe(10_000);
-        let segments_b = pilot.transcribe(10_000);
-        assert_eq!(segments_a, segments_b, "transcribe must be deterministic");
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_transcribe_segment_count() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        // 0ms -> 0 segments
-        assert!(pilot.transcribe(0).is_empty());
-        // 5000ms -> 1 segment
-        assert_eq!(pilot.transcribe(5000).len(), 1);
-        // 10000ms -> 2 segments
-        assert_eq!(pilot.transcribe(10_000).len(), 2);
-        // 12000ms -> 3 segments (rounds up)
-        assert_eq!(pilot.transcribe(12_000).len(), 3);
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_transcribe_timing_coverage() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        let segments = pilot.transcribe(15_000);
-        assert_eq!(segments.len(), 3);
-        assert_eq!(segments[0].start_ms, 0);
-        assert_eq!(segments[0].end_ms, 5000);
-        assert_eq!(segments[1].start_ms, 5000);
-        assert_eq!(segments[1].end_ms, 10_000);
-        assert_eq!(segments[2].start_ms, 10_000);
-        assert_eq!(segments[2].end_ms, 15_000);
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_transcribe_last_segment_clamped() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        let segments = pilot.transcribe(7000);
-        assert_eq!(segments.len(), 2);
-        assert_eq!(
-            segments[1].end_ms, 7000,
-            "last segment end should be clamped to duration"
-        );
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_supports_streaming() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        assert!(
-            !pilot.supports_streaming(),
-            "pilot should not support streaming"
-        );
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_confidence_decreases() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        let segments = pilot.transcribe(20_000);
-        for window in segments.windows(2) {
-            assert!(
-                window[0].confidence > window[1].confidence,
-                "confidence should decrease with segment index"
-            );
-        }
-    }
-
-    // ── bd-vup: WhisperCppPilot error scenario tests ──
-
-    #[test]
-    fn whisper_cpp_pilot_zero_duration_produces_empty() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        let segments = pilot.transcribe(0);
-        assert!(
-            segments.is_empty(),
-            "zero-duration audio should produce no segments"
-        );
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_very_short_duration_single_segment() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        // 1ms of audio → still one segment due to div_ceil.
-        let segments = pilot.transcribe(1);
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].start_ms, 0);
-        assert_eq!(segments[0].end_ms, 1);
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_extremely_long_duration() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        // 24 hours of audio = 86_400_000 ms.
-        let segments = pilot.transcribe(86_400_000);
-        // 86_400_000 / 5000 = 17_280 segments.
-        assert_eq!(segments.len(), 17_280);
-
-        // First segment starts at 0, last ends at duration.
-        assert_eq!(segments[0].start_ms, 0);
-        assert_eq!(segments.last().unwrap().end_ms, 86_400_000);
-
-        // Confidence wraps through phrase cycle but always decreases.
-        assert!(segments[0].confidence > segments.last().unwrap().confidence);
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_empty_model_path_still_works() {
-        // Pilot is a mock — empty model path should not cause a panic.
-        let pilot = WhisperCppPilot::new(String::new(), 4, None, false, false, false);
-        let segments = pilot.transcribe(5000);
-        assert_eq!(segments.len(), 1);
-        assert_eq!(pilot.model_path, "");
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_zero_threads() {
-        // Zero threads: the pilot is a mock so this should not panic.
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 0, None, false, false, false);
-        assert_eq!(pilot.n_threads, 0);
-        let segments = pilot.transcribe(10_000);
-        assert_eq!(segments.len(), 2);
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_translate_flag_stored() {
-        let pilot = WhisperCppPilot::new(
-            "m.bin".to_owned(),
-            2,
-            Some("ja".to_owned()),
-            true,
-            false,
-            false,
-        );
-        assert!(pilot.translate);
-        assert_eq!(pilot.language.as_deref(), Some("ja"));
-        // Translate flag doesn't affect mock output, but should be stored.
-        let segments = pilot.transcribe(5000);
-        assert_eq!(segments.len(), 1);
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_phrase_cycle_wraps() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        // 5 segments → phrases cycle at index 4 (mod 4 == 0).
-        let segments = pilot.transcribe(25_000);
-        assert_eq!(segments.len(), 5);
-        assert_eq!(segments[0].text, segments[4].text);
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_segment_boundaries_are_contiguous() {
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        let segments = pilot.transcribe(20_000);
-        for window in segments.windows(2) {
-            assert_eq!(
-                window[0].end_ms, window[1].start_ms,
-                "segments should be contiguous: end of one = start of next"
-            );
-        }
-    }
-
-    #[test]
-    fn whisper_cpp_pilot_exact_boundary_duration() {
-        // Exactly 5000ms → exactly 1 segment, not 2.
-        let pilot = WhisperCppPilot::new("model.bin".to_owned(), 4, None, false, false, false);
-        let segments = pilot.transcribe(5000);
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].start_ms, 0);
-        assert_eq!(segments[0].end_ms, 5000);
-    }
-
-    // ── bd-1rj.10: InsanelyFastPilot tests ──
-
-    #[test]
-    fn insanely_fast_pilot_new_stores_fields() {
-        let pilot = InsanelyFastPilot::new(
-            "openai/whisper-large-v3".to_owned(),
-            8,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        assert_eq!(pilot.model_id, "openai/whisper-large-v3");
-        assert_eq!(pilot.batch_size, 8);
-        assert_eq!(pilot.device, "cuda:0");
-        assert_eq!(pilot.dtype, "float16");
-    }
-
-    #[test]
-    fn insanely_fast_pilot_optimal_batch_size() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            16,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        assert_eq!(pilot.optimal_batch_size(), 16);
-    }
-
-    #[test]
-    fn insanely_fast_pilot_transcribe_batch_deterministic() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            4,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        let durations = [10_000, 20_000, 5_000];
-        let batch_a = pilot.transcribe_batch(&durations);
-        let batch_b = pilot.transcribe_batch(&durations);
-        assert_eq!(batch_a, batch_b, "transcribe_batch must be deterministic");
-    }
-
-    #[test]
-    fn insanely_fast_pilot_transcribe_batch_sizes() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            4,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        let durations = [10_000, 25_000, 0];
-        let results = pilot.transcribe_batch(&durations);
-        assert_eq!(results.len(), 3, "one result per input");
-        assert_eq!(results[0].len(), 1, "10s -> 1 segment at 10s granularity");
-        assert_eq!(results[1].len(), 3, "25s -> 3 segments");
-        assert!(results[2].is_empty(), "0ms -> no segments");
-    }
-
-    #[test]
-    fn insanely_fast_pilot_empty_batch() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            4,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        let results = pilot.transcribe_batch(&[]);
-        assert!(results.is_empty());
-    }
-
-    // ── bd-rxn: InsanelyFastPilot edge-case tests ──
-
-    #[test]
-    fn insanely_fast_pilot_zero_duration_in_batch() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            4,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        let results = pilot.transcribe_batch(&[0, 10_000, 0]);
-        assert_eq!(results.len(), 3);
-        assert!(
-            results[0].is_empty(),
-            "zero-duration should produce no segments"
-        );
-        assert!(!results[1].is_empty(), "10s should produce segments");
-        assert!(
-            results[2].is_empty(),
-            "zero-duration should produce no segments"
-        );
-    }
-
-    #[test]
-    fn insanely_fast_pilot_single_ms_duration() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            1,
-            "cpu".to_owned(),
-            "float32".to_owned(),
-        );
-        let results = pilot.transcribe_batch(&[1]);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].len(), 1);
-        assert_eq!(results[0][0].start_ms, 0);
-        assert_eq!(results[0][0].end_ms, 1);
-    }
-
-    #[test]
-    fn insanely_fast_pilot_extremely_long_batch() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            4,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        // 12 hours = 43_200_000 ms, segment_duration = 10_000 ms → 4320 segments.
-        let results = pilot.transcribe_batch(&[43_200_000]);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].len(), 4320);
-        assert_eq!(results[0].last().unwrap().end_ms, 43_200_000);
-    }
-
-    #[test]
-    fn insanely_fast_pilot_batch_segments_are_contiguous() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            4,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        let results = pilot.transcribe_batch(&[30_000]);
-        for window in results[0].windows(2) {
-            assert_eq!(
-                window[0].end_ms, window[1].start_ms,
-                "segments within a batch file should be contiguous"
-            );
-        }
-    }
-
-    #[test]
-    fn insanely_fast_pilot_confidence_decreases_within_file() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            4,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        let results = pilot.transcribe_batch(&[30_000]);
-        for window in results[0].windows(2) {
-            assert!(
-                window[0].confidence > window[1].confidence,
-                "confidence should decrease with segment index"
-            );
-        }
-    }
-
-    #[test]
-    fn insanely_fast_pilot_phrase_cycle_wraps_per_batch_index() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            4,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        // Two files: texts should differ based on batch_idx offset.
-        let results = pilot.transcribe_batch(&[10_000, 10_000]);
-        assert_ne!(
-            results[0][0].text, results[1][0].text,
-            "different batch indices should produce different starting phrases"
-        );
-    }
-
-    #[test]
-    fn insanely_fast_pilot_exact_boundary_duration() {
-        let pilot = InsanelyFastPilot::new(
-            "model".to_owned(),
-            4,
-            "cuda:0".to_owned(),
-            "float16".to_owned(),
-        );
-        // Exactly 10_000ms → exactly 1 segment.
-        let results = pilot.transcribe_batch(&[10_000]);
-        assert_eq!(results[0].len(), 1);
-        assert_eq!(results[0][0].end_ms, 10_000);
-    }
-
-    // ── bd-1rj.11: DiarizationPilot tests ──
-
-    #[test]
-    fn diarization_pilot_new_stores_fields() {
-        let pilot = DiarizationPilot::new(
-            "whisper-large-v3".to_owned(),
-            "WAV2VEC2_ASR_LARGE_LV60K_960H".to_owned(),
-            Some(3),
-            "en".to_owned(),
-        );
-        assert_eq!(pilot.asr_backend, "whisper-large-v3");
-        assert_eq!(pilot.alignment_model, "WAV2VEC2_ASR_LARGE_LV60K_960H");
-        assert_eq!(pilot.num_speakers, Some(3));
-        assert_eq!(pilot.language, "en");
-    }
-
-    #[test]
-    fn diarization_pilot_process_deterministic() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(2),
-            "en".to_owned(),
-        );
-        let result_a = pilot.process(10_000);
-        let result_b = pilot.process(10_000);
-        assert_eq!(result_a, result_b, "process must be deterministic");
-    }
-
-    #[test]
-    fn diarization_pilot_process_zero_duration() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(2),
-            "en".to_owned(),
-        );
-        let result = pilot.process(0);
-        assert!(result.segments.is_empty());
-        // Speakers are still created but with zero duration.
-        assert_eq!(result.speakers.len(), 2);
-        for s in &result.speakers {
-            assert_eq!(s.total_duration_ms, 0);
-        }
-    }
-
-    #[test]
-    fn diarization_pilot_process_speaker_rotation() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(3),
-            "en".to_owned(),
-        );
-        let result = pilot.process(15_000);
-        assert_eq!(result.segments.len(), 5);
-        assert_eq!(result.segments[0].speaker_id, "SPEAKER_00");
-        assert_eq!(result.segments[1].speaker_id, "SPEAKER_01");
-        assert_eq!(result.segments[2].speaker_id, "SPEAKER_02");
-        assert_eq!(result.segments[3].speaker_id, "SPEAKER_00");
-        assert_eq!(result.segments[4].speaker_id, "SPEAKER_01");
-    }
-
-    #[test]
-    fn diarization_pilot_process_speaker_info() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(2),
-            "en".to_owned(),
-        );
-        let result = pilot.process(9000);
-        assert_eq!(result.speakers.len(), 2);
-        assert_eq!(result.speakers[0].id, "SPEAKER_00");
-        assert_eq!(result.speakers[0].label, "Speaker A");
-        assert_eq!(result.speakers[1].id, "SPEAKER_01");
-        assert_eq!(result.speakers[1].label, "Speaker B");
-        // 3 segments of 3000ms: seg0 -> S0, seg1 -> S1, seg2 -> S0
-        assert_eq!(result.speakers[0].total_duration_ms, 6000);
-        assert_eq!(result.speakers[1].total_duration_ms, 3000);
-    }
-
-    #[test]
-    fn diarization_pilot_auto_speakers() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            None, // auto-detect defaults to 2
-            "en".to_owned(),
-        );
-        let result = pilot.process(6000);
-        assert_eq!(result.speakers.len(), 2);
-    }
-
-    #[test]
-    fn diarization_pilot_process_timing_coverage() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(2),
-            "en".to_owned(),
-        );
-        let result = pilot.process(9000);
-        assert_eq!(result.segments[0].start_ms, 0);
-        assert_eq!(result.segments[0].end_ms, 3000);
-        assert_eq!(result.segments[1].start_ms, 3000);
-        assert_eq!(result.segments[1].end_ms, 6000);
-        assert_eq!(result.segments[2].start_ms, 6000);
-        assert_eq!(result.segments[2].end_ms, 9000);
-    }
-
-    #[test]
-    fn diarization_pilot_last_segment_clamped() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(2),
-            "en".to_owned(),
-        );
-        let result = pilot.process(4000);
-        assert_eq!(result.segments.len(), 2);
-        assert_eq!(result.segments[1].end_ms, 4000);
-    }
-
-    // ── bd-rxn: DiarizationPilot edge-case tests ──
-
-    #[test]
-    fn diarization_pilot_single_speaker() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(1),
-            "en".to_owned(),
-        );
-        let result = pilot.process(9000);
-        assert_eq!(result.speakers.len(), 1);
-        assert_eq!(result.speakers[0].id, "SPEAKER_00");
-        for seg in &result.segments {
-            assert_eq!(
-                seg.speaker_id, "SPEAKER_00",
-                "all segments should be one speaker"
-            );
-        }
-    }
-
-    #[test]
-    fn diarization_pilot_many_speakers() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(5),
-            "en".to_owned(),
-        );
-        let result = pilot.process(15_000);
-        assert_eq!(result.speakers.len(), 5);
-        // Speakers should be ordered by ID.
-        for window in result.speakers.windows(2) {
-            assert!(
-                window[0].id < window[1].id,
-                "speakers should be sorted by id"
-            );
-        }
-    }
-
-    #[test]
-    fn diarization_pilot_auto_speakers_defaults_to_two() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            None,
-            "en".to_owned(),
-        );
-        let result = pilot.process(6000);
-        assert_eq!(result.speakers.len(), 2, "auto-detect should default to 2");
-    }
-
-    #[test]
-    fn diarization_pilot_extremely_long_duration() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(3),
-            "en".to_owned(),
-        );
-        // 1 hour = 3_600_000 ms, segment_duration = 3000 ms → 1200 segments.
-        let result = pilot.process(3_600_000);
-        assert_eq!(result.segments.len(), 1200);
-        assert_eq!(result.segments.last().unwrap().end_ms, 3_600_000);
-    }
-
-    #[test]
-    fn diarization_pilot_segments_are_contiguous() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(2),
-            "en".to_owned(),
-        );
-        let result = pilot.process(12_000);
-        for window in result.segments.windows(2) {
-            assert_eq!(
-                window[0].end_ms, window[1].start_ms,
-                "segments should be contiguous"
-            );
-        }
-    }
-
-    #[test]
-    fn diarization_pilot_speaker_durations_sum_to_total() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(2),
-            "en".to_owned(),
-        );
-        let result = pilot.process(12_000);
-        let total_speaker_ms: u64 = result.speakers.iter().map(|s| s.total_duration_ms).sum();
-        let total_segment_ms: u64 = result.segments.iter().map(|s| s.end_ms - s.start_ms).sum();
-        assert_eq!(
-            total_speaker_ms, total_segment_ms,
-            "speaker durations should sum to total segment time"
-        );
-    }
-
-    #[test]
-    fn diarization_pilot_confidence_decreases() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(2),
-            "en".to_owned(),
-        );
-        let result = pilot.process(12_000);
-        for window in result.segments.windows(2) {
-            assert!(
-                window[0].confidence > window[1].confidence,
-                "confidence should decrease with segment index"
-            );
-        }
-    }
-
-    #[test]
-    fn diarization_pilot_utterance_cycle_wraps() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(2),
-            "en".to_owned(),
-        );
-        // 7 segments → utterances cycle at index 6 (mod 6 == 0).
-        let result = pilot.process(21_000);
-        assert_eq!(result.segments.len(), 7);
-        assert_eq!(result.segments[0].text, result.segments[6].text);
-    }
-
-    #[test]
-    fn diarization_pilot_single_ms_duration() {
-        let pilot = DiarizationPilot::new(
-            "whisper".to_owned(),
-            "wav2vec2".to_owned(),
-            Some(2),
-            "en".to_owned(),
-        );
-        let result = pilot.process(1);
-        assert_eq!(result.segments.len(), 1);
-        assert_eq!(result.segments[0].start_ms, 0);
-        assert_eq!(result.segments[0].end_ms, 1);
-    }
+    // bd-s8w8: InsanelyFastPilot unit tests were DELETED with the mock pilot.
+    // The native insanely-fast engine's real parallel-window inference is now
+    // tested in `insanely_fast_native.rs` (plan_workers matrix, split/merge,
+    // gated determinism e2e).
 
     // ── bd-efr.3: TwoLaneExecutor tests ──
 
@@ -8727,27 +7803,6 @@ mod tests {
         let json = serde_json::to_string(&seg).expect("serialize");
         let parsed: TranscriptSegment = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, seg);
-    }
-
-    #[test]
-    fn diarized_transcript_serializes() {
-        let transcript = DiarizedTranscript {
-            segments: vec![DiarizedSegment {
-                text: "Hello.".to_owned(),
-                start_ms: 0,
-                end_ms: 2000,
-                speaker_id: "SPEAKER_00".to_owned(),
-                confidence: 0.90,
-            }],
-            speakers: vec![SpeakerInfo {
-                id: "SPEAKER_00".to_owned(),
-                label: "Speaker A".to_owned(),
-                total_duration_ms: 2000,
-            }],
-        };
-        let json = serde_json::to_string(&transcript).expect("serialize");
-        let parsed: DiarizedTranscript = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed, transcript);
     }
 
     fn make_ledger_entry(

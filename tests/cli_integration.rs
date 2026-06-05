@@ -2558,6 +2558,12 @@ fn transcribe_bridge_only_mode_recovers_with_native_when_bridge_binary_missing()
     if !ffmpeg_available() {
         return;
     }
+    // The native engine is now real inference (bd-jryr): recovery requires a
+    // resolvable model file. Skip when the gated test model is absent.
+    if franken_whisper::native_engine::find_model_file("tiny.en").is_none() {
+        eprintln!("skipping: ggml-tiny.en.bin not found (see scripts/fetch_test_models.sh)");
+        return;
+    }
 
     let dir = tempdir().expect("tempdir");
     let state_root = dir.path().join("state");
@@ -2578,10 +2584,13 @@ fn transcribe_bridge_only_mode_recovers_with_native_when_bridge_binary_missing()
         None,
         &stub_bin,
         &state_root,
-        &[(
-            "FRANKEN_WHISPER_WHISPER_CPP_BIN",
-            missing_bridge_bin.to_str().expect("utf8"),
-        )],
+        &[
+            (
+                "FRANKEN_WHISPER_WHISPER_CPP_BIN",
+                missing_bridge_bin.to_str().expect("utf8"),
+            ),
+            ("FRANKEN_WHISPER_NATIVE_DEFAULT_MODEL", "tiny.en"),
+        ],
     );
 
     let events = report["events"].as_array().expect("events should be array");
@@ -3629,6 +3638,7 @@ fn speculative_cli_dispatch_emits_partial_confirm_and_stats_events() {
     // lane); both invocations write to the work directory and the bridge reads the
     // most recent one for each lane.
     let bin_dir = dir.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
     let stub_bin = write_whisper_cpp_stub_binary(&bin_dir);
 
     let output = ProcessCommand::new(env!("CARGO_BIN_EXE_franken_whisper"))
@@ -3638,7 +3648,7 @@ fn speculative_cli_dispatch_emits_partial_confirm_and_stats_events() {
             "--input",
             input_wav.to_str().expect("utf-8 path"),
             "--backend",
-            "whisper_cpp",
+            "whisper-cpp",
             "--no-persist",
             // Single window so the stub only fires twice (fast + quality).
             "--speculative",
@@ -3797,6 +3807,7 @@ fn speculative_cli_without_flag_uses_single_backend_dispatch() {
     generate_voiced_wav(&input_wav);
 
     let bin_dir = dir.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
     let stub_bin = write_whisper_cpp_stub_binary(&bin_dir);
 
     let output = ProcessCommand::new(env!("CARGO_BIN_EXE_franken_whisper"))
@@ -3806,7 +3817,7 @@ fn speculative_cli_without_flag_uses_single_backend_dispatch() {
             "--input",
             input_wav.to_str().expect("utf-8"),
             "--backend",
-            "whisper_cpp",
+            "whisper-cpp",
             "--no-persist",
         ])
         .env("FRANKEN_WHISPER_STATE_DIR", &state_root)

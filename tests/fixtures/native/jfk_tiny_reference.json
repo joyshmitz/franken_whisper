@@ -1,0 +1,54 @@
+{
+	"systeminfo": "WHISPER : COREML = 0 | OPENVINO = 0 | MTL : EMBED_LIBRARY = 1 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | SME = 1 | ACCELERATE = 1 | OPENMP = 1 | REPACK = 1 | ",
+	"model": {
+		"type": "tiny",
+		"multilingual": false,
+		"vocab": 51864,
+		"audio": {
+			"ctx": 1500,
+			"state": 384,
+			"head": 6,
+			"layer": 4
+		},
+		"text": {
+			"ctx": 448,
+			"state": 384,
+			"head": 6,
+			"layer": 4
+		},
+		"mels": 80,
+		"ftype": 1
+	},
+	"params": {
+		"model": "/Users/jemanuel/models/whisper/ggml-tiny.en.bin",
+		"language": "en",
+		"translate": false
+	},
+	"result": {
+		"language": "en"
+	},
+	"transcription": [
+		{
+			"timestamps": {
+				"from": "00:00:00,000",
+				"to": "00:00:07,960"
+			},
+			"offsets": {
+				"from": 0,
+				"to": 7960
+			},
+			"text": " And so my fellow Americans ask not what your country can do for you"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:07,960",
+				"to": "00:00:10,760"
+			},
+			"offsets": {
+				"from": 7960,
+				"to": 10760
+			},
+			"text": " ask what you can do for your country."
+		}
+	]
+}

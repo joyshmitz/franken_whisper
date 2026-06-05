@@ -1,59 +1,208 @@
-//! Native insanely-fast engine pilot (bd-1rj.10).
+//! Real native insanely-fast engine (bd-s8w8).
 //!
-//! In-process deterministic implementation that mirrors the bridge adapter's
-//! normalized output contract including diarization token readiness checks,
-//! batching knobs, and canonical segment normalization.
+//! This module is the in-process, pure-Rust insanely-fast-whisper engine. Like
+//! [`whisper_cpp_native`](super::whisper_cpp_native) it runs **genuine** ASR
+//! inference through [`crate::native_engine`] (real ggml weights, real log-mel
+//! frontend, real encoder/decoder forward passes) — there are **no canned
+//! phrases, no mock segmentation, and no subprocess execution**. The former
+//! "pilot" that fabricated deterministic phrases from audio-energy regions is
+//! gone.
+//!
+//! ## The insanely-fast identity: throughput via parallel windows
+//!
+//! [`whisper_cpp_native`](super::whisper_cpp_native) calls
+//! [`decode::transcribe_samples`] once over the whole clip; that function
+//! windows the audio into 30 s chunks and decodes them **sequentially**,
+//! carrying whisper's seek-continuation and a rolling text prompt across window
+//! boundaries.
+//!
+//! This engine trades that continuity for **throughput**: it splits the audio
+//! into hard 30 s windows up front and decodes **multiple windows in parallel**
+//! across a worker pool, then merges the per-window transcripts in window order
+//! (offsetting each window's timestamps by `window_idx * 30 s`). This mirrors
+//! how the real `insanely-fast-whisper` batches chunked audio and merges the
+//! results.
+//!
+//! ### Honest tradeoff
+//!
+//! Hard 30 s boundaries lose whisper's seek-continuation: a word straddling a
+//! boundary may be clipped or duplicated, and each window decodes with no prior
+//! text context (no rolling prompt). That is the documented behavior of chunked
+//! batched inference (`insanely-fast-whisper` chunks + merges identically). When
+//! cross-window continuity matters more than throughput, use the sequential
+//! [`whisper_cpp_native`](super::whisper_cpp_native) engine instead.
+//!
+//! ### Determinism
+//!
+//! Output is **identical regardless of worker count**. Each window is decoded
+//! independently (greedy / temperature-0, shared read-only weights) and the
+//! windows are merged in deterministic window order, so the worker count only
+//! affects wall-clock time, never the transcript or timestamps. The gated tests
+//! assert 2-worker output equals 1-worker output exactly.
+//!
+//! ## Model resolution, silence pre-gate, availability, word timestamps
+//!
+//! These policies are identical to
+//! [`whisper_cpp_native`](super::whisper_cpp_native): the model is resolved from
+//! `request.model` then `$FRANKEN_WHISPER_NATIVE_DEFAULT_MODEL`; a cheap energy
+//! pre-gate returns an empty result for pure silence without loading any
+//! weights; availability is the same honest default-or-scan model-file check;
+//! and word-level timestamps reuse that module's interpolated splitting helpers.
 
-use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use crate::error::{FwError, FwResult};
-use crate::model::{
-    BackendKind, TimestampLevel, TranscribeRequest, TranscriptionResult, TranscriptionSegment,
-};
+use crate::model::{BackendKind, TranscribeRequest, TranscriptionResult, TranscriptionSegment};
+use crate::native_engine::mel::N_SAMPLES_30S;
+use crate::native_engine::{self, NativeWhisperModel, decode};
 
 use super::native_audio::analyze_wav;
+use super::whisper_cpp_native::{WordTimestampMode, build_segments, word_timestamp_mode};
 
-const WAV_HEADER_BYTES: u64 = 44;
-const PCM16_MONO_16KHZ_BYTES_PER_SECOND: u64 = 32_000;
-const MIN_DURATION_MS: u64 = 1_000;
-const MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
-const DEFAULT_DURATION_MS: u64 = 20_000;
-const MIN_REGION_DURATION_MS: u64 = 250;
+/// Stable schema tag for the honest native raw-output metadata (shared with the
+/// whisper.cpp native engine so the evidence ledger has one schema).
+const SCHEMA_VERSION: &str = "native-v2";
 
-#[derive(Debug, Clone)]
-struct NativeBatchSegmentation {
-    duration_ms: u64,
-    pilot_segments: Vec<super::TranscriptSegment>,
-    analysis_provenance: Value,
-}
+/// Default `batch_size` (max concurrent windows) when the request does not set
+/// one — matches the historical insanely-fast default.
+const DEFAULT_BATCH_SIZE: usize = 24;
 
-#[derive(Debug, Clone)]
-struct WordSegment {
-    start_ms: u64,
-    end_ms: u64,
-    text: String,
-    confidence: f64,
-    speaker: Option<String>,
-}
+/// One 30 s window in seconds, used to offset each window's timestamps back into
+/// whole-clip time when merging.
+const WINDOW_SECONDS: f64 = 30.0;
 
-/// In-process pilot is always available.
+/// Honestly report whether the native insanely-fast engine can run.
+///
+/// Shares [`whisper_cpp_native::is_available`](super::whisper_cpp_native::is_available)'s
+/// exact policy: both engines run the **same** [`crate::native_engine`] over the
+/// **same** ggml model files, so they must agree on availability. Reports `true`
+/// only when a usable model header exists (the configured default resolves, or
+/// any `ggml-*.bin` with a valid header sits in a search dir). Never panics or
+/// performs network access.
+#[must_use]
 pub fn is_available() -> bool {
-    true
+    super::whisper_cpp_native::is_available()
 }
 
-/// Whether a HuggingFace token is present for the given request.
+/// Whether a HuggingFace token is present for the given request (diarization
+/// gate, unchanged from the bridge contract).
 pub(crate) fn hf_token_present_for_request(request: &TranscribeRequest) -> bool {
     super::insanely_fast::hf_token_present_for_request(request)
 }
 
+/// Resolve the effective model spec for a request, or a [`FwError`] explaining
+/// how to provision one. Identical precedence to the whisper.cpp native engine:
+/// `request.model` then `$FRANKEN_WHISPER_NATIVE_DEFAULT_MODEL`, else an
+/// actionable [`FwError::BackendUnavailable`] naming the env var and reusing the
+/// resolver's search-dir listing.
+fn effective_model_spec(request: &TranscribeRequest) -> FwResult<String> {
+    if let Some(model) = request.model.clone().filter(|m| !m.is_empty()) {
+        return Ok(model);
+    }
+    if let Some(spec) = native_engine::default_model_spec() {
+        return Ok(spec);
+    }
+    let dirs_hint = native_engine::resolve_model("default")
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    Err(FwError::BackendUnavailable(format!(
+        "native insanely-fast engine has no model: pass --model, or set \
+         $FRANKEN_WHISPER_NATIVE_DEFAULT_MODEL to a model short-name or path. \
+         {dirs_hint}"
+    )))
+}
+
+/// Split `samples` into fixed 30 s windows (`N_SAMPLES_30S` each). The last
+/// window keeps the remainder (it may be shorter than 30 s). A clip shorter than
+/// one window yields a single window. Empty input yields no windows.
+fn split_windows(samples: &[f32]) -> Vec<&[f32]> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    samples.chunks(N_SAMPLES_30S).collect()
+}
+
+/// Worker-pool sizing: pure, tested. Returns `(n_workers, threads_per_worker)`.
+///
+/// - `n_workers = min(n_windows, batch_size, max(1, total_threads / 2))` — never
+///   more workers than windows, never more than the `batch_size` concurrency
+///   cap, and never more than half the thread budget (each worker wants ≥ 2
+///   intra-op threads where possible).
+/// - `threads_per_worker = max(1, total_threads / n_workers)` — the intra-op
+///   thread budget split evenly across workers, floored at 1.
+///
+/// Every branch is guarded so a zero or absurd input never yields a zero worker
+/// count or a zero thread count (which would deadlock or divide-by-zero).
+pub(crate) fn plan_workers(
+    n_windows: usize,
+    batch_size: Option<usize>,
+    total_threads: usize,
+) -> (usize, usize) {
+    let batch = batch_size.unwrap_or(DEFAULT_BATCH_SIZE).max(1);
+    let total_threads = total_threads.max(1);
+    let half = (total_threads / 2).max(1);
+    let n_workers = n_windows.max(1).min(batch).min(half);
+    let n_workers = n_workers.max(1);
+    let threads_per_worker = (total_threads / n_workers).max(1);
+    (n_workers, threads_per_worker)
+}
+
+/// Resolve the total intra-op thread budget for a request (request override,
+/// else the engine default), mirroring the whisper.cpp native engine.
+fn total_threads_for(request: &TranscribeRequest) -> usize {
+    request
+        .backend_params
+        .threads
+        .map_or_else(native_engine::default_threads, |t| {
+            usize::try_from(t).unwrap_or_else(|_| native_engine::default_threads())
+        })
+}
+
+/// Build the per-worker [`decode::DecodeParams`] for a request, with the
+/// caller-chosen `threads_per_worker` (the rest of the params are window-shape
+/// independent).
+fn decode_params(request: &TranscribeRequest, threads_per_worker: usize) -> decode::DecodeParams {
+    decode::DecodeParams {
+        language: request.language.clone(),
+        translate: request.translate,
+        timestamps: !request.backend_params.no_timestamps,
+        n_threads: threads_per_worker,
+        max_text_ctx: None,
+        ..decode::DecodeParams::default()
+    }
+}
+
+/// One window's decode result, tagged with its window index for ordered merge.
+struct WindowResult {
+    index: usize,
+    output: decode::DecodeOutput,
+}
+
+/// Run real native insanely-fast (parallel-window) inference over
+/// `normalized_wav` (guaranteed 16 kHz mono PCM16 by the pipeline) and return a
+/// [`TranscriptionResult`].
+///
+/// See the module docs for the parallel-window strategy, determinism guarantee,
+/// and shared model-resolution / silence-pre-gate / word-timestamp policies.
+///
+/// # Errors
+///
+/// - [`FwError::BackendUnavailable`] when no model can be resolved (or when
+///   diarization is requested without a HuggingFace token).
+/// - [`FwError::Io`] / [`FwError::InvalidRequest`] when the WAV cannot be read.
+/// - [`FwError::Cancelled`] when the cancellation token's deadline expires
+///   (propagated into every worker; the first error wins).
+/// - Whatever model-load or decode errors the native engine surfaces.
 pub fn run(
     request: &TranscribeRequest,
     normalized_wav: &Path,
-    work_dir: &Path,
+    _work_dir: &Path,
     _timeout: Duration,
     token: Option<&crate::orchestrator::CancellationToken>,
 ) -> FwResult<TranscriptionResult> {
@@ -67,326 +216,297 @@ pub fn run(
         tok.checkpoint()?;
     }
 
+    // Resolve the model spec up front so an unavailability error is reported
+    // before any expensive work.
+    let spec = effective_model_spec(request)?;
+
+    // Silence pre-gate: cheap energy analysis avoids a multi-GB model load on a
+    // pure-silence clip (shared policy with whisper.cpp native).
+    let analysis = analyze_wav(normalized_wav, request.backend_params.duration_ms).ok();
+    if let Some(analysis) = analysis.as_ref()
+        && analysis.active_regions.is_empty()
+    {
+        return Ok(silence_result(request, &spec, analysis.duration_ms));
+    }
+
+    if let Some(tok) = token {
+        tok.checkpoint()?;
+    }
+
+    // Resolve + load the model (cached, reference-counted, read-only weights).
+    let model_path = native_engine::resolve_model(&spec)
+        .map_err(|e| FwError::BackendUnavailable(e.to_string()))?;
+    let model = NativeWhisperModel::load(&model_path)?;
+
+    let samples = read_normalized_wav(normalized_wav)?;
+
+    if let Some(tok) = token {
+        tok.checkpoint()?;
+    }
+
+    // Split into 30 s windows and size the worker pool.
+    let windows = split_windows(&samples);
     let batch_size = request
         .backend_params
         .batch_size
-        .and_then(|v| usize::try_from(v).ok())
-        .unwrap_or(8)
-        .max(1);
-    let device = request
-        .backend_params
-        .gpu_device
-        .clone()
-        .unwrap_or_else(|| {
-            if request.backend_params.no_gpu {
-                "cpu".to_owned()
-            } else {
-                "cuda:0".to_owned()
-            }
-        });
-    let dtype = if device.starts_with("cuda") || device.starts_with("mps") {
-        "float16".to_owned()
-    } else {
-        "float32".to_owned()
-    };
-    let pilot = super::InsanelyFastPilot::new(
-        request
-            .model
-            .clone()
-            .unwrap_or_else(|| "openai/whisper-large-v3".to_owned()),
-        batch_size,
-        device.clone(),
-        dtype.clone(),
-    );
-    let native = build_native_segmentation(request, normalized_wav, &pilot, token)?;
-    let (segments, raw_chunks) = build_segments_and_chunks(
-        &native.pilot_segments,
-        request.diarize,
-        request.backend_params.timestamp_level,
+        .and_then(|v| usize::try_from(v).ok());
+    let total_threads = total_threads_for(request);
+    let (n_workers, threads_per_worker) = plan_workers(windows.len(), batch_size, total_threads);
+
+    let params = decode_params(request, threads_per_worker);
+
+    // Decode every window (parallel across workers); merge in window order.
+    let window_results = decode_windows_parallel(&model, &windows, &params, n_workers, token)?;
+
+    let merged = merge_windows(&window_results);
+
+    let word_mode = word_timestamp_mode(request.backend_params.word_timestamps.as_ref());
+    let segments = build_segments(
+        &merged.segments,
+        word_mode,
+        request.backend_params.split_on_word,
+        request.backend_params.no_timestamps,
         token,
     )?;
     let transcript = super::transcript_from_segments(&segments);
+    let language = merged.language.or_else(|| request.language.clone());
 
-    let output_path = super::insanely_fast::output_path_for(request, work_dir);
-    if let Some(parent) = output_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-
-    let raw_output = json!({
-        "engine": "insanely-fast-native",
-        "schema_version": "native-pilot-v1",
-        "in_process": true,
-        "model": request.model.clone().unwrap_or_else(|| "openai/whisper-large-v3".to_owned()),
-        "text": transcript,
-        "language": request.language.clone(),
-        "chunks": raw_chunks,
-        "telemetry": {
-            "batch_size_requested": request.backend_params.batch_size,
-            "batch_size_effective": batch_size,
-            "batch_count": 1,
-            "device": device,
-            "dtype": dtype,
-            "flash_attention_requested": request.backend_params.flash_attention,
-            "duration_ms": native.duration_ms,
-            "analysis": native.analysis_provenance,
-        }
-    });
-    fs::write(&output_path, serde_json::to_vec_pretty(&raw_output)?)?;
+    let raw_output = raw_output_json(
+        &spec,
+        &model_path,
+        model.version_tag(),
+        windows.len(),
+        n_workers,
+        threads_per_worker,
+        &merged.windows,
+        word_mode,
+        request.backend_params.split_on_word,
+        false,
+    );
 
     Ok(TranscriptionResult {
         backend: BackendKind::InsanelyFast,
-        transcript: super::transcript_from_segments(&segments),
-        language: request.language.clone(),
+        transcript,
+        language,
         segments,
         acceleration: None,
         raw_output,
-        artifact_paths: vec![output_path.display().to_string()],
+        artifact_paths: Vec::new(),
     })
 }
 
-fn build_native_segmentation(
-    request: &TranscribeRequest,
-    normalized_wav: &Path,
-    pilot: &super::InsanelyFastPilot,
+/// Decode every window, distributing them round-robin across `n_workers`
+/// scoped threads, each running [`NativeWhisperModel::transcribe`] on the
+/// **shared** `Arc<NativeWhisperModel>` (weights are read-only). Returns the
+/// per-window outputs in arbitrary order (the caller sorts by index).
+///
+/// Cancellation + first-error: a shared [`AtomicBool`] short-circuits remaining
+/// windows the moment any window errors (or the token expires); the first error
+/// observed is returned. Per-window independence + the shared-weights model make
+/// the merged result identical regardless of `n_workers`.
+fn decode_windows_parallel(
+    model: &NativeWhisperModel,
+    windows: &[&[f32]],
+    params: &decode::DecodeParams,
+    n_workers: usize,
     token: Option<&crate::orchestrator::CancellationToken>,
-) -> FwResult<NativeBatchSegmentation> {
-    let duration_hint = request.backend_params.duration_ms;
-    let analysis = match analyze_wav(normalized_wav, duration_hint) {
-        Ok(analysis) => analysis,
-        Err(error) => {
-            let duration_ms = estimate_duration_ms(request, normalized_wav);
-            let pilot_segments = pilot
-                .transcribe_batch(&[duration_ms])
-                .into_iter()
-                .next()
-                .unwrap_or_default();
-            return Ok(NativeBatchSegmentation {
-                duration_ms,
-                pilot_segments,
-                analysis_provenance: json!({
-                    "mode": "duration_fallback",
-                    "reason": error,
-                    "duration_ms": duration_ms,
-                }),
+) -> FwResult<Vec<WindowResult>> {
+    let stop = AtomicBool::new(false);
+    let first_error: Mutex<Option<FwError>> = Mutex::new(None);
+    let results: Mutex<Vec<WindowResult>> = Mutex::new(Vec::with_capacity(windows.len()));
+
+    std::thread::scope(|scope| {
+        for worker_id in 0..n_workers {
+            let stop = &stop;
+            let first_error = &first_error;
+            let results = &results;
+            scope.spawn(move || {
+                // A worker's checkpoint: honor the orchestrator token AND the
+                // shared stop flag so a sibling's error/cancellation halts every
+                // worker promptly.
+                let checkpoint = || -> FwResult<()> {
+                    if stop.load(Ordering::Relaxed) {
+                        return Err(FwError::Cancelled(
+                            "insanely-fast worker stopped".to_owned(),
+                        ));
+                    }
+                    token.map_or(Ok(()), crate::orchestrator::CancellationToken::checkpoint)
+                };
+                // Round-robin window assignment: worker w handles windows
+                // w, w + n_workers, w + 2*n_workers, ...
+                let mut idx = worker_id;
+                while idx < windows.len() {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    match model.transcribe(windows[idx], params, &checkpoint) {
+                        Ok(output) => {
+                            results
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(WindowResult { index: idx, output });
+                        }
+                        Err(err) => {
+                            // First error wins; signal every worker to stop.
+                            let mut slot = first_error.lock().unwrap_or_else(|e| e.into_inner());
+                            if slot.is_none() {
+                                *slot = Some(err);
+                            }
+                            stop.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                    idx += n_workers;
+                }
             });
         }
-    };
+    });
 
-    let mut pilot_segments = Vec::new();
-    for (region_index, region) in analysis.active_regions.iter().enumerate() {
-        if let Some(tok) = token {
-            tok.checkpoint()?;
+    if let Some(err) = first_error.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        return Err(err);
+    }
+
+    let mut results = results.into_inner().unwrap_or_else(|e| e.into_inner());
+    results.sort_by_key(|r| r.index);
+    Ok(results)
+}
+
+/// The deterministic merge of per-window outputs into a whole-clip result.
+struct MergedOutput {
+    segments: Vec<TranscriptionSegment>,
+    windows: Vec<decode::WindowStats>,
+    language: Option<String>,
+}
+
+/// Merge per-window decode outputs in window order. Each window's
+/// segment/window-stat timestamps are offset by `window_idx * 30 s` to map them
+/// back into whole-clip time. The detected language (if any) is taken from the
+/// first window that reports one.
+///
+/// This is the determinism linchpin: because windows are independent and merged
+/// strictly by index, the merged result does not depend on which worker decoded
+/// which window or in what order they finished.
+fn merge_windows(results: &[WindowResult]) -> MergedOutput {
+    let mut segments = Vec::new();
+    let mut windows = Vec::new();
+    let mut language = None;
+
+    for result in results {
+        let offset = result.index as f64 * WINDOW_SECONDS;
+        if language.is_none() {
+            language = result.output.language.clone();
         }
-        let region_duration_ms = region
-            .end_ms
-            .saturating_sub(region.start_ms)
-            .max(MIN_REGION_DURATION_MS);
-        let mut region_segments = pilot
-            .transcribe_batch(&[region_duration_ms])
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        for (segment_index, mut segment) in region_segments.drain(..).enumerate() {
-            if let Some(tok) = token {
-                tok.checkpoint()?;
-            }
-            let start_ms = region.start_ms.saturating_add(segment.start_ms);
-            let mut end_ms = region.start_ms.saturating_add(segment.end_ms);
-            if end_ms > region.end_ms {
-                end_ms = region.end_ms;
-            }
-            if end_ms <= start_ms {
-                continue;
-            }
-
-            let energy_bonus = (region.avg_rms as f64 * 3.0).clamp(0.0, 0.09);
-            let continuity_penalty = ((region_index + segment_index) as f64) * 0.0025;
-            segment.start_ms = start_ms;
-            segment.end_ms = end_ms;
-            segment.confidence =
-                (segment.confidence + energy_bonus - continuity_penalty).clamp(0.5, 0.995);
-            pilot_segments.push(segment);
+        for seg in &result.output.segments {
+            segments.push(TranscriptionSegment {
+                start_sec: seg.start_sec.map(|s| s + offset),
+                end_sec: seg.end_sec.map(|s| s + offset),
+                text: seg.text.clone(),
+                speaker: seg.speaker.clone(),
+                confidence: seg.confidence,
+            });
+        }
+        for win in &result.output.windows {
+            windows.push(decode::WindowStats {
+                avg_logprob: win.avg_logprob,
+                no_speech_prob: win.no_speech_prob,
+                tokens: win.tokens,
+                window_offset_sec: win.window_offset_sec + offset,
+            });
         }
     }
-    pilot_segments.sort_by_key(|segment| (segment.start_ms, segment.end_ms));
 
-    let segment_count = pilot_segments.len();
-    Ok(NativeBatchSegmentation {
-        duration_ms: analysis.duration_ms,
-        pilot_segments,
-        analysis_provenance: json!({
-            "mode": "waveform",
-            "duration_hint_ms": duration_hint,
-            "analysis": analysis.as_json(),
-            "segments_from_active_regions": segment_count,
-        }),
+    MergedOutput {
+        segments,
+        windows,
+        language,
+    }
+}
+
+/// Read a normalized 16 kHz mono PCM16 WAV into f32 mono samples (shares the
+/// engine's RIFF reader so production and gated e2e tests use one decoder).
+fn read_normalized_wav(path: &Path) -> FwResult<Vec<f32>> {
+    let bytes = std::fs::read(path)?;
+    decode::read_wav_16k_mono(&bytes)
+}
+
+/// The honest raw-output metadata JSON for a real-inference parallel-window run.
+#[allow(clippy::too_many_arguments)]
+fn raw_output_json(
+    spec: &str,
+    model_path: &Path,
+    version_tag: String,
+    parallel_windows: usize,
+    workers: usize,
+    threads_per_worker: usize,
+    windows: &[decode::WindowStats],
+    word_mode: WordTimestampMode,
+    split_on_word: bool,
+    silence: bool,
+) -> Value {
+    let word_timestamps = if word_mode != WordTimestampMode::None || split_on_word {
+        "interpolated"
+    } else {
+        "none"
+    };
+    let windows_json: Vec<Value> = windows
+        .iter()
+        .map(|w| {
+            json!({
+                "window_offset_sec": w.window_offset_sec,
+                "tokens": w.tokens,
+                "avg_logprob": w.avg_logprob,
+                "no_speech_prob": w.no_speech_prob,
+            })
+        })
+        .collect();
+    json!({
+        "engine": "insanely-fast-native",
+        "schema_version": SCHEMA_VERSION,
+        "in_process": true,
+        "implementation": "real-inference",
+        "silence": silence,
+        "parallel_windows": parallel_windows,
+        "workers": workers,
+        "threads_per_worker": threads_per_worker,
+        "model": spec,
+        "model_path": model_path.display().to_string(),
+        "model_version_tag": version_tag,
+        "windows": windows_json,
+        "word_timestamps": word_timestamps,
     })
 }
 
-fn estimate_duration_ms(request: &TranscribeRequest, normalized_wav: &Path) -> u64 {
-    if let Some(duration_ms) = request.backend_params.duration_ms {
-        return duration_ms.clamp(MIN_DURATION_MS, MAX_DURATION_MS);
+/// Build the empty-but-valid result for a pure-silence clip, taken **without
+/// loading the model** (the energy pre-gate already proved there is nothing to
+/// transcribe).
+fn silence_result(
+    request: &TranscribeRequest,
+    spec: &str,
+    duration_ms: u64,
+) -> TranscriptionResult {
+    TranscriptionResult {
+        backend: BackendKind::InsanelyFast,
+        transcript: String::new(),
+        language: request.language.clone(),
+        segments: Vec::new(),
+        acceleration: None,
+        raw_output: json!({
+            "engine": "insanely-fast-native",
+            "schema_version": SCHEMA_VERSION,
+            "in_process": true,
+            "implementation": "real-inference",
+            "silence": true,
+            "parallel_windows": 0,
+            "workers": 0,
+            "threads_per_worker": 0,
+            "model": spec,
+            "model_loaded": false,
+            "duration_ms": duration_ms,
+            "windows": [],
+            "word_timestamps": "none",
+        }),
+        artifact_paths: Vec::new(),
     }
-
-    let Ok(metadata) = fs::metadata(normalized_wav) else {
-        return DEFAULT_DURATION_MS;
-    };
-    let audio_bytes = metadata.len().saturating_sub(WAV_HEADER_BYTES);
-    let estimated =
-        ((audio_bytes as f64 / PCM16_MONO_16KHZ_BYTES_PER_SECOND as f64) * 1_000.0).round() as u64;
-    estimated.clamp(MIN_DURATION_MS, MAX_DURATION_MS)
-}
-
-fn to_transcription_segments(
-    pilot_segments: &[super::TranscriptSegment],
-    diarize: bool,
-    token: Option<&crate::orchestrator::CancellationToken>,
-) -> FwResult<Vec<TranscriptionSegment>> {
-    let mut segments = Vec::with_capacity(pilot_segments.len());
-    for (index, seg) in pilot_segments.iter().enumerate() {
-        if let Some(tok) = token {
-            tok.checkpoint()?;
-        }
-        segments.push(TranscriptionSegment {
-            start_sec: Some(seg.start_ms as f64 / 1_000.0),
-            end_sec: Some(seg.end_ms as f64 / 1_000.0),
-            text: seg.text.trim().to_owned(),
-            speaker: diarize.then(|| format!("SPEAKER_{:02}", index % 2)),
-            confidence: Some(seg.confidence.clamp(0.0, 1.0)),
-        });
-    }
-    Ok(segments)
-}
-
-fn build_segments_and_chunks(
-    pilot_segments: &[super::TranscriptSegment],
-    diarize: bool,
-    timestamp_level: Option<TimestampLevel>,
-    token: Option<&crate::orchestrator::CancellationToken>,
-) -> FwResult<(Vec<TranscriptionSegment>, Vec<Value>)> {
-    match timestamp_level {
-        Some(TimestampLevel::Word) => {
-            let word_segments = word_segments_from_pilot(pilot_segments, diarize, token)?;
-            let segments = word_segments
-                .iter()
-                .map(|word| TranscriptionSegment {
-                    start_sec: Some(word.start_ms as f64 / 1_000.0),
-                    end_sec: Some(word.end_ms as f64 / 1_000.0),
-                    text: word.text.clone(),
-                    speaker: word.speaker.clone(),
-                    confidence: Some(word.confidence.clamp(0.0, 1.0)),
-                })
-                .collect::<Vec<_>>();
-            let raw_chunks = build_word_level_chunks(pilot_segments, diarize, token)?;
-            Ok((segments, raw_chunks))
-        }
-        _ => {
-            let segments = to_transcription_segments(pilot_segments, diarize, token)?;
-            let raw_chunks = segments
-                .iter()
-                .map(|seg| {
-                    json!({
-                        "text": seg.text,
-                        "timestamp": [seg.start_sec, seg.end_sec],
-                        "speaker": seg.speaker,
-                        "confidence": seg.confidence,
-                    })
-                })
-                .collect::<Vec<_>>();
-            Ok((segments, raw_chunks))
-        }
-    }
-}
-
-fn word_segments_from_pilot(
-    pilot_segments: &[super::TranscriptSegment],
-    diarize: bool,
-    token: Option<&crate::orchestrator::CancellationToken>,
-) -> FwResult<Vec<WordSegment>> {
-    let mut out = Vec::new();
-    for (index, segment) in pilot_segments.iter().enumerate() {
-        if let Some(tok) = token {
-            tok.checkpoint()?;
-        }
-        let speaker = diarize.then(|| format!("SPEAKER_{:02}", index % 2));
-        let words = split_segment_into_words(segment, speaker.as_deref(), token)?;
-        out.extend(words);
-    }
-    Ok(out)
-}
-
-fn split_segment_into_words(
-    segment: &super::TranscriptSegment,
-    speaker: Option<&str>,
-    token: Option<&crate::orchestrator::CancellationToken>,
-) -> FwResult<Vec<WordSegment>> {
-    let words: Vec<&str> = segment.text.split_whitespace().collect();
-    if words.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let duration_ms = segment.end_ms.saturating_sub(segment.start_ms);
-    let ms_per_word = duration_ms / words.len() as u64;
-    let mut out = Vec::with_capacity(words.len());
-    for (idx, word) in words.iter().enumerate() {
-        if let Some(tok) = token {
-            tok.checkpoint()?;
-        }
-        let start_ms = segment.start_ms + (idx as u64) * ms_per_word;
-        let end_ms = if idx + 1 == words.len() {
-            segment.end_ms
-        } else {
-            start_ms + ms_per_word
-        };
-        out.push(WordSegment {
-            start_ms,
-            end_ms,
-            text: (*word).to_owned(),
-            confidence: segment.confidence,
-            speaker: speaker.map(str::to_owned),
-        });
-    }
-    Ok(out)
-}
-
-fn build_word_level_chunks(
-    pilot_segments: &[super::TranscriptSegment],
-    diarize: bool,
-    token: Option<&crate::orchestrator::CancellationToken>,
-) -> FwResult<Vec<Value>> {
-    let mut chunks = Vec::with_capacity(pilot_segments.len());
-    for (index, segment) in pilot_segments.iter().enumerate() {
-        if let Some(tok) = token {
-            tok.checkpoint()?;
-        }
-        let speaker = diarize.then(|| format!("SPEAKER_{:02}", index % 2));
-        let words = split_segment_into_words(segment, speaker.as_deref(), token)?;
-        let word_values = words
-            .iter()
-            .map(|word| {
-                json!({
-                    "word": word.text,
-                    "start": word.start_ms as f64 / 1_000.0,
-                    "end": word.end_ms as f64 / 1_000.0,
-                    "confidence": word.confidence.clamp(0.0, 1.0),
-                    "speaker": word.speaker,
-                })
-            })
-            .collect::<Vec<_>>();
-        chunks.push(json!({
-            "text": segment.text.trim(),
-            "timestamp": [
-                segment.start_ms as f64 / 1_000.0,
-                segment.end_ms as f64 / 1_000.0
-            ],
-            "speaker": speaker,
-            "confidence": segment.confidence.clamp(0.0, 1.0),
-            "words": word_values,
-        }));
-    }
-    Ok(chunks)
 }
 
 #[cfg(test)]
@@ -394,10 +514,11 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use tempfile::tempdir;
-
-    use crate::backend::{Engine, InsanelyFastPilot, TranscriptSegment};
-    use crate::model::{BackendKind, BackendParams, InputSource, TranscribeRequest};
+    use crate::backend::Engine;
+    use crate::model::{
+        BackendKind, BackendParams, InputSource, TranscribeRequest, TranscriptionSegment,
+    };
+    use crate::native_engine::mel::SAMPLE_RATE;
     use crate::orchestrator::CancellationToken;
 
     use super::*;
@@ -408,7 +529,7 @@ mod tests {
                 path: PathBuf::from("input.wav"),
             },
             backend: BackendKind::InsanelyFast,
-            model: Some("openai/whisper-large-v3".to_owned()),
+            model: Some("tiny.en".to_owned()),
             language: Some("en".to_owned()),
             translate: false,
             diarize: false,
@@ -417,101 +538,6 @@ mod tests {
             timeout_ms: None,
             backend_params: BackendParams::default(),
         }
-    }
-
-    #[test]
-    fn native_engine_name_follows_naming_convention() {
-        let engine = super::super::InsanelyFastNativeEngine;
-        assert_eq!(engine.name(), "insanely-fast-native");
-    }
-
-    #[test]
-    fn native_engine_kind_matches_bridge_adapter() {
-        let native = super::super::InsanelyFastNativeEngine;
-        let bridge = super::super::InsanelyFastEngine;
-        assert_eq!(native.kind(), bridge.kind());
-        assert_eq!(native.kind(), BackendKind::InsanelyFast);
-    }
-
-    #[test]
-    fn native_engine_capabilities_superset_of_bridge() {
-        let native = super::super::InsanelyFastNativeEngine;
-        let bridge = super::super::InsanelyFastEngine;
-        let native_caps = native.capabilities();
-        let bridge_caps = bridge.capabilities();
-
-        if bridge_caps.supports_diarization {
-            assert!(native_caps.supports_diarization);
-        }
-        if bridge_caps.supports_translation {
-            assert!(native_caps.supports_translation);
-        }
-        if bridge_caps.supports_word_timestamps {
-            assert!(native_caps.supports_word_timestamps);
-        }
-        if bridge_caps.supports_gpu {
-            assert!(native_caps.supports_gpu);
-        }
-        if bridge_caps.supports_streaming {
-            assert!(native_caps.supports_streaming);
-        }
-    }
-
-    #[test]
-    fn native_engine_name_distinct_from_bridge() {
-        let native = super::super::InsanelyFastNativeEngine;
-        let bridge = super::super::InsanelyFastEngine;
-        assert_ne!(native.name(), bridge.name());
-        assert!(native.name().contains("native"));
-    }
-
-    #[test]
-    fn native_engine_availability_is_in_process_true() {
-        assert!(is_available());
-    }
-
-    #[test]
-    fn native_run_produces_segments_and_artifact() {
-        let tmp = tempdir().expect("tempdir");
-        let result = run(
-            &request(),
-            Path::new("does-not-need-to-exist.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("native pilot run should succeed");
-
-        assert_eq!(result.backend, BackendKind::InsanelyFast);
-        assert!(!result.segments.is_empty());
-        assert_eq!(result.artifact_paths.len(), 1);
-        assert!(
-            Path::new(&result.artifact_paths[0]).exists(),
-            "native pilot should write transcript artifact"
-        );
-        assert_eq!(
-            result.raw_output["engine"].as_str(),
-            Some("insanely-fast-native")
-        );
-        assert_eq!(
-            result.raw_output["telemetry"]["analysis"]["mode"].as_str(),
-            Some("duration_fallback")
-        );
-    }
-
-    #[test]
-    fn native_run_diarize_without_token_fails() {
-        let tmp = tempdir().expect("tempdir");
-        let mut req = request();
-        req.diarize = true;
-        let result = run(
-            &req,
-            Path::new("does-not-need-to-exist.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        );
-        assert!(result.is_err(), "diarize without HF token should fail");
     }
 
     fn write_pcm16_mono_wav(path: &Path, sample_rate: u32, samples: &[i16]) {
@@ -536,913 +562,466 @@ mod tests {
         std::fs::write(path, bytes).expect("write wav");
     }
 
+    // ── Engine-trait shape ────────────────────────────────────────────────
+
     #[test]
-    fn native_batch_segmentation_is_content_sensitive() {
-        let dir = tempdir().expect("tempdir");
-        let silence = dir.path().join("silence.wav");
-        let mixed = dir.path().join("mixed.wav");
-        write_pcm16_mono_wav(&silence, 16_000, &vec![0i16; 16_000]);
-        let mut mixed_samples = vec![0i16; 4_000];
-        mixed_samples.extend((0..16_000).map(|i| if i % 2 == 0 { 7_500 } else { -7_500 }));
-        mixed_samples.extend(vec![0i16; 4_000]);
-        write_pcm16_mono_wav(&mixed, 16_000, &mixed_samples);
-
-        let req = request();
-        let silence_result =
-            run(&req, &silence, dir.path(), Duration::from_secs(1), None).expect("silence run");
-        let mixed_result =
-            run(&req, &mixed, dir.path(), Duration::from_secs(1), None).expect("mixed run");
-
-        assert!(
-            silence_result.segments.len() < mixed_result.segments.len(),
-            "mixed signal should yield richer segmentation than silence"
-        );
-        assert_eq!(
-            mixed_result.raw_output["telemetry"]["analysis"]["mode"].as_str(),
-            Some("waveform")
-        );
+    fn native_engine_name_follows_naming_convention() {
+        let engine = super::super::InsanelyFastNativeEngine;
+        assert_eq!(engine.name(), "insanely-fast-native");
     }
 
     #[test]
-    fn native_batch_run_is_deterministic_and_keeps_invariants() {
-        let dir = tempdir().expect("tempdir");
-        let wav = dir.path().join("deterministic.wav");
-        let mut samples = vec![0i16; 4_000];
-        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 7_000 } else { -7_000 }));
-        samples.extend(vec![0i16; 4_000]);
-        write_pcm16_mono_wav(&wav, 16_000, &samples);
+    fn native_engine_kind_matches_bridge_adapter() {
+        let native = super::super::InsanelyFastNativeEngine;
+        let bridge = super::super::InsanelyFastEngine;
+        assert_eq!(native.kind(), bridge.kind());
+        assert_eq!(native.kind(), BackendKind::InsanelyFast);
+    }
 
-        let req = request();
-        let first = run(&req, &wav, dir.path(), Duration::from_secs(1), None)
-            .expect("first deterministic run");
-        let second = run(&req, &wav, dir.path(), Duration::from_secs(1), None)
-            .expect("second deterministic run");
+    #[test]
+    fn native_engine_name_distinct_from_bridge() {
+        let native = super::super::InsanelyFastNativeEngine;
+        let bridge = super::super::InsanelyFastEngine;
+        assert_ne!(native.name(), bridge.name());
+        assert!(native.name().contains("native"));
+    }
 
-        assert_eq!(first.segments.len(), second.segments.len());
-        for (left, right) in first.segments.iter().zip(second.segments.iter()) {
-            assert_eq!(left.start_sec, right.start_sec);
-            assert_eq!(left.end_sec, right.end_sec);
-            assert_eq!(left.text, right.text);
-            assert_eq!(left.speaker, right.speaker);
-            assert_eq!(left.confidence, right.confidence);
+    #[test]
+    fn availability_agrees_with_whisper_cpp_native() {
+        // Both engines run the same native engine over the same model files, so
+        // their availability must be identical.
+        assert_eq!(
+            is_available(),
+            super::super::whisper_cpp_native::is_available()
+        );
+    }
+
+    // ── plan_workers pure-function matrix ─────────────────────────────────
+
+    #[test]
+    fn plan_workers_typical_split() {
+        // 16 threads, plenty of windows, default batch: workers = min(8, 24, 8) = 8;
+        // threads_per_worker = 16 / 8 = 2.
+        let (w, t) = plan_workers(10, None, 16);
+        assert_eq!(w, 8);
+        assert_eq!(t, 2);
+    }
+
+    #[test]
+    fn plan_workers_one_window() {
+        // A single window => exactly one worker gets the whole thread budget.
+        let (w, t) = plan_workers(1, None, 16);
+        assert_eq!(w, 1);
+        assert_eq!(t, 16);
+    }
+
+    #[test]
+    fn plan_workers_threads_fewer_than_workers() {
+        // 3 threads, many windows: half = max(3/2,1) = 1 => 1 worker, 3 threads.
+        let (w, t) = plan_workers(50, None, 3);
+        assert_eq!(w, 1);
+        assert_eq!(t, 3);
+    }
+
+    #[test]
+    fn plan_workers_batch_size_one_serializes() {
+        // batch_size = 1 caps concurrency to one worker regardless of windows.
+        let (w, t) = plan_workers(20, Some(1), 32);
+        assert_eq!(w, 1);
+        assert_eq!(t, 32);
+    }
+
+    #[test]
+    fn plan_workers_zero_threads_guarded() {
+        // Zero threads must never yield a zero worker or zero thread count.
+        let (w, t) = plan_workers(8, None, 0);
+        assert!(w >= 1, "workers floored at 1, got {w}");
+        assert!(t >= 1, "threads_per_worker floored at 1, got {t}");
+    }
+
+    #[test]
+    fn plan_workers_zero_windows_guarded() {
+        // Defensive: zero windows still floors workers at 1 (run() never calls
+        // with zero, but the pure fn must not divide by zero).
+        let (w, t) = plan_workers(0, None, 8);
+        assert!(w >= 1);
+        assert!(t >= 1);
+    }
+
+    #[test]
+    fn plan_workers_batch_caps_below_threads() {
+        // batch_size limits workers even when threads/windows would allow more.
+        let (w, t) = plan_workers(100, Some(4), 64);
+        assert_eq!(w, 4);
+        assert_eq!(t, 16);
+    }
+
+    // ── split_windows ─────────────────────────────────────────────────────
+
+    #[test]
+    fn split_windows_empty_is_none() {
+        assert!(split_windows(&[]).is_empty());
+    }
+
+    #[test]
+    fn split_windows_short_clip_single_window() {
+        let samples = vec![0.1f32; SAMPLE_RATE]; // 1 s < 30 s.
+        let w = split_windows(&samples);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].len(), SAMPLE_RATE);
+    }
+
+    #[test]
+    fn split_windows_last_keeps_remainder() {
+        // 30 s + 5 s => two windows: full + remainder.
+        let samples = vec![0.1f32; N_SAMPLES_30S + 5 * SAMPLE_RATE];
+        let w = split_windows(&samples);
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].len(), N_SAMPLES_30S);
+        assert_eq!(w[1].len(), 5 * SAMPLE_RATE);
+    }
+
+    // ── merge_windows offsets timestamps by window index ──────────────────
+
+    fn out_with_segment(start: f64, end: f64, text: &str, offset_sec: f64) -> decode::DecodeOutput {
+        decode::DecodeOutput {
+            segments: vec![TranscriptionSegment {
+                start_sec: Some(start),
+                end_sec: Some(end),
+                text: text.to_owned(),
+                speaker: None,
+                confidence: Some(0.9),
+            }],
+            language: Some("en".to_owned()),
+            windows: vec![decode::WindowStats {
+                avg_logprob: -0.2,
+                no_speech_prob: 0.01,
+                tokens: 3,
+                window_offset_sec: offset_sec,
+            }],
+            word_timings: None,
         }
-        assert_eq!(first.transcript, second.transcript);
-        assert_eq!(
-            first.raw_output["telemetry"]["analysis"],
-            second.raw_output["telemetry"]["analysis"]
-        );
-        assert!(
-            first
-                .segments
-                .windows(2)
-                .all(|pair| pair[0].end_sec <= pair[1].start_sec),
-            "segments should be monotonic"
-        );
-        assert!(first.segments.iter().all(|segment| {
-            segment
-                .confidence
-                .is_none_or(|confidence| (0.0..=1.0).contains(&confidence))
-        }));
     }
 
     #[test]
-    fn native_run_observes_cancellation_checkpoints() {
-        let tmp = tempdir().expect("tempdir");
-        let wav = tmp.path().join("tone.wav");
-        let mut samples = vec![0i16; 4_000];
-        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 7_000 } else { -7_000 }));
-        samples.extend(vec![0i16; 4_000]);
-        write_pcm16_mono_wav(&wav, 16_000, &samples);
-
-        let req = request();
-        let pilot = InsanelyFastPilot::new(
-            "openai/whisper-large-v3".to_owned(),
-            8,
-            "cpu".to_owned(),
-            "float32".to_owned(),
-        );
-        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
-        let result = build_native_segmentation(&req, &wav, &pilot, Some(&token));
-        assert!(
-            result.is_err(),
-            "expired token should cancel waveform-aware segmentation"
-        );
-    }
-
-    #[test]
-    fn estimate_duration_ms_clamps_and_defaults() {
-        let mut req = request();
-
-        // Below minimum → 1_000
-        req.backend_params.duration_ms = Some(50);
-        assert_eq!(estimate_duration_ms(&req, Path::new("no.wav")), 1_000);
-
-        // Above maximum → 1_800_000
-        req.backend_params.duration_ms = Some(9_999_999);
-        assert_eq!(estimate_duration_ms(&req, Path::new("no.wav")), 1_800_000);
-
-        // No hint + no file → DEFAULT_DURATION_MS (20_000)
-        req.backend_params.duration_ms = None;
-        assert_eq!(
-            estimate_duration_ms(&req, Path::new("nonexistent.wav")),
-            20_000
-        );
-    }
-
-    #[test]
-    fn estimate_duration_ms_from_wav_file() {
-        let dir = tempdir().expect("tempdir");
-        let wav = dir.path().join("two_seconds.wav");
-        // 2 seconds of PCM16 mono 16kHz = 64000 bytes payload
-        write_pcm16_mono_wav(&wav, 16_000, &vec![0i16; 32_000]);
-
-        let mut req = request();
-        req.backend_params.duration_ms = None;
-        let estimated = estimate_duration_ms(&req, &wav);
-        assert!(
-            (estimated as i64 - 2_000).unsigned_abs() < 50,
-            "2s of PCM should estimate ~2000ms, got {estimated}"
-        );
-    }
-
-    #[test]
-    fn to_transcription_segments_diarize_assigns_alternating_speakers() {
-        let pilot_segs = vec![
-            TranscriptSegment {
-                start_ms: 0,
-                end_ms: 1000,
-                text: "first".to_owned(),
-                confidence: 0.8,
+    fn merge_windows_offsets_by_30s_per_index() {
+        let results = vec![
+            WindowResult {
+                index: 0,
+                output: out_with_segment(0.0, 5.0, "first", 0.0),
             },
-            TranscriptSegment {
-                start_ms: 1000,
-                end_ms: 2000,
-                text: "second".to_owned(),
-                confidence: 0.9,
-            },
-            TranscriptSegment {
-                start_ms: 2000,
-                end_ms: 3000,
-                text: "third".to_owned(),
-                confidence: 0.7,
+            WindowResult {
+                index: 1,
+                output: out_with_segment(1.0, 4.0, "second", 0.0),
             },
         ];
-
-        let result = to_transcription_segments(&pilot_segs, true, None).expect("segments");
-        assert_eq!(result[0].speaker, Some("SPEAKER_00".to_owned()));
-        assert_eq!(result[1].speaker, Some("SPEAKER_01".to_owned()));
-        assert_eq!(result[2].speaker, Some("SPEAKER_00".to_owned()));
-
-        // Without diarize → no speakers
-        let no_diarize = to_transcription_segments(&pilot_segs, false, None).expect("segments");
-        assert!(no_diarize.iter().all(|s| s.speaker.is_none()));
+        let merged = merge_windows(&results);
+        assert_eq!(merged.segments.len(), 2);
+        // Window 1's segment is offset by 30 s.
+        assert_eq!(merged.segments[0].start_sec, Some(0.0));
+        assert_eq!(merged.segments[1].start_sec, Some(31.0));
+        assert_eq!(merged.segments[1].end_sec, Some(34.0));
+        // Window stats offset too.
+        assert_eq!(merged.windows[1].window_offset_sec, 30.0);
+        assert_eq!(merged.language, Some("en".to_owned()));
     }
 
-    #[test]
-    fn to_transcription_segments_trims_text_and_clamps_confidence() {
-        let pilot_segs = vec![
-            TranscriptSegment {
-                start_ms: 500,
-                end_ms: 1500,
-                text: "  padded text  ".to_owned(),
-                confidence: 2.5,
-            },
-            TranscriptSegment {
-                start_ms: 2000,
-                end_ms: 3000,
-                text: "ok".to_owned(),
-                confidence: -0.5,
-            },
-        ];
-
-        let result = to_transcription_segments(&pilot_segs, false, None).expect("segments");
-        assert_eq!(result[0].text, "padded text");
-        assert_eq!(result[0].confidence, Some(1.0));
-        assert!((result[0].start_sec.unwrap() - 0.5).abs() < 0.001);
-
-        assert_eq!(result[1].confidence, Some(0.0));
-    }
+    // ── Model resolution / availability ───────────────────────────────────
 
     #[test]
-    fn device_dtype_selection_cpu_vs_gpu() {
-        let tmp = tempdir().expect("tempdir");
-        let mut req = request();
-
-        // no_gpu → device=cpu, dtype=float32
-        req.backend_params.no_gpu = true;
-        req.backend_params.gpu_device = None;
-        let result = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("cpu run");
-        assert_eq!(
-            result.raw_output["telemetry"]["device"].as_str(),
-            Some("cpu")
-        );
-        assert_eq!(
-            result.raw_output["telemetry"]["dtype"].as_str(),
-            Some("float32")
-        );
-
-        // explicit gpu_device=cuda:1 → dtype=float16
-        req.backend_params.no_gpu = false;
-        req.backend_params.gpu_device = Some("cuda:1".to_owned());
-        let result = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("gpu run");
-        assert_eq!(
-            result.raw_output["telemetry"]["device"].as_str(),
-            Some("cuda:1")
-        );
-        assert_eq!(
-            result.raw_output["telemetry"]["dtype"].as_str(),
-            Some("float16")
-        );
-    }
-
-    // ── Task #209 — insanely_fast_native edge-case tests ────────────
-
-    #[test]
-    fn batch_size_zero_coerced_to_one() {
-        let tmp = tempdir().expect("tempdir");
-        let mut req = request();
-        req.backend_params.batch_size = Some(0);
-
-        let result = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("run should succeed");
-
-        assert_eq!(
-            result.raw_output["telemetry"]["batch_size_effective"], 1,
-            "batch_size 0 should be coerced to 1 via .max(1)"
-        );
-        assert_eq!(
-            result.raw_output["telemetry"]["batch_size_requested"], 0,
-            "original requested value should be recorded as 0"
-        );
-    }
-
-    #[test]
-    fn mps_device_selects_float16() {
-        let tmp = tempdir().expect("tempdir");
-        let mut req = request();
-        req.backend_params.no_gpu = false;
-        req.backend_params.gpu_device = Some("mps:0".to_owned());
-
-        let result = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("mps run");
-
-        assert_eq!(
-            result.raw_output["telemetry"]["device"].as_str(),
-            Some("mps:0")
-        );
-        assert_eq!(
-            result.raw_output["telemetry"]["dtype"].as_str(),
-            Some("float16"),
-            "mps device should select float16 dtype"
-        );
-    }
-
-    #[test]
-    fn estimate_duration_ms_tiny_file_clamps_to_min() {
-        let tmp = tempdir().expect("tempdir");
-        let tiny = tmp.path().join("tiny.wav");
-        // 4 bytes < WAV_HEADER_BYTES (44) → audio_bytes saturates to 0
-        // → estimate = 0 → clamped to MIN_DURATION_MS (1_000).
-        std::fs::write(&tiny, b"RIFF").unwrap();
-
-        let mut req = request();
-        req.backend_params.duration_ms = None;
-        assert_eq!(
-            estimate_duration_ms(&req, &tiny),
-            1_000,
-            "sub-header file should clamp to MIN_DURATION_MS"
-        );
-    }
-
-    #[test]
-    fn to_transcription_segments_cancellation_propagates() {
-        let pilot_segs = vec![TranscriptSegment {
-            text: "hello".to_owned(),
-            start_ms: 0,
-            end_ms: 1000,
-            confidence: 0.9,
-        }];
-
-        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
-        std::thread::sleep(Duration::from_millis(5));
-
-        let result = to_transcription_segments(&pilot_segs, false, Some(&token));
-        assert!(
-            result.is_err(),
-            "expired cancellation token should propagate error"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, crate::error::FwError::Cancelled(_)),
-            "error should be FwError::Cancelled"
-        );
-    }
-
-    // ── Task #218 — insanely_fast_native edge-case tests pass 2 ────
-
-    #[test]
-    fn run_model_none_defaults_to_large_v3_in_output() {
-        let tmp = tempdir().expect("tempdir");
+    fn run_without_model_or_default_is_backend_unavailable() {
         let mut req = request();
         req.model = None;
-
-        let result = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("run with model=None should succeed");
-
-        assert_eq!(
-            result.raw_output["model"].as_str(),
-            Some("openai/whisper-large-v3"),
-            "model=None should default to openai/whisper-large-v3 in raw_output"
-        );
-    }
-
-    #[test]
-    fn run_flash_attention_reflected_in_telemetry() {
-        let tmp = tempdir().expect("tempdir");
-        let mut req = request();
-        req.backend_params.flash_attention = Some(true);
-
-        let result = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("run with flash_attention=true should succeed");
-
-        assert_eq!(
-            result.raw_output["telemetry"]["flash_attention_requested"],
-            serde_json::json!(true),
-            "flash_attention_requested should appear as true in telemetry"
-        );
-
-        // Also verify false variant
-        req.backend_params.flash_attention = Some(false);
-        let result2 = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("run with flash_attention=false should succeed");
-
-        assert_eq!(
-            result2.raw_output["telemetry"]["flash_attention_requested"],
-            serde_json::json!(false),
-        );
-    }
-
-    #[test]
-    fn to_transcription_segments_empty_input_returns_empty() {
-        let result = to_transcription_segments(&[], false, None).expect("empty should succeed");
-        assert!(result.is_empty(), "empty pilot segments → empty output");
-
-        let result_diarize =
-            to_transcription_segments(&[], true, None).expect("empty diarize should succeed");
-        assert!(
-            result_diarize.is_empty(),
-            "empty pilot segments with diarize → empty output"
-        );
-    }
-
-    #[test]
-    fn run_confidence_clamped_within_native_bounds() {
-        // build_native_segmentation clamps confidence to [0.5, 0.995] (lines 199-200).
-        // This is tighter than the generic [0.0, 1.0] check in the determinism test.
-        let dir = tempdir().expect("tempdir");
-        let wav = dir.path().join("tone.wav");
-        let mut samples = vec![0i16; 4_000];
-        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 7_000 } else { -7_000 }));
-        samples.extend(vec![0i16; 4_000]);
+        if native_engine::default_model_spec().is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("a.wav");
+        let mut samples = vec![0i16; 1_600];
+        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 9_000i16 } else { -9_000 }));
         write_pcm16_mono_wav(&wav, 16_000, &samples);
 
-        let result = run(&request(), &wav, dir.path(), Duration::from_secs(1), None).expect("run");
-
-        for seg in &result.segments {
-            if let Some(conf) = seg.confidence {
-                assert!(
-                    (0.5..=0.995).contains(&conf),
-                    "native confidence should be in [0.5, 0.995], got {conf}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn run_cancellation_before_segmentation() {
-        // run() has a checkpoint at lines 55-57 BEFORE build_native_segmentation.
-        // This tests that path (distinct from the build_native_segmentation test at line 471).
-        let tmp = tempdir().expect("tempdir");
-        let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
-        std::thread::sleep(Duration::from_millis(5));
-
-        let result = run(
-            &request(),
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            Some(&token),
-        );
-
-        assert!(result.is_err(), "expired token should cancel run()");
+        let err = run(&req, &wav, dir.path(), Duration::from_secs(1), None)
+            .expect_err("no model => unavailable");
+        assert!(matches!(err, FwError::BackendUnavailable(_)));
+        let msg = err.to_string();
         assert!(
-            matches!(result.unwrap_err(), crate::error::FwError::Cancelled(_)),
-            "should be FwError::Cancelled"
+            msg.contains("FRANKEN_WHISPER_NATIVE_DEFAULT_MODEL"),
+            "message names the env var: {msg}"
         );
     }
 
     #[test]
-    fn to_transcription_segments_diarize_three_alternating_speakers() {
-        let pilot_segs = vec![
-            TranscriptSegment {
-                text: "hello".to_owned(),
-                start_ms: 0,
-                end_ms: 1000,
-                confidence: 0.8,
-            },
-            TranscriptSegment {
-                text: "world".to_owned(),
-                start_ms: 1000,
-                end_ms: 2000,
-                confidence: 0.8,
-            },
-            TranscriptSegment {
-                text: "again".to_owned(),
-                start_ms: 2000,
-                end_ms: 3000,
-                confidence: 0.8,
-            },
-        ];
+    fn run_nonexistent_model_spec_is_backend_unavailable_with_dirs() {
+        let mut req = request();
+        req.model = Some("definitely-not-a-real-model-zzz".to_owned());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("a.wav");
+        let mut samples = vec![0i16; 1_600];
+        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 9_000i16 } else { -9_000 }));
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
 
-        let result = to_transcription_segments(&pilot_segs, true, None).unwrap();
-        // index % 2: 0→SPEAKER_00, 1→SPEAKER_01, 2→SPEAKER_00.
-        assert_eq!(result[0].speaker, Some("SPEAKER_00".to_owned()));
-        assert_eq!(result[1].speaker, Some("SPEAKER_01".to_owned()));
-        assert_eq!(result[2].speaker, Some("SPEAKER_00".to_owned()));
-
-        // Non-diarize → no speakers.
-        let result_no = to_transcription_segments(&pilot_segs, false, None).unwrap();
-        assert_eq!(result_no[0].speaker, None);
+        let err = run(&req, &wav, dir.path(), Duration::from_secs(1), None)
+            .expect_err("missing model => unavailable");
+        assert!(matches!(err, FwError::BackendUnavailable(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ggml-definitely-not-a-real-model-zzz.bin"),
+            "message names the searched filename: {msg}"
+        );
     }
 
-    // ── Task #232 — insanely_fast_native pass 3 edge-case tests ────────
+    // ── Diarization gate ──────────────────────────────────────────────────
 
     #[test]
-    fn device_defaults_to_cuda_when_no_gpu_false_and_gpu_device_none() {
-        let dir = tempdir().expect("tempdir");
-        let wav = dir.path().join("test.wav");
+    fn run_diarize_without_token_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("tone.wav");
+        let mut samples = vec![0i16; 1_600];
+        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 9_000i16 } else { -9_000 }));
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
+
+        let mut req = request();
+        req.diarize = true;
+        let result = run(&req, &wav, dir.path(), Duration::from_secs(1), None);
+        assert!(result.is_err(), "diarize without HF token should fail");
+    }
+
+    // ── Silence pre-gate ──────────────────────────────────────────────────
+
+    #[test]
+    fn run_pure_silence_returns_empty_without_loading_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("silence.wav");
         write_pcm16_mono_wav(&wav, 16_000, &vec![0i16; 16_000]);
 
-        let mut req = request();
-        req.backend_params.no_gpu = false;
-        req.backend_params.gpu_device = None;
+        let req = request();
+        let start = std::time::Instant::now();
+        let result = run(&req, &wav, dir.path(), Duration::from_secs(5), None)
+            .expect("silence run should succeed");
+        let elapsed = start.elapsed();
 
-        let result = run(&req, &wav, dir.path(), Duration::from_secs(1), None).expect("run");
-        let raw = &result.raw_output;
-        // The telemetry should show device = "cuda:0" and dtype = "float16".
+        assert!(result.segments.is_empty(), "silence => no segments");
+        assert!(result.transcript.is_empty(), "silence => empty transcript");
+        assert_eq!(result.raw_output["silence"].as_bool(), Some(true));
+        assert_eq!(result.raw_output["model_loaded"].as_bool(), Some(false));
         assert_eq!(
-            raw["telemetry"]["device"].as_str(),
-            Some("cuda:0"),
-            "default device should be cuda:0 when no_gpu=false and gpu_device=None"
+            result.raw_output["engine"].as_str(),
+            Some("insanely-fast-native")
         );
         assert_eq!(
-            raw["telemetry"]["dtype"].as_str(),
-            Some("float16"),
-            "dtype should be float16 for cuda device"
-        );
-    }
-
-    #[test]
-    fn estimate_duration_ms_exact_boundary_values_pass_through_unchanged() {
-        let mut req = request();
-
-        // Exactly MIN_DURATION_MS (1_000) → passes through.
-        req.backend_params.duration_ms = Some(1_000);
-        assert_eq!(
-            estimate_duration_ms(&req, Path::new("no.wav")),
-            1_000,
-            "MIN_DURATION_MS should pass through unchanged"
-        );
-
-        // Exactly MAX_DURATION_MS (1_800_000) → passes through.
-        req.backend_params.duration_ms = Some(1_800_000);
-        assert_eq!(
-            estimate_duration_ms(&req, Path::new("no.wav")),
-            1_800_000,
-            "MAX_DURATION_MS should pass through unchanged"
-        );
-    }
-
-    #[test]
-    fn to_transcription_segments_large_timestamps_convert_to_seconds_correctly() {
-        let pilot_segs = vec![TranscriptSegment {
-            start_ms: 3_600_000, // 1 hour
-            end_ms: 7_200_000,   // 2 hours
-            text: "late segment".to_owned(),
-            confidence: 0.8,
-        }];
-
-        let result = to_transcription_segments(&pilot_segs, false, None).expect("segments");
-        assert!(
-            (result[0].start_sec.unwrap() - 3600.0).abs() < 1e-6,
-            "3_600_000 ms should convert to 3600.0 sec, got {:?}",
-            result[0].start_sec
+            result.raw_output["schema_version"].as_str(),
+            Some(SCHEMA_VERSION)
         );
         assert!(
-            (result[0].end_sec.unwrap() - 7200.0).abs() < 1e-6,
-            "7_200_000 ms should convert to 7200.0 sec, got {:?}",
-            result[0].end_sec
+            elapsed < Duration::from_secs(2),
+            "silence pre-gate should return fast, took {elapsed:?}"
         );
     }
 
-    #[test]
-    fn to_transcription_segments_single_diarize_is_speaker_00() {
-        // With only 1 segment, diarize assigns SPEAKER_00 (index 0 % 2 = 0).
-        let pilot_segs = vec![TranscriptSegment {
-            start_ms: 0,
-            end_ms: 1000,
-            text: "solo".to_owned(),
-            confidence: 0.5,
-        }];
-        let result = to_transcription_segments(&pilot_segs, true, None).expect("segments");
-        assert_eq!(result.len(), 1);
-        assert_eq!(
-            result[0].speaker,
-            Some("SPEAKER_00".to_owned()),
-            "single segment diarized should be SPEAKER_00"
-        );
-    }
+    // ── Cancellation ──────────────────────────────────────────────────────
 
     #[test]
-    fn estimate_duration_ms_file_exactly_header_size_clamps_to_min() {
-        let dir = tempdir().unwrap();
-        let wav = dir.path().join("header_only.wav");
-        // Exactly 44 bytes → 0 audio bytes → estimated 0 → clamped to MIN_DURATION_MS.
-        std::fs::write(&wav, vec![0u8; 44]).unwrap();
-        let mut req = request();
-        req.backend_params.duration_ms = None;
-        assert_eq!(
-            estimate_duration_ms(&req, &wav),
-            1_000,
-            "44-byte file should estimate 0 audio bytes, clamped to MIN_DURATION_MS"
-        );
-    }
+    fn run_expired_token_is_cancelled_quickly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("tone.wav");
+        let mut samples = vec![0i16; 1_600];
+        samples.extend((0..16_000).map(|i| if i % 2 == 0 { 9_000i16 } else { -9_000 }));
+        write_pcm16_mono_wav(&wav, 16_000, &samples);
 
-    // -- bd-242: insanely_fast_native.rs edge-case tests pass 4 --
-
-    #[test]
-    fn to_transcription_segments_cancellation_token_fires() {
-        let pilot_segs = vec![
-            TranscriptSegment {
-                start_ms: 0,
-                end_ms: 1000,
-                text: "first".to_owned(),
-                confidence: 0.9,
-            },
-            TranscriptSegment {
-                start_ms: 1000,
-                end_ms: 2000,
-                text: "second".to_owned(),
-                confidence: 0.8,
-            },
-        ];
+        let req = request();
         let token = CancellationToken::with_deadline_from_now(Duration::from_millis(0));
         std::thread::sleep(Duration::from_millis(5));
-        let result = to_transcription_segments(&pilot_segs, false, Some(&token));
-        assert!(result.is_err(), "should fail with expired token");
+
+        let start = std::time::Instant::now();
+        let result = run(&req, &wav, dir.path(), Duration::from_secs(1), Some(&token));
+        assert!(result.is_err(), "expired token must cancel");
         assert!(
-            matches!(result.unwrap_err(), crate::error::FwError::Cancelled(_)),
-            "expected Cancelled error"
+            matches!(result.unwrap_err(), FwError::Cancelled(_)),
+            "expected FW-CANCELLED"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "cancellation should be fast"
         );
     }
 
+    // ── raw_output schema ─────────────────────────────────────────────────
+
     #[test]
-    fn estimate_duration_ms_sub_one_second_file_clamps_to_min() {
-        let dir = tempdir().unwrap();
-        let wav = dir.path().join("short.wav");
-        // 800ms of 16kHz mono PCM16 = 0.8 * 32000 = 25600 bytes payload + 44 header
-        std::fs::write(&wav, vec![0u8; 25_644]).unwrap();
-        let mut req = request();
-        req.backend_params.duration_ms = None;
-        let est = estimate_duration_ms(&req, &wav);
-        assert_eq!(
-            est, 1_000,
-            "800ms raw estimate should clamp up to MIN_DURATION_MS (1000)"
+    fn raw_output_carries_parallel_window_metadata() {
+        let json = raw_output_json(
+            "tiny.en",
+            Path::new("/models/ggml-tiny.en.bin"),
+            "fw-native-v1+sha256:abc".to_owned(),
+            2,
+            2,
+            4,
+            &[],
+            WordTimestampMode::Word,
+            false,
+            false,
         );
+        assert_eq!(json["engine"].as_str(), Some("insanely-fast-native"));
+        assert_eq!(json["schema_version"].as_str(), Some(SCHEMA_VERSION));
+        assert_eq!(json["implementation"].as_str(), Some("real-inference"));
+        assert_eq!(json["in_process"].as_bool(), Some(true));
+        assert_eq!(json["parallel_windows"].as_u64(), Some(2));
+        assert_eq!(json["workers"].as_u64(), Some(2));
+        assert_eq!(json["threads_per_worker"].as_u64(), Some(4));
+        assert_eq!(json["word_timestamps"].as_str(), Some("interpolated"));
+    }
+
+    // ── Gated end-to-end against the real tiny.en model + jfk.wav ─────────
+
+    /// The exact reference transcript from
+    /// `tests/fixtures/native/jfk_tiny_reference.json` (joined, trimmed).
+    const JFK_REFERENCE: &str = "And so my fellow Americans ask not what your country can do for \
+        you ask what you can do for your country.";
+
+    fn tiny_en_available() -> bool {
+        native_engine::find_model_file("tiny.en").is_some()
+    }
+
+    fn load_jfk_samples() -> Option<Vec<f32>> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/native/jfk.wav");
+        let bytes = std::fs::read(path).ok()?;
+        decode::read_wav_16k_mono(&bytes).ok()
+    }
+
+    fn load_tiny_en() -> Option<std::sync::Arc<NativeWhisperModel>> {
+        let path = native_engine::find_model_file("tiny.en")?;
+        NativeWhisperModel::load(&path).ok()
     }
 
     #[test]
-    fn to_transcription_segments_no_diarize_speaker_is_none() {
-        let pilot_segs = vec![
-            TranscriptSegment {
-                start_ms: 0,
-                end_ms: 500,
-                text: "hello".to_owned(),
-                confidence: 0.7,
-            },
-            TranscriptSegment {
-                start_ms: 500,
-                end_ms: 1000,
-                text: "world".to_owned(),
-                confidence: 0.8,
-            },
-        ];
-        let result = to_transcription_segments(&pilot_segs, false, None).unwrap();
-        for seg in &result {
-            assert!(
-                seg.speaker.is_none(),
-                "speaker should be None when diarize=false"
-            );
+    fn gated_single_window_matches_whisper_cpp_native() {
+        if !tiny_en_available() {
+            eprintln!("SKIP gated_single_window: tiny.en model missing");
+            return;
         }
-    }
-
-    #[test]
-    fn to_transcription_segments_confidence_clamped_to_zero_one() {
-        let pilot_segs = vec![
-            TranscriptSegment {
-                start_ms: 0,
-                end_ms: 1000,
-                text: "over".to_owned(),
-                confidence: 1.5,
-            },
-            TranscriptSegment {
-                start_ms: 1000,
-                end_ms: 2000,
-                text: "under".to_owned(),
-                confidence: -0.3,
-            },
-        ];
-        let result = to_transcription_segments(&pilot_segs, false, None).unwrap();
-        assert_eq!(
-            result[0].confidence,
-            Some(1.0),
-            "confidence > 1.0 should clamp to 1.0"
-        );
-        assert_eq!(
-            result[1].confidence,
-            Some(0.0),
-            "confidence < 0.0 should clamp to 0.0"
-        );
-    }
-
-    #[test]
-    fn estimate_duration_ms_explicit_hint_bypasses_file_size() {
-        let dir = tempdir().unwrap();
-        let wav = dir.path().join("dummy.wav");
-        // Write a file that would normally estimate to ~2000ms
-        std::fs::write(&wav, vec![0u8; 64_044]).unwrap();
+        let wav = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/native/jfk.wav");
         let mut req = request();
-        // But set explicit duration_ms hint
-        req.backend_params.duration_ms = Some(5_000);
-        let est = estimate_duration_ms(&req, &wav);
-        assert_eq!(
-            est, 5_000,
-            "explicit duration_ms hint should be returned directly"
-        );
-    }
-
-    // ── Task #261 — insanely_fast_native pass 5 edge-case tests ──
-
-    #[test]
-    fn run_custom_batch_size_reflected_in_telemetry() {
-        // Existing tests cover batch_size=0→1 and default→8.
-        // This verifies a positive custom batch_size passes through.
-        let tmp = tempdir().expect("tempdir");
-        let mut req = request();
-        req.backend_params.batch_size = Some(16);
-
-        let result = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("run should succeed");
-
-        assert_eq!(
-            result.raw_output["telemetry"]["batch_size_effective"], 16,
-            "custom batch_size=16 should be reflected in telemetry"
-        );
-        assert_eq!(
-            result.raw_output["telemetry"]["batch_size_requested"], 16,
-            "requested value should also be 16"
-        );
-    }
-
-    #[test]
-    fn run_word_timestamp_level_splits_into_word_segments() {
-        let tmp = tempdir().expect("tempdir");
-        let mut req = request();
-        req.backend_params.timestamp_level = Some(crate::model::TimestampLevel::Word);
-        req.backend_params.duration_ms = Some(10_000);
-
-        let result = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("word timestamp run should succeed");
-
-        assert_eq!(
-            result.segments.len(),
-            5,
-            "word-level mode should split into 5 words"
-        );
-        assert!(
-            result.segments.iter().all(|seg| !seg.text.contains(' ')),
-            "word-level segments should not contain whitespace"
-        );
-
-        let chunks = result.raw_output["chunks"]
-            .as_array()
-            .expect("chunks should be array");
-        assert_eq!(chunks.len(), 1, "single pilot chunk expected");
-        let words = chunks[0]["words"]
-            .as_array()
-            .expect("word-level chunks should contain words array");
-        assert_eq!(words.len(), 5, "words array should match word segments");
-        assert_eq!(
-            words[0]["word"].as_str(),
-            Some("Batch"),
-            "first word should match pilot phrase"
-        );
-
-        let chunk_end = chunks[0]["timestamp"][1]
-            .as_f64()
-            .expect("chunk end timestamp");
-        let last_word_end = words.last().unwrap()["end"].as_f64().expect("word end");
-        assert!(
-            (chunk_end - last_word_end).abs() < 1e-6,
-            "last word end should match chunk end"
-        );
-    }
-
-    #[test]
-    fn run_chunk_timestamp_level_keeps_chunk_segments() {
-        let tmp = tempdir().expect("tempdir");
-        let mut req = request();
-        req.backend_params.timestamp_level = Some(crate::model::TimestampLevel::Chunk);
-        req.backend_params.duration_ms = Some(10_000);
-
-        let result = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("chunk timestamp run should succeed");
-
-        assert_eq!(result.segments.len(), 1, "chunk-level keeps 1 segment");
-        let chunks = result.raw_output["chunks"]
-            .as_array()
-            .expect("chunks should be array");
-        assert_eq!(chunks.len(), 1);
-        assert!(
-            chunks[0].get("words").is_none(),
-            "chunk-level output should not include words array"
-        );
-    }
-
-    #[test]
-    fn run_raw_output_chunks_array_matches_segments() {
-        // Verify the "chunks" array in raw_output contains the same data
-        // as the result segments. No existing test checks the chunks array.
-        let tmp = tempdir().expect("tempdir");
-        let result = run(
-            &request(),
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("run should succeed");
-
-        let chunks = result.raw_output["chunks"]
-            .as_array()
-            .expect("chunks should be an array");
-        assert_eq!(
-            chunks.len(),
-            result.segments.len(),
-            "chunks count should match segments count"
-        );
-        for (chunk, seg) in chunks.iter().zip(result.segments.iter()) {
-            assert_eq!(
-                chunk["text"].as_str(),
-                Some(seg.text.as_str()),
-                "chunk text should match segment text"
-            );
-            // speaker should be null when diarize=false
-            assert!(
-                chunk["speaker"].is_null(),
-                "speaker should be null without diarize"
-            );
-        }
-    }
-
-    #[test]
-    fn run_custom_model_name_in_raw_output() {
-        // Verify a custom model name appears in raw_output["model"].
-        // Tests only checked model=None default; never a custom model.
-        let tmp = tempdir().expect("tempdir");
-        let mut req = request();
-        req.model = Some("openai/whisper-small.en".to_owned());
-
-        let result = run(
-            &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
-            None,
-        )
-        .expect("run should succeed");
-
-        assert_eq!(
-            result.raw_output["model"].as_str(),
-            Some("openai/whisper-small.en"),
-            "custom model name should appear in raw_output"
-        );
-    }
-
-    #[test]
-    fn run_language_none_produces_null_in_raw_output() {
-        // All existing tests use language: Some("en").
-        // Verify language=None produces null in raw_output and result.
-        let tmp = tempdir().expect("tempdir");
-        let mut req = request();
+        req.model = Some("tiny.en".to_owned());
         req.language = None;
 
-        let result = run(
+        let engine = super::super::InsanelyFastNativeEngine;
+        let result = crate::backend::Engine::run(
+            &engine,
             &req,
-            Path::new("missing.wav"),
-            tmp.path(),
-            Duration::from_secs(1),
+            Path::new(wav),
+            Path::new("."),
+            Duration::from_secs(120),
             None,
         )
-        .expect("run should succeed");
+        .expect("e2e run");
 
-        assert!(
-            result.raw_output["language"].is_null(),
-            "language=None should produce null in raw_output"
+        // jfk.wav is ~11 s => a single 30 s window. The single-window path runs
+        // the SAME native engine over the SAME samples as whisper.cpp native, so
+        // the transcript must match the shared reference exactly.
+        assert_eq!(result.transcript.trim(), JFK_REFERENCE);
+        assert_eq!(
+            result.raw_output["engine"].as_str(),
+            Some("insanely-fast-native")
         );
-        assert!(result.language.is_none(), "result.language should be None");
+        assert_eq!(result.raw_output["parallel_windows"].as_u64(), Some(1));
+        assert_eq!(result.raw_output["silence"].as_bool(), Some(false));
+        assert!(result.segments.len() >= 2, "expected >= 2 segments");
+    }
+
+    /// Decode jfk-concatenated-3x (~33 s => 2 windows) with an explicit worker
+    /// count and return the engine-level (offset, merged) outputs as plain text +
+    /// segment bounds for determinism comparison.
+    fn decode_long_jfk_with_workers(
+        model: &NativeWhisperModel,
+        samples: &[f32],
+        batch_size: Option<usize>,
+        total_threads: usize,
+    ) -> (String, Vec<(f64, f64)>, usize) {
+        let windows = split_windows(samples);
+        let (n_workers, tpw) = plan_workers(windows.len(), batch_size, total_threads);
+        let params = decode::DecodeParams {
+            language: None,
+            translate: false,
+            timestamps: true,
+            n_threads: tpw,
+            max_text_ctx: None,
+            ..decode::DecodeParams::default()
+        };
+        let results =
+            decode_windows_parallel(model, &windows, &params, n_workers, None).expect("decode");
+        let merged = merge_windows(&results);
+        let text: String = merged
+            .segments
+            .iter()
+            .map(|s| s.text.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let bounds: Vec<(f64, f64)> = merged
+            .segments
+            .iter()
+            .map(|s| (s.start_sec.unwrap_or(0.0), s.end_sec.unwrap_or(0.0)))
+            .collect();
+        (text, bounds, windows.len())
     }
 
     #[test]
-    fn estimate_duration_ms_large_file_clamps_to_max() {
-        // File large enough that computed duration exceeds MAX_DURATION_MS.
-        // 30 min at 32_000 bytes/sec = 57_600_000 + 44 header.
-        // Use set_len for sparse file to avoid memory allocation.
-        let dir = tempdir().unwrap();
-        let wav = dir.path().join("huge.wav");
-        let huge_size: u64 = 57_600_044 + 32_000; // ~30 min + 1 sec
-        let file = std::fs::File::create(&wav).unwrap();
-        file.set_len(huge_size).unwrap();
-        drop(file);
+    fn gated_determinism_two_workers_equals_one() {
+        let Some(model) = load_tiny_en() else {
+            eprintln!("SKIP gated_determinism: tiny.en model missing");
+            return;
+        };
+        let Some(samples) = load_jfk_samples() else {
+            eprintln!("SKIP gated_determinism: jfk.wav missing");
+            return;
+        };
+        // Concatenate jfk 3x (~33 s) => 2 windows.
+        let mut long = Vec::with_capacity(samples.len() * 3);
+        for _ in 0..3 {
+            long.extend_from_slice(&samples);
+        }
 
-        let mut req = request();
-        req.backend_params.duration_ms = None;
-        let dur = estimate_duration_ms(&req, &wav);
+        // Force 1 worker (batch_size 1) vs >= 2 workers (batch_size 8, threads 8).
+        let (text_seq, bounds_seq, n_windows_seq) =
+            decode_long_jfk_with_workers(&model, &long, Some(1), 8);
+        let (text_par, bounds_par, n_windows_par) =
+            decode_long_jfk_with_workers(&model, &long, Some(8), 8);
+
+        assert!(n_windows_seq >= 2, "expected >= 2 windows for ~33s audio");
+        assert_eq!(n_windows_seq, n_windows_par);
+
+        // CRITICAL: parallel output must be byte-identical to sequential.
         assert_eq!(
-            dur, 1_800_000,
-            "file exceeding 30 min should clamp to MAX_DURATION_MS (1_800_000)"
+            text_par, text_seq,
+            "2-worker transcript must equal 1-worker transcript exactly"
+        );
+        assert_eq!(
+            bounds_par, bounds_seq,
+            "2-worker timestamps must equal 1-worker timestamps exactly"
+        );
+
+        // Timestamps monotonic non-decreasing across the window boundary.
+        let mut prev_end = -1.0f64;
+        for (start, end) in &bounds_seq {
+            assert!(
+                *start + 1e-6 >= prev_end - 1e-6,
+                "segment start {start} must not precede previous end {prev_end}"
+            );
+            assert!(*end + 1e-6 >= *start, "segment end {end} >= start {start}");
+            prev_end = *end;
+        }
+
+        // Segments span both windows: at least one segment starts at/after 30 s.
+        assert!(
+            bounds_seq.iter().any(|(s, _)| *s >= 30.0 - 1e-6),
+            "expected segments in the second (>=30s) window: {bounds_seq:?}"
+        );
+
+        // The repeated sentence's signature word should recur.
+        let lc = text_seq.to_lowercase();
+        assert!(
+            lc.matches("country").count() >= 2,
+            "expected the repeated sentence at least twice: {text_seq}"
         );
     }
 }

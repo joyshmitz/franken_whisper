@@ -146,3 +146,6 @@ crates/*/target/
 
 # Compiler crash reports
 rustc-ice-*.txt
+
+# Python tooling cache (scripts/)
+__pycache__/

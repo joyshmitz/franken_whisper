@@ -10,6 +10,7 @@ pub mod error;
 pub mod export;
 pub mod logging;
 pub mod model;
+pub mod native_engine;
 pub mod orchestrator;
 pub mod process;
 pub mod replay_pack;

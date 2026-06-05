@@ -11,9 +11,141 @@ use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 
-use franken_whisper::backend::{
-    DiarizationPilot, InsanelyFastPilot, TranscriptSegment, WhisperCppPilot,
-};
+use franken_whisper::backend::TranscriptSegment;
+
+// ---------------------------------------------------------------------------
+// bd-jryr: the production `WhisperCppPilot` (canned-phrase mock) was deleted
+// when the native whisper.cpp engine was rewired to real inference. This file
+// is owned by bead bd-4slu, so rather than rewrite it, we inline a small
+// test-only builder that reproduces the *synthetic* segment stream the old
+// pilot generated. It is clearly NOT engine output — it exists only to drive
+// the conformance-comparator's drift/gate math with deterministic fixtures.
+// ---------------------------------------------------------------------------
+
+/// Synthetic, deterministic transcript segments for conformance fixtures.
+///
+/// Reproduces the former `WhisperCppPilot::transcribe(duration_ms)` output: one
+/// segment per 5000 ms, cycling a fixed phrase list, confidence decaying by
+/// segment index. Test-only synthetic data — never engine output.
+fn synthetic_whisper_cpp_segments(duration_ms: u64) -> Vec<TranscriptSegment> {
+    const SEGMENT_DURATION_MS: u64 = 5000;
+    const PHRASES: &[&str] = &[
+        "The quick brown fox jumps over the lazy dog.",
+        "Hello world, this is a test transcription.",
+        "Speech recognition is a fascinating field.",
+        "Artificial intelligence continues to advance.",
+    ];
+
+    let n_segments = if duration_ms == 0 {
+        0
+    } else {
+        duration_ms.div_ceil(SEGMENT_DURATION_MS) as usize
+    };
+
+    (0..n_segments)
+        .map(|i| {
+            let start_ms = (i as u64) * SEGMENT_DURATION_MS;
+            let end_ms = std::cmp::min(start_ms + SEGMENT_DURATION_MS, duration_ms);
+            TranscriptSegment {
+                start_ms,
+                end_ms,
+                text: PHRASES[i % PHRASES.len()].to_owned(),
+                confidence: 0.92 - (i as f64 * 0.01),
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// bd-s8w8: the production `InsanelyFastPilot` (canned-phrase mock) was deleted
+// when the native insanely-fast engine was rewired to real parallel-window
+// inference. This file is owned by bead bd-4slu, so rather than rewrite it, we
+// inline a small test-only builder that reproduces the *synthetic* segment
+// stream the old pilot generated. It is clearly NOT engine output — it exists
+// only to drive the conformance-comparator's drift/gate math with deterministic
+// fixtures.
+// ---------------------------------------------------------------------------
+
+/// Synthetic, deterministic transcript segments for conformance fixtures.
+///
+/// Reproduces the former `InsanelyFastPilot::transcribe_batch(&[duration_ms])`
+/// output for a single file: one segment per 10000 ms, cycling a fixed phrase
+/// list, confidence decaying by segment index. Test-only synthetic data — never
+/// engine output.
+fn synthetic_insanely_fast_segments(duration_ms: u64) -> Vec<TranscriptSegment> {
+    const SEGMENT_DURATION_MS: u64 = 10_000;
+    const PHRASES: &[&str] = &[
+        "Batch processing enables higher throughput.",
+        "GPU acceleration reduces latency significantly.",
+        "Parallel inference is the future of ASR.",
+    ];
+
+    let n_segments = if duration_ms == 0 {
+        0
+    } else {
+        duration_ms.div_ceil(SEGMENT_DURATION_MS) as usize
+    };
+
+    (0..n_segments)
+        .map(|i| {
+            let start_ms = (i as u64) * SEGMENT_DURATION_MS;
+            let end_ms = std::cmp::min(start_ms + SEGMENT_DURATION_MS, duration_ms);
+            TranscriptSegment {
+                start_ms,
+                end_ms,
+                text: PHRASES[i % PHRASES.len()].to_owned(),
+                confidence: 0.95 - (i as f64 * 0.005),
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// bd-cidv: the production `DiarizationPilot` (canned-phrase mock) was deleted
+// when the native whisper-diarization engine was rewired to real ASR + the
+// orchestrator's heuristic diarizer. This file is owned by bead bd-4slu, so
+// rather than rewrite it, we inline a small test-only builder that reproduces
+// the *synthetic* segment stream the old pilot generated. It is clearly NOT
+// engine output — it exists only to drive the conformance-comparator's
+// drift/gate math with deterministic fixtures.
+// ---------------------------------------------------------------------------
+
+/// Synthetic, deterministic transcript segments for conformance fixtures.
+///
+/// Reproduces the former `DiarizationPilot::process(duration_ms)` segment stream
+/// (flattened to [`TranscriptSegment`]): one segment per 3000 ms over two
+/// speakers, cycling a fixed meeting-phrase list, confidence decaying by segment
+/// index. Test-only synthetic data — never engine output.
+fn synthetic_diarization_segments(duration_ms: u64) -> Vec<TranscriptSegment> {
+    const SEGMENT_DURATION_MS: u64 = 3000;
+    const PHRASES: &[&str] = &[
+        "Good morning, everyone.",
+        "Thank you for joining us today.",
+        "Let's begin with the first topic.",
+        "I have a question about that.",
+        "That's an excellent point.",
+        "Could you elaborate further?",
+    ];
+
+    let n_segments = if duration_ms == 0 {
+        0
+    } else {
+        duration_ms.div_ceil(SEGMENT_DURATION_MS) as usize
+    };
+
+    (0..n_segments)
+        .map(|i| {
+            let start_ms = (i as u64) * SEGMENT_DURATION_MS;
+            let end_ms = std::cmp::min(start_ms + SEGMENT_DURATION_MS, duration_ms);
+            TranscriptSegment {
+                start_ms,
+                end_ms,
+                text: PHRASES[i % PHRASES.len()].to_owned(),
+                confidence: 0.88 - (i as f64 * 0.005),
+            }
+        })
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Mock engine abstraction (test-only)
@@ -411,65 +543,27 @@ fn whisper_cpp_pilot_engine() -> MockEngine {
     MockEngine {
         name: "whisper-cpp-pilot".to_owned(),
         kind: MockEngineKind::Pilot,
-        produce: Box::new(|duration_ms| {
-            let pilot = WhisperCppPilot::new(
-                "models/ggml-base.bin".to_owned(),
-                4,
-                Some("en".to_owned()),
-                false,
-                false,
-                false,
-            );
-            pilot.transcribe(duration_ms)
-        }),
+        produce: Box::new(synthetic_whisper_cpp_segments),
     }
 }
 
-/// Create an InsanelyFastPilot-based mock engine (single-file batch).
+/// Create a synthetic insanely-fast mock engine (single-file batch). Uses the
+/// test-only [`synthetic_insanely_fast_segments`] fixture, not engine output.
 fn insanely_fast_pilot_engine() -> MockEngine {
     MockEngine {
         name: "insanely-fast-pilot".to_owned(),
         kind: MockEngineKind::Pilot,
-        produce: Box::new(|duration_ms| {
-            let pilot = InsanelyFastPilot::new(
-                "openai/whisper-large-v3".to_owned(),
-                1,
-                "cpu".to_owned(),
-                "float32".to_owned(),
-            );
-            pilot
-                .transcribe_batch(&[duration_ms])
-                .into_iter()
-                .next()
-                .unwrap_or_default()
-        }),
+        produce: Box::new(synthetic_insanely_fast_segments),
     }
 }
 
-/// Create a DiarizationPilot-based mock engine (flattened to TranscriptSegment).
+/// Create a diarization mock engine driven by the test-only
+/// [`synthetic_diarization_segments`] fixture (not engine output).
 fn diarization_pilot_engine() -> MockEngine {
     MockEngine {
         name: "diarization-pilot".to_owned(),
         kind: MockEngineKind::Pilot,
-        produce: Box::new(|duration_ms| {
-            let pilot = DiarizationPilot::new(
-                "whisper-large-v3".to_owned(),
-                "WAV2VEC2_ASR_LARGE_LV60K_960H".to_owned(),
-                Some(2),
-                "en".to_owned(),
-            );
-            let diarized = pilot.process(duration_ms);
-            diarized
-                .segments
-                .into_iter()
-                .map(|ds| TranscriptSegment {
-                    start_ms: ds.start_ms,
-                    end_ms: ds.end_ms,
-                    text: ds.text,
-                    confidence: ds.confidence,
-                })
-                .collect()
-        }),
+        produce: Box::new(synthetic_diarization_segments),
     }
 }
 
@@ -480,17 +574,9 @@ fn whisper_cpp_bridge_engine() -> MockEngine {
         name: "whisper-cpp-bridge".to_owned(),
         kind: MockEngineKind::Bridge,
         produce: Box::new(|duration_ms| {
-            // Simulate bridge output matching the WhisperCppPilot format
+            // Simulate bridge output matching the synthetic whisper-cpp format
             // with identical content (zero drift by design).
-            let pilot = WhisperCppPilot::new(
-                "models/ggml-base.bin".to_owned(),
-                4,
-                Some("en".to_owned()),
-                false,
-                false,
-                false,
-            );
-            pilot.transcribe(duration_ms)
+            synthetic_whisper_cpp_segments(duration_ms)
         }),
     }
 }
@@ -619,15 +705,7 @@ fn harness_runs_both_bridge_and_pilot_engines() {
 #[test]
 fn drift_metrics_correctly_computed_identical_engines() {
     // whisper-cpp-pilot and whisper-cpp-bridge produce identical output.
-    let pilot = WhisperCppPilot::new(
-        "models/ggml-base.bin".to_owned(),
-        4,
-        Some("en".to_owned()),
-        false,
-        false,
-        false,
-    );
-    let segments = pilot.transcribe(10_000);
+    let segments = synthetic_whisper_cpp_segments(10_000);
     let metrics = DriftMetrics::compute("engine-a", "engine-b", &segments, &segments);
 
     assert_eq!(
@@ -645,15 +723,7 @@ fn drift_metrics_correctly_computed_identical_engines() {
 
 #[test]
 fn drift_metrics_correctly_computed_different_engines() {
-    let pilot = WhisperCppPilot::new(
-        "models/ggml-base.bin".to_owned(),
-        4,
-        Some("en".to_owned()),
-        false,
-        false,
-        false,
-    );
-    let reference = pilot.transcribe(10_000);
+    let reference = synthetic_whisper_cpp_segments(10_000);
 
     // Drifted engine uses different phrases.
     let candidate: Vec<TranscriptSegment> = vec![
@@ -1162,4 +1232,280 @@ fn zero_duration_input_produces_empty_segments() {
         );
     }
     assert!(report.overall_passed);
+}
+
+// ===========================================================================
+// bd-4slu: Bridge-vs-native conformance against the REAL engines.
+//
+// Everything above this line drives the comparator with *synthetic* fixtures.
+// This section instead runs both the reference bridge (`whisper-cli`, an
+// external subprocess) and the in-process native engine on the same real audio
+// (`tests/fixtures/native/jfk.wav` + `tiny.en`), then compares their outputs.
+//
+// It is **doubly gated**: it runs only when BOTH the `tiny.en` model resolves
+// AND `whisper-cli` exists at `/opt/homebrew/bin/whisper-cli`. Absent either,
+// it prints a SKIP line and returns success.
+//
+// TOLERANCE PROFILE — "native-rollout", NOT the canonical 50 ms:
+//   whisper-cli defaults to beam search (`-bs 5`); the native engine decodes
+//   greedily (temperature 0). That divergence produces occasional word-choice
+//   differences and timestamp drift — measured at ~240 ms on the final-segment
+//   end boundary of jfk.wav. We therefore gate on WER <= 0.10 and per-segment
+//   timestamps within 0.3 s — deliberately looser than
+//   `CANONICAL_TIMESTAMP_TOLERANCE_SEC` (50 ms), and matching the library's own
+//   gated e2e timestamp tolerance (`decode.rs`). See DISCREPANCIES.md DISC-003;
+//   revisit (tighten) when native beam search lands.
+// ===========================================================================
+
+use franken_whisper::model::TranscriptionSegment;
+use franken_whisper::native_engine::{self, NativeWhisperModel};
+
+/// Path to the reference whisper-cli bridge binary (homebrew install).
+const WHISPER_CLI_BIN: &str = "/opt/homebrew/bin/whisper-cli";
+
+/// Native-rollout per-segment timestamp tolerance (greedy-vs-beam; DISC-003).
+/// Greedy decode drifts the final-segment end boundary ~240 ms versus beam
+/// search; 0.3 s gives honest headroom without hiding real regressions.
+const NATIVE_ROLLOUT_TIMESTAMP_TOLERANCE_SEC: f64 = 0.3;
+
+/// Native-rollout WER gate (greedy-vs-beam; DISC-003).
+const NATIVE_ROLLOUT_MAX_WER: f64 = 0.10;
+
+fn jfk_wav_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/native/jfk.wav"
+    ))
+}
+
+/// Decode a standard 16-bit PCM WAV into 16 kHz mono `f32` samples in `[-1, 1]`,
+/// walking RIFF chunks (jfk.wav carries a `LIST`/`INFO` chunk before `data`, so
+/// the naive 44-byte-offset shortcut does not apply). Test-only; the library's
+/// own `read_wav_16k_mono` is crate-private.
+fn read_wav_16k_mono(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut pos = 12usize;
+    let mut channels = 0u16;
+    let mut sample_rate = 0u32;
+    let mut bits = 0u16;
+    let mut data: Option<&[u8]> = None;
+
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
+        let body_start = pos + 8;
+        let body_end = body_start.checked_add(size)?;
+        if body_end > bytes.len() {
+            break;
+        }
+        if id == b"fmt " && size >= 16 {
+            let f = &bytes[body_start..];
+            channels = u16::from_le_bytes([f[2], f[3]]);
+            sample_rate = u32::from_le_bytes([f[4], f[5], f[6], f[7]]);
+            bits = u16::from_le_bytes([f[14], f[15]]);
+        } else if id == b"data" {
+            data = Some(&bytes[body_start..body_end]);
+        }
+        // Chunks are word-aligned: an odd size is followed by a pad byte.
+        pos = body_end + (size & 1);
+    }
+
+    let (channels, sample_rate, bits, data) = (channels, sample_rate, bits, data?);
+    if channels == 0 || bits != 16 || sample_rate != 16_000 {
+        return None;
+    }
+    let frame = (channels as usize) * 2;
+    let mut out = Vec::with_capacity(data.len() / frame.max(1));
+    for chunk in data.chunks_exact(frame) {
+        // Average channels to mono.
+        let mut acc = 0i32;
+        for c in 0..channels as usize {
+            let s = i16::from_le_bytes([chunk[c * 2], chunk[c * 2 + 1]]);
+            acc += i32::from(s);
+        }
+        let mono = acc as f32 / channels as f32;
+        out.push(mono / 32768.0);
+    }
+    Some(out)
+}
+
+/// Levenshtein word-edit-distance WER (insertions + deletions + substitutions),
+/// normalized by reference length. Unlike the positional [`word_error_rate_approx`]
+/// used for the synthetic fixtures, this is robust to a single inserted/dropped
+/// word shifting the whole sequence — the right metric for a greedy-vs-beam
+/// full-transcript comparison.
+fn word_error_rate_edit(reference: &str, candidate: &str) -> f64 {
+    let r: Vec<String> = reference
+        .to_lowercase()
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_owned())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let c: Vec<String> = candidate
+        .to_lowercase()
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_owned())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if r.is_empty() {
+        return if c.is_empty() { 0.0 } else { 1.0 };
+    }
+    // Classic DP edit distance over words.
+    let mut prev: Vec<usize> = (0..=c.len()).collect();
+    let mut curr = vec![0usize; c.len() + 1];
+    for (i, rw) in r.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cw) in c.iter().enumerate() {
+            let cost = usize::from(rw != cw);
+            curr[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(curr[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[c.len()] as f64 / r.len() as f64
+}
+
+/// Run `whisper-cli -oj` on `wav` with `model_path` and parse its segments into
+/// [`TranscriptionSegment`]s. Returns `None` on any failure.
+fn whisper_cli_segments(
+    wav: &std::path::Path,
+    model_path: &std::path::Path,
+) -> Option<Vec<TranscriptionSegment>> {
+    let out_dir = tempfile::tempdir().ok()?;
+    let out_base = out_dir.path().join("out");
+    let status = std::process::Command::new(WHISPER_CLI_BIN)
+        .args([
+            "-m",
+            model_path.to_str()?,
+            "-oj",
+            "-of",
+            out_base.to_str()?,
+            "-l",
+            "en",
+            wav.to_str()?,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let json_bytes = std::fs::read(out_dir.path().join("out.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&json_bytes).ok()?;
+    let arr = json["transcription"].as_array()?;
+    let mut segments = Vec::with_capacity(arr.len());
+    for seg in arr {
+        let from_ms = seg["offsets"]["from"].as_f64()?;
+        let to_ms = seg["offsets"]["to"].as_f64()?;
+        segments.push(TranscriptionSegment {
+            start_sec: Some(from_ms / 1000.0),
+            end_sec: Some(to_ms / 1000.0),
+            text: seg["text"].as_str().unwrap_or_default().trim().to_owned(),
+            speaker: None,
+            confidence: None,
+        });
+    }
+    Some(segments)
+}
+
+/// Run the in-process native engine on `wav` with `tiny.en`, returning its
+/// timed segments.
+fn native_segments(model: &NativeWhisperModel, samples: &[f32]) -> Vec<TranscriptionSegment> {
+    let params = native_engine::decode::DecodeParams {
+        language: None,
+        translate: false,
+        timestamps: true,
+        n_threads: 4,
+        max_text_ctx: None,
+        ..Default::default()
+    };
+    let noop = || Ok(());
+    let out = model
+        .transcribe(samples, &params, &noop)
+        .expect("native transcribe");
+    out.segments
+}
+
+fn joined_text(segments: &[TranscriptionSegment]) -> String {
+    segments
+        .iter()
+        .map(|s| s.text.trim())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn gated_bridge_vs_native_conformance_jfk_tiny_en() {
+    let Some(model_path) = native_engine::find_model_file("tiny.en") else {
+        eprintln!("SKIP gated_bridge_vs_native_conformance: tiny.en model missing");
+        return;
+    };
+    if !std::path::Path::new(WHISPER_CLI_BIN).exists() {
+        eprintln!("SKIP gated_bridge_vs_native_conformance: {WHISPER_CLI_BIN} missing");
+        return;
+    }
+
+    let wav = jfk_wav_path();
+    let bytes = std::fs::read(&wav).expect("read jfk.wav");
+    let samples = read_wav_16k_mono(&bytes).expect("decode jfk.wav to 16k mono");
+
+    let model = NativeWhisperModel::load(&model_path).expect("load tiny.en");
+
+    let Some(bridge) = whisper_cli_segments(&wav, &model_path) else {
+        eprintln!("SKIP gated_bridge_vs_native_conformance: whisper-cli produced no output");
+        return;
+    };
+    let native = native_segments(&model, &samples);
+
+    let bridge_text = joined_text(&bridge);
+    let native_text = joined_text(&native);
+
+    // ── WER gate (native-rollout profile) ──
+    let wer = word_error_rate_edit(&bridge_text, &native_text);
+    if wer > NATIVE_ROLLOUT_MAX_WER {
+        eprintln!("BRIDGE (whisper-cli): {bridge_text}");
+        eprintln!("NATIVE (greedy):      {native_text}");
+    }
+    assert!(
+        wer <= NATIVE_ROLLOUT_MAX_WER,
+        "native-vs-bridge WER {wer:.4} exceeds native-rollout gate {NATIVE_ROLLOUT_MAX_WER} \
+         (greedy-vs-beam; see DISC-003)\nBRIDGE: {bridge_text}\nNATIVE: {native_text}"
+    );
+    eprintln!("native-vs-bridge WER = {wer:.4} (gate {NATIVE_ROLLOUT_MAX_WER})");
+
+    // ── per-segment timestamp tolerance (native-rollout profile, 0.2 s) ──
+    let matched = bridge.len().min(native.len());
+    assert!(matched > 0, "no overlapping segments to compare");
+    for i in 0..matched {
+        let (bs, ns) = (&bridge[i], &native[i]);
+        let bstart = bs.start_sec.unwrap_or(0.0);
+        let nstart = ns.start_sec.unwrap_or(0.0);
+        let bend = bs.end_sec.unwrap_or(0.0);
+        let nend = ns.end_sec.unwrap_or(0.0);
+        let start_drift = (bstart - nstart).abs();
+        let end_drift = (bend - nend).abs();
+        if start_drift > NATIVE_ROLLOUT_TIMESTAMP_TOLERANCE_SEC
+            || end_drift > NATIVE_ROLLOUT_TIMESTAMP_TOLERANCE_SEC
+        {
+            eprintln!("BRIDGE (whisper-cli): {bridge_text}");
+            eprintln!("NATIVE (greedy):      {native_text}");
+        }
+        assert!(
+            start_drift <= NATIVE_ROLLOUT_TIMESTAMP_TOLERANCE_SEC,
+            "segment {i} start drift {start_drift:.3}s exceeds {NATIVE_ROLLOUT_TIMESTAMP_TOLERANCE_SEC}s \
+             (bridge {bstart:.3} vs native {nstart:.3}; DISC-003)"
+        );
+        assert!(
+            end_drift <= NATIVE_ROLLOUT_TIMESTAMP_TOLERANCE_SEC,
+            "segment {i} end drift {end_drift:.3}s exceeds {NATIVE_ROLLOUT_TIMESTAMP_TOLERANCE_SEC}s \
+             (bridge {bend:.3} vs native {nend:.3}; DISC-003)"
+        );
+    }
 }

@@ -213,10 +213,10 @@ fn mr_softmax_all_positive() {
 #[test]
 fn mr_softmax_monotonicity() {
     let test_cases = vec![
-        vec![1.0, 2.0, 3.0],       // ascending
-        vec![3.0, 2.0, 1.0],       // descending
-        vec![10.0, 20.0, 30.0],    // large ascending
-        vec![-3.0, -2.0, -1.0],    // negative ascending
+        vec![1.0, 2.0, 3.0],      // ascending
+        vec![3.0, 2.0, 1.0],      // descending
+        vec![10.0, 20.0, 30.0],   // large ascending
+        vec![-3.0, -2.0, -1.0],   // negative ascending
         vec![0.1, 0.2, 0.3, 0.4], // small ascending
     ];
 
@@ -302,11 +302,7 @@ fn mr_normalize_sum_to_one() {
 
 #[test]
 fn mr_normalize_preserves_ratios() {
-    let positive_vectors = vec![
-        vec![1.0, 2.0, 4.0],
-        vec![3.0, 6.0, 9.0],
-        vec![10.0, 20.0],
-    ];
+    let positive_vectors = vec![vec![1.0, 2.0, 4.0], vec![3.0, 6.0, 9.0], vec![10.0, 20.0]];
 
     for values in positive_vectors {
         let result = normalize_cpu(&values);

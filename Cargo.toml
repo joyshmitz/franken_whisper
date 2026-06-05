@@ -8,7 +8,7 @@ description = "Agent-first Rust ASR orchestration stack with ffmpeg normalizatio
 [features]
 default = []
 tui = ["dep:ftui"]
-gpu-frankentorch = ["dep:ft-api", "dep:ft-core"]
+gpu-frankentorch = ["dep:ft-api"]
 gpu-frankenjax = ["dep:fj-api", "dep:fj-core"]
 
 [dependencies]
@@ -37,9 +37,14 @@ franken-decision = "0.3.1"
 fsqlite = { path = "../frankensqlite/crates/fsqlite" }
 fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
 
+# FrankenTorch compute kernels for the in-process native whisper engine
+# (rayon-parallel GEMM, softmax, gelu; f16 storage types). These are
+# first-party FrankenSuite crates — see the bd-frp7 epic.
+ft-kernel-cpu = { path = "../frankentorch/crates/ft-kernel-cpu" }
+ft-core = { path = "../frankentorch/crates/ft-core" }
+
 ftui = { path = "../frankentui/crates/ftui", default-features = false, features = ["crossterm"], optional = true }
 ft-api = { path = "../frankentorch/crates/ft-api", optional = true }
-ft-core = { path = "../frankentorch/crates/ft-core", optional = true }
 fj-api = { path = "../frankenjax/crates/fj-api", optional = true }
 fj-core = { path = "../frankenjax/crates/fj-core", optional = true }
 

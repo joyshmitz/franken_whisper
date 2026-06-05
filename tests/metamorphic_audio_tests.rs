@@ -58,7 +58,10 @@ fn generate_noise(sample_rate: u32, duration_secs: f32, seed: u64) -> Vec<f32> {
 
 /// Scale audio volume by a constant factor.
 fn scale_volume(samples: &[f32], factor: f32) -> Vec<f32> {
-    samples.iter().map(|s| (s * factor).clamp(-1.0, 1.0)).collect()
+    samples
+        .iter()
+        .map(|s| (s * factor).clamp(-1.0, 1.0))
+        .collect()
 }
 
 /// Prepend silence to audio.
@@ -225,7 +228,8 @@ fn mr_prepend_silence_preserves_original_content() {
     // The remaining portion should match original exactly
     let content_portion = &padded[silence_samples..];
     assert_eq!(
-        content_portion, &original[..],
+        content_portion,
+        &original[..],
         "Content after prepended silence should match original"
     );
 }
