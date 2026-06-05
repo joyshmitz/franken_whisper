@@ -655,8 +655,9 @@ pub fn transcribe_samples(
         (1 + numer / FRAME_STEP).max(DELTA_MIN)
     };
 
-    // Resolve language: explicit, else auto-detect once (multilingual only).
-    let mut used_language = resolve_language(m, params, &full_mel, checkpoint)?;
+    // Resolve language: explicit / en-only now; multilingual auto-detect is
+    // deferred to the first window so its encoder output is computed once.
+    let mut used_language = resolve_language_fast(m, params);
 
     // The `" "` token id, for blank suppression (whisper.cpp 6220).
     let space_token = (0..tk.vocab_size()).find(|&id| tk.token_bytes(id) == Some(b" ".as_slice()));
@@ -717,6 +718,12 @@ pub fn transcribe_samples(
         let t_xkv = std::time::Instant::now();
         let mut st = DecoderState::new(&m.decoder, &enc)?;
         super::perf_span("cross_kv", t_xkv.elapsed().as_secs_f64() * 1e3, "");
+
+        // First-window language auto-detect (multilingual, no explicit
+        // language): reuses this window's encode + this state's cross K/V.
+        if used_language.is_none() {
+            used_language = detect_language_from_enc(m, &mut st, checkpoint)?;
+        }
 
         // Short-tail prompt clearing (fix #2 — whisper.cpp 7046-7051): a
         // non-first window with under 5 s of audio left drops the carried prompt
@@ -1182,25 +1189,39 @@ fn emit_segment_words(
 /// model with no language auto-detects on the first window (whisper.cpp
 /// 4035-4108); English-only models use `"en"` here (the caller squashes the
 /// reported language to `None` at the end).
-fn resolve_language(
-    m: &LoadedModel,
-    params: &DecodeParams,
-    full_mel: &Mel,
-    checkpoint: &dyn Fn() -> FwResult<()>,
-) -> FwResult<Option<String>> {
+/// Cheap language resolution that never touches the model: explicit request
+/// language, or implicit English for non-multilingual models. Returns `None`
+/// when auto-detection is required — the window loop then detects from the
+/// FIRST window's already-computed encoder output instead of running a
+/// hidden duplicate encode (hotspot #2, 8.8 s on large-v3-turbo: the old
+/// `resolve_language` encoded window 0, then the loop encoded it again).
+fn resolve_language_fast(m: &LoadedModel, params: &DecodeParams) -> Option<String> {
     if let Some(lang) = &params.language {
-        return Ok(Some(lang.clone()));
+        return Some(lang.clone());
     }
     if !m.tokenizer.is_multilingual() {
         // English-only model: language is implicitly English, no detection.
-        return Ok(Some("en".to_string()));
+        return Some("en".to_string());
     }
-    // Auto-detect: encode the first window, forward [sot], argmax over the
-    // language-token logits (whisper.cpp 4053-4107).
-    let mel_window = mel::chunk_frames(full_mel, 0, FRAMES_PER_CHUNK);
-    let enc = encoder::forward(&m.encoder, &mel_window, params.n_threads, checkpoint)?;
-    let mut st = DecoderState::new(&m.decoder, &enc)?;
-    let logits = decoder::forward_step(&m.decoder, &mut st, &[m.tokenizer.sot], checkpoint)?;
+    None
+}
+
+/// Auto-detect the spoken language from an already-encoded window: forward
+/// `[sot]`, argmax over the language-token logits (whisper.cpp 4053-4107).
+/// `st` is reset afterwards so the caller can reuse it (and its precomputed
+/// cross K/V) for the real decode — the self-attention KV cache is cleared,
+/// which the KV-equivalence tests prove is identical to a fresh state.
+///
+/// Isomorphism vs the previous separate-encode path: the encoder output for
+/// window 0 is the same tensor either way (encoding is deterministic), so the
+/// detection logits — and every downstream token — are unchanged.
+fn detect_language_from_enc(
+    m: &LoadedModel,
+    st: &mut DecoderState,
+    checkpoint: &dyn Fn() -> FwResult<()>,
+) -> FwResult<Option<String>> {
+    let logits = decoder::forward_step(&m.decoder, st, &[m.tokenizer.sot], checkpoint)?;
+    st.reset();
 
     let mut best_code = "en";
     let mut best_logit = f32::NEG_INFINITY;
