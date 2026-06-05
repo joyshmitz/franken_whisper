@@ -1,0 +1,35 @@
+{
+  "results": [
+    {
+      "command": "env FRANKEN_WHISPER_NATIVE_EXECUTION=1 FRANKEN_WHISPER_NATIVE_ROLLOUT_STAGE=sole FRANKEN_WHISPER_WHISPER_CPP_BIN=/nonexistent /Volumes/USB_NVME/cargo-target/release-perf/franken_whisper transcribe --input tests/fixtures/native/jfk.wav --backend whisper-cpp --model large-v3-turbo --threads 8 --no-persist --json",
+      "mean": 32.91912105542,
+      "stddev": 0.1589022966189396,
+      "median": 32.93721948062,
+      "user": 118.59831792,
+      "system": 9.57932086,
+      "min": 32.70117431362,
+      "max": 33.12042168862,
+      "times": [
+        33.12042168862,
+        32.93721948062,
+        32.83886998062,
+        32.70117431362,
+        32.99791981362
+      ],
+      "memory_usage_byte": [
+        5125898240,
+        5125898240,
+        5125898240,
+        5130240000,
+        5130240000
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

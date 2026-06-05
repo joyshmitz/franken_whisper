@@ -1,0 +1,14 @@
+{"event":"perf.profile.span_summary","span":"model_parse","cumulative_ms":266.63,"at_ms":0}
+{"event":"perf.profile.span_summary","span":"model_weights","cumulative_ms":2437.53,"at_ms":2438}
+{"event":"perf.profile.span_summary","span":"mel","cumulative_ms":31.13,"at_ms":2469}
+{"event":"perf.profile.span_summary","span":"encoder_window","cumulative_ms":8586.17,"at_ms":19885}
+{"event":"perf.profile.span_summary","span":"cross_kv","cumulative_ms":87.34,"at_ms":19972}
+{"event":"perf.profile.span_summary","span":"decoder_prefill","cumulative_ms":51.82,"at_ms":20024,"prompt_tokens":3}
+{"event":"perf.profile.span_summary","span":"decode_loop","cumulative_ms":1775.25,"at_ms":21799,"tokens":29}
+{"event":"perf.profile.span_summary","span":"encoder_window","cumulative_ms":9279.71,"at_ms":31079}
+{"event":"perf.profile.span_summary","span":"cross_kv","cumulative_ms":82.17,"at_ms":31162}
+{"event":"perf.profile.span_summary","span":"decoder_prefill","cumulative_ms":46.42,"at_ms":31208,"prompt_tokens":3}
+{"event":"perf.profile.span_summary","span":"decode_loop","cumulative_ms":236.73,"at_ms":31445,"tokens":5}
+{"event":"perf.profile.span_summary","span":"version_tag","cumulative_ms":3044.38,"at_ms":34489}
+{"event":"perf.profile.span_summary","span":"backend_run","cumulative_ms":34756.29,"at_ms":34489}
+real 35.57

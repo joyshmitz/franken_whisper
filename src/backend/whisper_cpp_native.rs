@@ -355,6 +355,7 @@ pub fn run(
     _timeout: Duration,
     token: Option<&crate::orchestrator::CancellationToken>,
 ) -> FwResult<TranscriptionResult> {
+    let t_backend = std::time::Instant::now();
     if let Some(tok) = token {
         tok.checkpoint()?;
     }
@@ -428,10 +429,14 @@ pub fn run(
     let transcript = super::transcript_from_segments(&segments);
     let language = output.language.clone().or_else(|| request.language.clone());
 
+    let t_tag = std::time::Instant::now();
+    let version_tag = model.version_tag();
+    crate::native_engine::perf_span("version_tag", t_tag.elapsed().as_secs_f64() * 1e3, "");
+    crate::native_engine::perf_span("backend_run", t_backend.elapsed().as_secs_f64() * 1e3, "");
     let raw_output = raw_output_json(
         &spec,
         &model_path,
-        model.version_tag(),
+        version_tag,
         &output.windows,
         word_mode,
         request.backend_params.split_on_word,

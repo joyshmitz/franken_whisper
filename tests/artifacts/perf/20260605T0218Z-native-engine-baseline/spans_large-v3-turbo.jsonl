@@ -1,0 +1,11 @@
+{"event":"perf.profile.span_summary","span":"model_parse","cumulative_ms":267.64}
+{"event":"perf.profile.span_summary","span":"model_weights","cumulative_ms":2305.45}
+{"event":"perf.profile.span_summary","span":"mel","cumulative_ms":32.53}
+{"event":"perf.profile.span_summary","span":"encoder_window","cumulative_ms":8269.92}
+{"event":"perf.profile.span_summary","span":"cross_kv","cumulative_ms":80.73}
+{"event":"perf.profile.span_summary","span":"decoder_prefill","cumulative_ms":55.97,"prompt_tokens":3}
+{"event":"perf.profile.span_summary","span":"decode_loop","cumulative_ms":1782.05,"tokens":29}
+{"event":"perf.profile.span_summary","span":"encoder_window","cumulative_ms":8325.52}
+{"event":"perf.profile.span_summary","span":"cross_kv","cumulative_ms":87.00}
+{"event":"perf.profile.span_summary","span":"decoder_prefill","cumulative_ms":54.97,"prompt_tokens":3}
+{"event":"perf.profile.span_summary","span":"decode_loop","cumulative_ms":297.59,"tokens":5}

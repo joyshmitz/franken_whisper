@@ -178,6 +178,29 @@ fn model_file_name(short_name: &str) -> String {
     format!("ggml-{short_name}.bin")
 }
 
+/// Measurement-only span emission for the profiling workflow
+/// (`profiling-software-performance`). When `FRANKEN_WHISPER_PERF_SPANS=1`,
+/// stage timings are written to stderr as one JSON object per line with the
+/// `perf.profile.span_summary` event name. Never enabled by default; adds two
+/// atomic loads when off. Do NOT use for production telemetry (events go
+/// through the orchestrator's NDJSON stream instead).
+pub(crate) fn perf_spans_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FRANKEN_WHISPER_PERF_SPANS").is_ok_and(|v| v == "1"))
+}
+
+/// Emit one measurement-only span line (see [`perf_spans_enabled`]).
+pub(crate) fn perf_span(span: &str, ms: f64, extra: &str) {
+    if perf_spans_enabled() {
+        static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let at_ms = T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1e3;
+        let comma = if extra.is_empty() { "" } else { "," };
+        eprintln!(
+            "{{\"event\":\"perf.profile.span_summary\",\"span\":\"{span}\",\"cumulative_ms\":{ms:.2},\"at_ms\":{at_ms:.0}{comma}{extra}}}"
+        );
+    }
+}
+
 /// Locate a test/dev model file by short name (e.g. `"tiny.en"`), checking the
 /// shared [`model_search_dirs`] in precedence order. Returns `None` when absent
 /// so gated tests can skip rather than fail (see bead bd-4slu).
@@ -437,8 +460,12 @@ impl NativeWhisperModel {
         }
 
         // Parse outside the lock so a slow load doesn't block other paths.
+        let t_parse = std::time::Instant::now();
         let ggml = ggml::GgmlModel::load(&canonical)?;
+        perf_span("model_parse", t_parse.elapsed().as_secs_f64() * 1e3, "");
+        let t_weights = std::time::Instant::now();
         let inner = decode::LoadedModel::from_ggml(ggml)?;
+        perf_span("model_weights", t_weights.elapsed().as_secs_f64() * 1e3, "");
         let model = Arc::new(Self {
             inner,
             model_path: canonical.clone(),

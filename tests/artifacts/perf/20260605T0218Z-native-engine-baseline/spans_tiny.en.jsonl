@@ -1,0 +1,7 @@
+{"event":"perf.profile.span_summary","span":"model_parse","cumulative_ms":15.14}
+{"event":"perf.profile.span_summary","span":"model_weights","cumulative_ms":48.39}
+{"event":"perf.profile.span_summary","span":"mel","cumulative_ms":29.03}
+{"event":"perf.profile.span_summary","span":"encoder_window","cumulative_ms":210.77}
+{"event":"perf.profile.span_summary","span":"cross_kv","cumulative_ms":7.49}
+{"event":"perf.profile.span_summary","span":"decoder_prefill","cumulative_ms":26.47,"prompt_tokens":1}
+{"event":"perf.profile.span_summary","span":"decode_loop","cumulative_ms":616.33,"tokens":27}

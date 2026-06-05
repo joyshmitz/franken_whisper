@@ -632,7 +632,9 @@ pub fn transcribe_samples(
     let tk = &m.tokenizer;
 
     // Full-audio log-mel spectrogram (whisper computes once, then windows it).
+    let t_mel = std::time::Instant::now();
     let full_mel = mel::log_mel(samples_16k_mono, &m.filters, params.n_threads)?;
+    super::perf_span("mel", t_mel.elapsed().as_secs_f64() * 1e3, "");
 
     // Window bounds in centiseconds: seek runs [0, seek_end) where seek_end is
     // the **original** (unpadded) audio length — whisper.cpp's `n_len_org`
@@ -709,8 +711,12 @@ pub fn transcribe_samples(
         // Encode this window's 3000-frame mel chunk.
         let frame_offset = usize::try_from(seek_cs).unwrap_or(0);
         let mel_window = mel::chunk_frames(&full_mel, frame_offset, FRAMES_PER_CHUNK);
+        let t_enc = std::time::Instant::now();
         let enc = encoder::forward(&m.encoder, &mel_window, params.n_threads, checkpoint)?;
+        super::perf_span("encoder_window", t_enc.elapsed().as_secs_f64() * 1e3, "");
+        let t_xkv = std::time::Instant::now();
         let mut st = DecoderState::new(&m.decoder, &enc)?;
+        super::perf_span("cross_kv", t_xkv.elapsed().as_secs_f64() * 1e3, "");
 
         // Short-tail prompt clearing (fix #2 — whisper.cpp 7046-7051): a
         // non-first window with under 5 s of audio left drops the carried prompt
@@ -736,7 +742,13 @@ pub fn transcribe_samples(
 
         // Prefill the prompt; the first forward's softmax gives no_speech_prob
         // (whisper.cpp 7165-7182). Compute it BEFORE filtering.
+        let t_prefill = std::time::Instant::now();
         let prefill_logits = decoder::forward_step(&m.decoder, &mut st, &prompt, checkpoint)?;
+        super::perf_span(
+            "decoder_prefill",
+            t_prefill.elapsed().as_secs_f64() * 1e3,
+            &format!("\"prompt_tokens\":{}", prompt.len()),
+        );
         let no_speech_prob = {
             let lp = compute_logprobs(&prefill_logits);
             usize::try_from(tk.no_speech)
@@ -746,6 +758,7 @@ pub fn transcribe_samples(
         };
 
         // Greedy decode loop.
+        let t_loop = std::time::Instant::now();
         let mut decoded: Vec<i32> = Vec::new();
         let mut plogs: Vec<f32> = Vec::new();
         let mut has_ts = false;
@@ -825,6 +838,11 @@ pub fn transcribe_samples(
         // records DTW word timings with the ORIGINAL `seek_delta`, then applies
         // this whole-chunk skip ONLY to the seek advance (7753-7760). So we keep
         // `seek_delta_cs` untouched for build_segments/window_word_timings below
+        super::perf_span(
+            "decode_loop",
+            t_loop.elapsed().as_secs_f64() * 1e3,
+            &format!("\"tokens\":{}", decoded.len()),
+        );
         // and compute a separate `seek_advance_cs` for the window step.
         let single_ts_ending = decoded.len() > 1
             && decoded[decoded.len() - 2] < tk.timestamp_begin

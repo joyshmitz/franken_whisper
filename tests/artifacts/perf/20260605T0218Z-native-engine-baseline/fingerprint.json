@@ -1,0 +1,18 @@
+{
+ "run_id": "20260605T0218Z-native-engine-baseline",
+ "scenario": {
+  "S1": "tiny.en on jfk.wav 11s, sole-stage native, 8 threads",
+  "S2": "large-v3-turbo on jfk.wav 11s, sole-stage native, 8 threads"
+ },
+ "golden": "transcript byte-identical to tests/fixtures/native/jfk_tiny_reference.json (S1)",
+ "metric": "wall p50/p95 end-to-end; per-stage spans; vs whisper-cli CPU same host",
+ "cpu": "Apple M4 Pro, 14 cores (10P+4E), SMT n/a",
+ "ram_gb": 64,
+ "os": "macOS 26.2",
+ "toolchain": "rustc 1.98.0-nightly d1fc603d1",
+ "build": "release-perf: opt3, thin-lto, cu=1, line-tables, frame-pointers, no-strip",
+ "isolation": "bare, no taskset (macOS), other load minimal",
+ "cache": "warm (model file in page cache after first run)",
+ "git_sha": "0553cbb",
+ "ts": "2026-06-05T02:18:31.961501Z"
+}
