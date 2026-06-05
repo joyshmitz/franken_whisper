@@ -9,28 +9,30 @@
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg)](./LICENSE)
 [![Rust Edition](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
-[![Tests](https://img.shields.io/badge/tests-3%2C660%2B-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-3%2C100%2B-brightgreen.svg)](#testing)
 [![Latest Release](https://img.shields.io/github/v/release/Dicklesworthstone/franken_whisper.svg)](https://github.com/Dicklesworthstone/franken_whisper/releases)
 
 </div>
 
-**Agent-first Rust ASR orchestration stack with adaptive Bayesian backend routing, real-time NDJSON streaming, dual-model speculative streaming, conformance-gated native engine rollout, and SQLite-backed run history.**
+**Agent-first Rust ASR stack with a real in-process pure-Rust Whisper engine (no FFI, no Python, no subprocess — and on CPU it beats whisper.cpp on small models), adaptive Bayesian backend routing, real-time NDJSON streaming, DTW word timestamps, and SQLite-backed run history.**
 
 <div align="center">
-<h3>Quick Install</h3>
+<h3>Install in one line</h3>
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/franken_whisper/main/install.sh?$(date +%s)" | bash
 ```
 
-**Or build from source:**
-
-```bash
-git clone https://github.com/Dicklesworthstone/franken_whisper.git
-cd franken_whisper && cargo build --release
-```
+<sub>SHA-256-verified prebuilt binaries for <b>Linux</b> (x86_64 / aarch64), <b>macOS</b> (Intel / Apple&nbsp;Silicon), and <b>WSL</b> — proxy-aware, airgap-capable (<code>--offline</code>), reversible (<code>--uninstall</code>). Windows users: grab <code>windows_amd64.zip</code> from <a href="https://github.com/Dicklesworthstone/franken_whisper/releases/latest">the latest release</a>. All flags: <a href="#installation">Installation</a>.</sub>
 
 </div>
+
+> **v0.2.0 — the native engine is real, and it is fast.** The in-process pure-Rust Whisper engine (built on [FrankenTorch](https://github.com/Dicklesworthstone/frankentorch) kernels, `#![forbid(unsafe_code)]` in-crate) now transcribes **2.33× faster than whisper.cpp on tiny.en and at parity on large-v3-turbo** — CPU vs CPU, same machine (Apple M4 Pro, interleaved runs), while using ~18% less total CPU on the large model. Native-vs-whisper.cpp conformance on the reference fixture: **WER 0.0000**.
+>
+> | Model | franken_whisper native (CPU) | whisper.cpp (CPU) | |
+> |---|---|---|---|
+> | tiny.en (11 s clip) | **475 ms** | 1,105 ms | **2.33× faster** |
+> | large-v3-turbo (11 s clip) | **9.73 s** | 9.59 s | parity |
 
 ---
 
@@ -42,8 +44,9 @@ Agent workflows make the problem worse. Modern LLM agents need **structured**, *
 
 ## The Solution
 
-`franken_whisper` is a single Rust binary that wraps every major Whisper backend behind a unified, agent-first interface:
+`franken_whisper` is a single Rust binary that wraps every major Whisper backend behind a unified, agent-first interface — and ships its own engine:
 
+- **A real in-process Whisper engine, in pure Rust.** ggml model parsing, log-mel frontend, encoder/decoder transformer inference on FrankenTorch CPU kernels, greedy decoding with whisper.cpp's full timestamp-rule suite, and cross-attention DTW word timestamps. No FFI, no Python, no subprocess — drop a ggml model file in place and transcribe.
 - **Adaptive Bayesian backend routing.** Each `auto` request runs a formal decision contract with an explicit loss matrix, per-backend Beta posteriors, Brier-scored calibration, and deterministic fallback when the model is mis-calibrated.
 - **Real-time NDJSON streaming.** Every pipeline stage emits sequenced, timestamped events on stable schema `v1.0.0`. No fragile regex; agents parse JSON.
 - **Durable run history.** Every transcription persists to SQLite with full event logs, replay envelopes, and JSONL export/import, even when the process crashes mid-run.
@@ -249,9 +252,16 @@ Options:
 |------|---------|
 | `--system` | Install to `/usr/local/bin` instead of `~/.local/bin` |
 | `--easy-mode` | Auto-update shell `PATH` and rc files |
-| `--verify` | Run a post-install self-test |
+| `--verify` | Run a post-install self-test (`robot health`) |
 | `--version vX.Y.Z` | Pin to a specific release |
+| `--force` | Reinstall even if the same version is present |
+| `--offline TARBALL` | Airgap install from a local archive (verifies sibling `.sha256`) |
+| `--from-source` | Build from a source clone (clones sibling FrankenSuite deps) |
+| `--quiet` / `--no-gum` | Script-friendly / plain-ANSI output |
+| `--no-verify` | Skip checksum verification (testing only) |
 | `--uninstall` | Remove the binary and `PATH` modifications |
+
+`HTTP_PROXY`/`HTTPS_PROXY` are honored on every download. Prebuilt targets: `linux_amd64`, `linux_arm64`, `darwin_amd64`, `darwin_arm64`, `windows_amd64` (zip; manual install on native Windows — the bash installer covers Linux, macOS, and WSL).
 
 ### From Source
 
@@ -278,7 +288,8 @@ The release profile is aggressively optimized for distribution: `opt-level = "z"
 
 - **Rust nightly** (2024 edition; pinned via `rust-toolchain.toml`)
 - **ffmpeg** (optional): only needed for video files, exotic codecs `symphonia` cannot decode, and live microphone capture. On Linux x86_64 it is auto-provisioned on first use unless `FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG=0`.
-- **Backend binaries** (at least one):
+- **A Whisper model file** for the built-in native engine (e.g. `ggml-tiny.en.bin` / `ggml-large-v3-turbo.bin` from [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp)); place it in `$FRANKEN_WHISPER_MODEL_DIR`, `~/.cache/franken_whisper/models`, or `~/models/whisper` — `scripts/fetch_test_models.sh` fetches a pinned `tiny.en`. With a model present, **no external backend binaries are required**: set `FRANKEN_WHISPER_NATIVE_EXECUTION=1` to prefer the native engine (it also serves as automatic recovery when no bridge binary exists).
+- **Bridge backend binaries** (optional alternates; the Bayesian router arbitrates):
   - `whisper-cli` (from whisper.cpp); override via `FRANKEN_WHISPER_WHISPER_CPP_BIN`
   - `insanely-fast-whisper` (Python entry point); override via `FRANKEN_WHISPER_INSANELY_FAST_BIN`
   - `python3` with `pyannote.audio` installed (for the diarization backend); override via `FRANKEN_WHISPER_PYTHON_BIN`
