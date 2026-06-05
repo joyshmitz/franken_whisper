@@ -62,7 +62,7 @@ use super::encoder::{self, EncoderWeights};
 use super::ggml::GgmlModel;
 use super::mel::{self, FRAMES_PER_CHUNK, SAMPLE_RATE};
 use super::tokenizer::{LANGUAGES, Tokenizer};
-use super::{Mel, MelFilterbank, WhisperHParams};
+use super::{MelFilterbank, WhisperHParams};
 
 /// Length of one 30-second window in centiseconds (`30 s * 100 cs/s`).
 /// whisper.cpp's `WHISPER_CHUNK_SIZE` is `30`; offsets there are scaled by
@@ -81,6 +81,21 @@ const LOGPROB_THRESHOLD: f64 = -1.0;
 
 /// Default maximum initial timestamp, in seconds (whisper.cpp 5973).
 const MAX_INITIAL_TS_SEC: f32 = 1.0;
+
+/// Practical floor for the truncated tail-window encoder context, in encoder
+/// frames (mel frames / 2). whisper.cpp's `audio_ctx` (`-ac`) feature has no
+/// hard lower bound, but very small contexts (a handful of encoder frames)
+/// leave too little acoustic context for the transformer to behave like the
+/// model it was trained at; `64` (≈ 1.28 s of audio, the conv stem sees
+/// `2*64 = 128` mel frames) is a conservative floor that still saves the bulk
+/// of a tail window's encode while keeping the embedding well-conditioned. It
+/// is also large enough that the `max_initial_ts` clamp (tied to the FULL model
+/// `n_audio_ctx`, never this truncated ctx — whisper.cpp 6322) is unaffected.
+const MIN_ENC_CTX: usize = 64;
+
+/// Full-model encoder context for a 30 s window (`FRAMES_PER_CHUNK / 2`). The
+/// tail-truncation derivation never exceeds this.
+const FULL_ENC_CTX: usize = FRAMES_PER_CHUNK / 2;
 
 /// Finite sentinel for `avg_logprob` on an empty-result window (fix #9). A true
 /// `f64::NEG_INFINITY` serializes to JSON `null` (serde_json has no infinity
@@ -603,6 +618,71 @@ fn make_segment(
 }
 
 // ---------------------------------------------------------------------------
+// Tail-window encoder-context truncation (whisper.cpp's audio_ctx / -ac feature)
+// ---------------------------------------------------------------------------
+
+/// Whether tail-window encoder-context truncation is enabled.
+///
+/// Controlled by the `FRANKEN_WHISPER_NATIVE_TAIL_TRUNCATE` environment
+/// variable, read **once** (process-lifetime cached via [`OnceLock`]):
+/// - unset / any value other than `"0"`/`"false"` ⇒ **enabled** (the default).
+/// - `"0"` or `"false"` (ASCII-case-insensitive) ⇒ **disabled**, restoring the
+///   exact pre-optimization behavior (every window runs a full 3000-frame /
+///   1500-ctx encoder pass). This is the kill switch / golden-equivalence
+///   escape hatch.
+fn tail_truncate_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("FRANKEN_WHISPER_NATIVE_TAIL_TRUNCATE")
+            .map_or(true, |v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+    })
+}
+
+/// Derive this window's encoder context (in encoder frames) from the real
+/// (unpadded) audio frame count remaining in the window.
+///
+/// Mirrors whisper.cpp's `audio_ctx` / `-ac` feature: a near-empty final window
+/// otherwise pays a full 3000-frame / 1500-ctx encoder pass for a fraction of a
+/// second of real audio (perf hotspot #1). When `enabled`, the window is **not
+/// the first window** (`is_first == false`), and the real audio is shorter than
+/// a full window, we run the encoder with a reduced context
+/// `enc_ctx = ((real_frames + 1) / 2).clamp(MIN_ENC_CTX, FULL_ENC_CTX)` and feed
+/// it a truncated `2*enc_ctx`-frame mel chunk (the conv stem halves time, so
+/// `2*enc_ctx` mel frames ⇒ `enc_ctx` encoder rows; whisper.cpp 1982/1995).
+///
+/// `real_frames` is the remaining real audio in mel frames (1 mel frame = 1 cs
+/// = 10 ms); it is the count whisper.cpp also caps at `FRAMES_PER_CHUNK`.
+///
+/// # Why the first window is never truncated
+///
+/// whisper.cpp's `-ac` is a single fixed value applied to *every* window, but
+/// the golden references were produced with the **default full-pad** behavior
+/// (no `-ac`), and truncating the **first** window — which carries the bulk of
+/// a short clip's real audio — measurably changes the *main* transcript (on
+/// tiny.en/jfk it drops the closing period). The hotspot we target is the
+/// *tail*: a non-first window whose remaining audio is a fraction of a second
+/// (whisper.cpp's own short-tail handling, `should_clear_short_tail_prompt`,
+/// uses the same "non-first + short tail" framing). Restricting truncation to
+/// non-first windows kills hotspot #1 while keeping the first/main window
+/// byte-identical to the full-pad golden — exactly this lever's correctness
+/// contract.
+///
+/// Returns `FULL_ENC_CTX` (1500) whenever truncation is disabled, the window is
+/// the first window, or the window is full (`real_frames >= FRAMES_PER_CHUNK`),
+/// so the caller's behavior is byte-identical to the pre-optimization path in
+/// those cases. Pure / hermetic — unit-tested without a model.
+fn tail_enc_ctx(real_frames: usize, is_first: bool, enabled: bool) -> usize {
+    if !enabled || is_first || real_frames >= FRAMES_PER_CHUNK {
+        return FULL_ENC_CTX;
+    }
+    // `enc_ctx = ceil(real_frames / 2)` = `(real_frames + 1) / 2`: round up so
+    // the truncated ctx still covers an odd final mel frame (the conv stem maps
+    // 2 mel frames → 1 encoder frame), then clamp to the [MIN, FULL] band.
+    real_frames.div_ceil(2).clamp(MIN_ENC_CTX, FULL_ENC_CTX)
+}
+
+// ---------------------------------------------------------------------------
 // Top-level transcription (port of whisper_full_with_state greedy path)
 // ---------------------------------------------------------------------------
 
@@ -705,13 +785,40 @@ pub fn transcribe_samples(
     // Rolling text context from prior windows (whisper.cpp prompt_past1).
     let mut prompt_past: Vec<i32> = Vec::new();
 
+    // Tail-window encoder-context truncation kill switch, resolved once.
+    let tail_truncate = tail_truncate_enabled();
+
     let mut seek_cs: i64 = 0;
     while seek_cs + DELTA_MIN < seek_end_cs {
         checkpoint()?;
 
-        // Encode this window's 3000-frame mel chunk.
+        // Encode this window's mel chunk. A full window is 3000 mel frames
+        // (1500 encoder ctx); a tail window with under 30 s of real audio left
+        // is truncated to `2*enc_ctx` mel frames (`enc_ctx` encoder rows),
+        // mirroring whisper.cpp's audio_ctx (-ac) feature — a near-empty final
+        // window otherwise pays a full encode for a fraction of a second of
+        // audio (perf hotspot #1). Timestamp/precision semantics are unaffected
+        // (`max_initial_tid` is tied to the full model `n_audio_ctx`, not this
+        // window's ctx — whisper.cpp 6322).
         let frame_offset = usize::try_from(seek_cs).unwrap_or(0);
-        let mel_window = mel::chunk_frames(&full_mel, frame_offset, FRAMES_PER_CHUNK);
+        // Real (unpadded) audio remaining in this window, in mel frames
+        // (1 mel frame = 1 cs); capped at the full window, as whisper.cpp does.
+        let real_frames = usize::try_from((seek_end_cs - seek_cs).max(0))
+            .unwrap_or(0)
+            .min(FRAMES_PER_CHUNK);
+        let enc_ctx = tail_enc_ctx(real_frames, seek_cs == 0, tail_truncate);
+        let mel_frames = enc_ctx * 2;
+        if mel_frames < FRAMES_PER_CHUNK {
+            tracing::debug!(
+                target: "franken_whisper::native_engine::decode",
+                seek_cs,
+                real_frames,
+                enc_ctx,
+                mel_frames,
+                "tail-window encoder-context truncation engaged"
+            );
+        }
+        let mel_window = mel::chunk_frames(&full_mel, frame_offset, mel_frames);
         let t_enc = std::time::Instant::now();
         let enc = encoder::forward(&m.encoder, &mel_window, params.n_threads, checkpoint)?;
         super::perf_span("encoder_window", t_enc.elapsed().as_secs_f64() * 1e3, "");
@@ -1772,6 +1879,97 @@ mod tests {
         assert!(should_clear_short_tail_prompt(600, 1000));
         // Last partial window near the very end.
         assert!(should_clear_short_tail_prompt(900, 1000));
+    }
+
+    // ----- Tail-window encoder-context truncation derivation (pure) -----
+
+    // The signature is `tail_enc_ctx(real_frames, is_first, enabled)`. Tail
+    // truncation only ever engages on a non-first window (`is_first == false`).
+    #[test]
+    fn tail_enc_ctx_full_window_is_always_full() {
+        // A full (or over-full) non-first window always yields the full 1500
+        // ctx, enabled or not.
+        assert_eq!(tail_enc_ctx(FRAMES_PER_CHUNK, false, true), FULL_ENC_CTX);
+        assert_eq!(
+            tail_enc_ctx(FRAMES_PER_CHUNK + 100, false, true),
+            FULL_ENC_CTX
+        );
+        assert_eq!(tail_enc_ctx(FRAMES_PER_CHUNK, false, false), FULL_ENC_CTX);
+    }
+
+    #[test]
+    fn tail_enc_ctx_first_window_is_never_truncated() {
+        // The first window (is_first == true) carries the bulk of a short clip's
+        // real audio; truncating it changes the main transcript. It must always
+        // get the full ctx, even for a tiny real_frames and truncation enabled —
+        // this is what makes the golden byte-gate hold for single-window clips.
+        for &rf in &[0usize, 24, 600, 1100, 2999] {
+            assert_eq!(
+                tail_enc_ctx(rf, true, true),
+                FULL_ENC_CTX,
+                "first window must never truncate (real_frames={rf})"
+            );
+        }
+    }
+
+    #[test]
+    fn tail_enc_ctx_disabled_is_always_full() {
+        // Kill switch off ⇒ every short window still gets the full ctx (proves
+        // byte-identical fallback to the pre-optimization path), first or not.
+        for &rf in &[0usize, 1, 24, 240, 1500, 2999] {
+            assert_eq!(
+                tail_enc_ctx(rf, false, false),
+                FULL_ENC_CTX,
+                "disabled must return full ctx for real_frames={rf}"
+            );
+            assert_eq!(tail_enc_ctx(rf, true, false), FULL_ENC_CTX);
+        }
+    }
+
+    #[test]
+    fn tail_enc_ctx_truncates_short_non_first_windows() {
+        // 0.24 s of audio (24 mel frames) ⇒ ((24+1)/2)=12, clamped up to the
+        // MIN_ENC_CTX floor of 64. This is the perf hotspot #1 case.
+        assert_eq!(tail_enc_ctx(24, false, true), MIN_ENC_CTX);
+        // A mid-length tail: 600 frames (6 s) ⇒ (601/2)=300 ctx, within band.
+        assert_eq!(tail_enc_ctx(600, false, true), 300);
+        // Just under a full window: 2998 frames ⇒ (2999/2)=1499 ctx.
+        assert_eq!(tail_enc_ctx(2998, false, true), 1499);
+        // The +1 rounds up so the ctx covers the last (odd) frame: 599 → 300.
+        assert_eq!(tail_enc_ctx(599, false, true), 300);
+    }
+
+    #[test]
+    fn tail_enc_ctx_respects_min_floor() {
+        // Any non-first window at or below 2*MIN_ENC_CTX real frames clamps to
+        // the floor.
+        assert_eq!(tail_enc_ctx(0, false, true), MIN_ENC_CTX);
+        assert_eq!(tail_enc_ctx(1, false, true), MIN_ENC_CTX);
+        assert_eq!(tail_enc_ctx(2 * MIN_ENC_CTX, false, true), MIN_ENC_CTX);
+        // One above the floor boundary starts climbing: 2*64+1=129 → (130/2)=65.
+        assert_eq!(
+            tail_enc_ctx(2 * MIN_ENC_CTX + 1, false, true),
+            MIN_ENC_CTX + 1
+        );
+    }
+
+    #[test]
+    fn tail_enc_ctx_mel_frames_always_valid_for_encoder() {
+        // The derived mel-frame count (2*enc_ctx) must always be a positive even
+        // number ≤ FRAMES_PER_CHUNK so encoder::forward accepts it, for both
+        // first and non-first windows.
+        for &is_first in &[false, true] {
+            for rf in 0..=FRAMES_PER_CHUNK {
+                let ctx = tail_enc_ctx(rf, is_first, true);
+                let mel_frames = ctx * 2;
+                assert!(
+                    mel_frames > 0
+                        && mel_frames.is_multiple_of(2)
+                        && mel_frames <= FRAMES_PER_CHUNK,
+                    "mel_frames {mel_frames} invalid for real_frames={rf} is_first={is_first}"
+                );
+            }
+        }
     }
 
     #[test]

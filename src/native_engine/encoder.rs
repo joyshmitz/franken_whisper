@@ -304,11 +304,15 @@ fn positive(value: i32, what: &str) -> FwResult<usize> {
 
 /// Run the whisper audio encoder over one 30 s mel window.
 ///
-/// `mel_window` must be the model's mel-major spectrogram for a single 30 s
-/// window — exactly `[n_mels, FRAMES_PER_CHUNK = 3000]` (slice with
-/// [`super::mel::chunk_frames`]). The output is the `[n_ctx, n_state]` acoustic
-/// embedding (e.g. `[1500, 384]` for tiny.en), reused across every decoder
-/// token of this window.
+/// `mel_window` must be the model's mel-major spectrogram for a single window:
+/// `[n_mels, n_frames]` (slice with [`super::mel::chunk_frames`]). `n_frames`
+/// is normally the full `FRAMES_PER_CHUNK = 3000` (30 s); it may also be a
+/// **smaller even** count `2*enc_ctx` for the **tail-window truncation**
+/// optimization (mirrors whisper.cpp's `audio_ctx` / `-ac` feature, where the
+/// conv input is `2*n_ctx` wide with `n_ctx = exp_n_audio_ctx`; whisper.cpp
+/// 1982/1995). The output is the `[n_ctx, n_state]` acoustic embedding (e.g.
+/// `[1500, 384]` for a full tiny.en window, or `[enc_ctx, 384]` for a
+/// truncated tail), reused across every decoder token of this window.
 ///
 /// `n_threads_hint` is currently informational: the heavy matmuls run on
 /// FrankenTorch's internally-rayon-parallel sgemm via [`nn`], which manages
@@ -321,9 +325,11 @@ fn positive(value: i32, what: &str) -> FwResult<usize> {
 /// remaining layers.
 ///
 /// # Errors
-/// - [`FwError::InvalidRequest`] if the mel channel count or frame count does
-///   not match the model (`n_mels`, or non-`3000` frames), or if any inner op
-///   rejects a shape.
+/// - [`FwError::InvalidRequest`] if the mel channel count does not match the
+///   model (`n_mels`), the frame count is not a positive even number
+///   `≤ 2 * n_audio_ctx` (the conv stem halves time, so an odd count would
+///   produce a fractional ctx and a count `> 2*n_ctx` would overrun the
+///   positional embedding), or if any inner op rejects a shape.
 /// - Whatever error `checkpoint` returns (e.g. [`FwError::Cancelled`]).
 pub fn forward(
     w: &EncoderWeights,
@@ -339,11 +345,20 @@ pub fn forward(
             mel_window.n_mel, w.n_mels
         )));
     }
-    let expected_frames = super::mel::FRAMES_PER_CHUNK;
-    if mel_window.n_frames != expected_frames {
+    // The conv stem (stride-2 conv2) halves time, so the frame count must be
+    // even and at most `2 * n_audio_ctx`. The full-window case is the common
+    // `2 * 1500 = 3000`; a smaller even count is the tail-window truncation
+    // (whisper.cpp `audio_ctx`: conv input is `2*n_ctx` wide, 1982/1995). An
+    // odd count would yield a fractional ctx; an oversized one would overrun
+    // the positional embedding (re-checked after conv below).
+    let max_frames = 2 * w.n_ctx;
+    if mel_window.n_frames == 0
+        || !mel_window.n_frames.is_multiple_of(2)
+        || mel_window.n_frames > max_frames
+    {
         return Err(FwError::InvalidRequest(format!(
-            "encoder: mel window has {} frames, expected exactly {expected_frames} \
-             (use mel::chunk_frames)",
+            "encoder: mel window has {} frames, expected a positive even count \
+             ≤ {max_frames} (= 2*n_audio_ctx; use mel::chunk_frames)",
             mel_window.n_frames
         )));
     }
@@ -611,11 +626,39 @@ mod tests {
     }
 
     #[test]
-    fn wrong_frame_count_is_rejected() {
+    fn odd_or_oversized_frame_count_is_rejected() {
         let w = synthetic_weights(mel::FRAMES_PER_CHUNK / 2);
-        let melw = synthetic_mel(1, w.n_mels, 24);
-        let res = forward(&w, &melw, 1, &noop_checkpoint);
-        assert!(res.is_err(), "non-3000-frame mel must be rejected");
+        // Odd frame count: the stride-2 conv would yield a fractional ctx.
+        let odd = synthetic_mel(1, w.n_mels, 23);
+        assert!(
+            forward(&w, &odd, 1, &noop_checkpoint).is_err(),
+            "odd frame count must be rejected"
+        );
+        // Oversized: more than 2*n_ctx frames would overrun the pos embedding.
+        let big = synthetic_mel(1, w.n_mels, mel::FRAMES_PER_CHUNK + 2);
+        assert!(
+            forward(&w, &big, 1, &noop_checkpoint).is_err(),
+            "frame count > 2*n_audio_ctx must be rejected"
+        );
+        // Zero frames: rejected.
+        let zero = synthetic_mel(1, w.n_mels, 0);
+        assert!(
+            forward(&w, &zero, 1, &noop_checkpoint).is_err(),
+            "zero frame count must be rejected"
+        );
+    }
+
+    #[test]
+    fn truncated_even_frame_window_is_accepted() {
+        // Tail-window truncation: a smaller even frame count yields ctx = n/2
+        // rows, mirroring whisper.cpp's audio_ctx feature. 256-frame window →
+        // 128 ctx rows.
+        let w = synthetic_weights(mel::FRAMES_PER_CHUNK / 2);
+        let melw = synthetic_mel(1, w.n_mels, 256);
+        let out = forward(&w, &melw, 1, &noop_checkpoint).expect("truncated forward");
+        assert_eq!(out.rows, 128, "ctx = frames/2 for a truncated window");
+        assert_eq!(out.cols, w.n_state);
+        assert!(out.data.iter().all(|v| v.is_finite()), "output finite");
     }
 
     #[test]
