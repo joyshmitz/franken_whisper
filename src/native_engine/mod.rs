@@ -193,7 +193,11 @@ pub(crate) fn perf_spans_enabled() -> bool {
 pub(crate) fn perf_span(span: &str, ms: f64, extra: &str) {
     if perf_spans_enabled() {
         static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        let at_ms = T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1e3;
+        let at_ms = T0
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_secs_f64()
+            * 1e3;
         let comma = if extra.is_empty() { "" } else { "," };
         eprintln!(
             "{{\"event\":\"perf.profile.span_summary\",\"span\":\"{span}\",\"cumulative_ms\":{ms:.2},\"at_ms\":{at_ms:.0}{comma}{extra}}}"
@@ -1041,9 +1045,29 @@ mod tests {
             "two loads of the same path must share one Arc"
         );
 
+        // `load` spawns a background warm thread holding an `Arc` clone to
+        // compute the version tag (SHA-256 of the file). Force that `OnceLock`
+        // init to complete now so the warm thread's `version_tag()` returns
+        // immediately and drops its clone promptly; without this the thread may
+        // still be hashing when we drop our refs, keeping the `Weak` alive.
+        let _ = a.version_tag();
+
         let weak = Arc::downgrade(&a);
         drop(a);
         drop(b);
+
+        // The warm thread may not have dropped its `Arc` clone yet even after
+        // `version_tag()` returned to us (it still has to return from its own
+        // call and unwind). Poll with a deadline for the last strong ref to
+        // drop so the `Weak` expires before we assert the reload is fresh.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while weak.upgrade().is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "all strong refs dropped => Weak must expire (memory freed) within 5s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(
             weak.upgrade().is_none(),
             "all strong refs dropped => Weak must expire (memory freed)"

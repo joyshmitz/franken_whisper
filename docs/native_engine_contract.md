@@ -313,11 +313,66 @@ Each native engine should have:
 3. **Shadow-run integration test**: Side-by-side execution with bridge adapter on real audio.
 4. **Replay determinism test**: 3 identical runs produce identical `output_payload_hash`.
 
-## 8. References
+## 8. Performance
+
+### 8.1 Measured RTFs (reference hardware: Apple M4 Pro)
+
+Real-Time Factor (RTF) = wall-clock / audio-duration; **< 1.0 means faster
+than realtime**. Measured on this host (Apple M4 Pro, 14 cores = 10P+4E,
+64 GB, macOS 26.2), `release-perf` profile (opt3 + thin-LTO), sole-stage
+native execution, 8 worker threads, jfk.wav (11 s), warm page cache.
+Final interleaved hyperfine vs `whisper-cli` on the same host:
+
+| Model | Native wall | Native RTF | whisper-cli CPU | Comparison |
+|-------|-------------|------------|-----------------|------------|
+| tiny.en | **475 ms ± 13** | **0.043** | 1105 ms ± 21 | native **2.33× faster** |
+| large-v3-turbo | **9.731 s ± 0.272** | **0.88** | 9.585 s ± 0.224 | **parity** at lower user CPU (53.8 s vs 65.4 s); whisper-cli Metal 2.169 s |
+
+Cumulative speedup over the optimization arc (release profile): tiny.en
+1.57 s → 0.475 s (**3.3×**); large-v3-turbo 44.6 s → 9.73 s (**4.6×**). Full
+lever-by-lever breakdown and evidence-backed abandons:
+`tests/artifacts/perf/20260605T0218Z-native-engine-baseline/RESULTS.md`.
+
+> Profile note: the `release` profile ships `opt-level = "z"`, which costs
+> ~26% on large-v3-turbo vs `release-perf`. A `dist`/`release` profile
+> alignment is a tracked follow-up (bd-2th6), not yet applied.
+
+### 8.2 Profiling spans
+
+Set `FRANKEN_WHISPER_PERF_SPANS=1` to emit per-stage timing spans
+(`model_parse`, `model_weights`, `encoder_window`, `decode_loop`,
+`version_tag`, …) on stderr as NDJSON, for the profile-driven optimization
+loop. Off by default (zero overhead — a single `OnceLock`-cached env read).
+
+### 8.3 Tail-truncation kill switch
+
+`FRANKEN_WHISPER_NATIVE_TAIL_TRUNCATE=0` (or `false`, read once via
+`OnceLock`) disables the default-on tail-window encoder-context truncation,
+restoring exact full-pad (3000-frame / 1500-ctx) behavior — verified
+byte-identical to the goldens for both tiny.en and large-v3-turbo. The
+lever mirrors whisper.cpp's sanctioned `audio_ctx` / `-ac` optimization,
+never touches the content-bearing first window, and confines its output
+divergence to spurious trailing-silence hallucinations on tail windows.
+Full accuracy/precision analysis: `DISCREPANCIES.md` **DISC-004**.
+
+### 8.4 Promotion-criteria status (RTF gate)
+
+Per bd-2th6 acceptance, against the rollout gates in §5:
+
+| Criterion | Target | Measured (this host) | Status |
+|-----------|--------|----------------------|--------|
+| tiny.en RTF | < 1.0 on ≥ 8 cores | **0.043** | **EXCEEDED** |
+| large-v3-turbo | functional e2e, no OOM on 32 GB | RTF **0.88** (now < 1.0) | **MET** (and faster than realtime) |
+| criterion benches (`benches/native_engine_bench.rs`) | committed | not yet written | **OUTSTANDING** |
+| clippy | no regressions | clean | MET |
+
+## 9. References
 
 - `docs/engine_compatibility_spec.md` — Segment invariants and enforcement points
 - `docs/conformance-contract.md` — Conformance axes and parity definitions
 - `docs/benchmark_regression_policy.md` — Performance regression thresholds
+- `tests/artifacts/perf/20260605T0218Z-native-engine-baseline/RESULTS.md` — Optimization arc results + interleaved benchmark numbers
+- `DISCREPANCIES.md` — DISC-004 tail-window truncation analysis
 - `src/conformance.rs` — `CANONICAL_TIMESTAMP_TOLERANCE_SEC`, validation and comparison functions
 - `tests/conformance_harness.rs` — Fixture-driven conformance test infrastructure
 - `tests/replay_envelope.rs` — Replay determinism test infrastructure
