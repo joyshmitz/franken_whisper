@@ -14,7 +14,7 @@
 
 </div>
 
-**Agent-first Rust ASR stack with a real in-process pure-Rust Whisper engine (no FFI, no Python, no subprocess — and on CPU it beats whisper.cpp on small models), adaptive Bayesian backend routing, real-time NDJSON streaming, DTW word timestamps, and SQLite-backed run history.**
+**Agent-first Rust ASR stack with a real in-process pure-Rust Whisper engine (no FFI, no Python, no subprocess — and on CPU it beats whisper.cpp 2.33× on tiny.en, at parity on large-v3-turbo), adaptive Bayesian backend routing, real-time NDJSON streaming, DTW word timestamps, and SQLite-backed run history.**
 
 <div align="center">
 <h3>Install in one line</h3>
@@ -27,7 +27,7 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/franken_whisper/
 
 </div>
 
-> **v0.2.0 — the native engine is real, and it is fast.** The in-process pure-Rust Whisper engine (built on [FrankenTorch](https://github.com/Dicklesworthstone/frankentorch) kernels, `#![forbid(unsafe_code)]` in-crate) now transcribes **2.33× faster than whisper.cpp on tiny.en and at parity on large-v3-turbo** — CPU vs CPU, same machine (Apple M4 Pro, interleaved runs), while using ~18% less total CPU on the large model. Native-vs-whisper.cpp conformance on the reference fixture: **WER 0.0000**.
+> **v0.2.0 — the native engine is real, and it is fast.** The in-process pure-Rust Whisper engine (built on [FrankenTorch](https://github.com/Dicklesworthstone/frankentorch) kernels, `#![forbid(unsafe_code)]` in-crate) now transcribes **2.33× faster than whisper.cpp on tiny.en and at parity on large-v3-turbo** — CPU vs CPU, same machine (Apple M4 Pro, interleaved runs), while using about 18% less user CPU on the large model (53.8 s vs 65.4 s). Native-vs-whisper.cpp conformance on the reference fixture: **WER 0.0000**.
 >
 > | Model | franken_whisper native (CPU) | whisper.cpp (CPU) | |
 > |---|---|---|---|
@@ -288,7 +288,7 @@ The release profile is aggressively optimized for distribution: `opt-level = "z"
 
 - **Rust nightly** (2024 edition; pinned via `rust-toolchain.toml`)
 - **ffmpeg** (optional): only needed for video files, exotic codecs `symphonia` cannot decode, and live microphone capture. On Linux x86_64 it is auto-provisioned on first use unless `FRANKEN_WHISPER_AUTO_PROVISION_FFMPEG=0`.
-- **A Whisper model file** for the built-in native engine (e.g. `ggml-tiny.en.bin` / `ggml-large-v3-turbo.bin` from [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp)); place it in `$FRANKEN_WHISPER_MODEL_DIR`, `~/.cache/franken_whisper/models`, or `~/models/whisper` — `scripts/fetch_test_models.sh` fetches a pinned `tiny.en`. With a model present, **no external backend binaries are required**: set `FRANKEN_WHISPER_NATIVE_EXECUTION=1` to prefer the native engine (it also serves as automatic recovery when no bridge binary exists).
+- **A Whisper model file** for the built-in native engine (e.g. `ggml-tiny.en.bin` / `ggml-large-v3-turbo.bin` from [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp)); place it in `$FRANKEN_WHISPER_MODEL_DIR`, `~/.cache/franken_whisper/models`, or `~/models/whisper` — `scripts/fetch_test_models.sh` fetches a pinned `tiny.en`. With a model present, **no external backend binaries are required**: set `FRANKEN_WHISPER_NATIVE_EXECUTION=1` to prefer the native engine; even without that flag, the default-on recovery path runs it automatically whenever no bridge binary is usable.
 - **Bridge backend binaries** (optional alternates; the Bayesian router arbitrates):
   - `whisper-cli` (from whisper.cpp); override via `FRANKEN_WHISPER_WHISPER_CPP_BIN`
   - `insanely-fast-whisper` (Python entry point); override via `FRANKEN_WHISPER_INSANELY_FAST_BIN`
@@ -2543,7 +2543,7 @@ With the aggressive release profile (`opt-level = "z"`, LTO, stripped):
 
 ## Testing
 
-~107,500 lines of Rust with **3,660+ tests** across unit, integration, conformance, metamorphic, and doc-test suites.
+Over 100,000 lines of Rust with **3,100+ tests** across unit, integration, conformance, metamorphic, and doc-test suites (the count *dropped* in v0.2.0 — the mock-pilot test suites were deleted along with the mocks they tested).
 
 ```bash
 # run all library tests
@@ -2612,7 +2612,7 @@ The Rust toolchain channel used in CI is kept in sync with `rust-toolchain.toml`
 
 ### `FW-CMD-MISSING: whisper-cli not found`
 
-No backend binary is on your `PATH`. Install at least one:
+No backend binary is on your `PATH` and no native-engine model file resolved. Either drop a ggml model where the native engine finds it (`$FRANKEN_WHISPER_MODEL_DIR`, `~/.cache/franken_whisper/models`, `~/models/whisper` — `scripts/fetch_test_models.sh` fetches a pinned tiny.en), or install a bridge binary:
 
 ```bash
 # whisper.cpp
@@ -2696,7 +2696,7 @@ rm .franken_whisper/locks/sync.lock
 
 ## Limitations
 
-- **Backend binaries required.** `franken_whisper` orchestrates external ASR engines (or in-process native pilots when promoted). You need at least one of `whisper-cli`, `insanely-fast-whisper`, or `whisper-diarization` installed.
+- **A backend binary or a model file required.** Transcription needs either a bridge binary (`whisper-cli`, `insanely-fast-whisper`, or `whisper-diarization`) or a ggml model file for the in-process native engine (which then needs no external binaries at all). With neither present, runs fail with `FW-BACKEND-UNAVAILABLE`.
 - **ffmpeg only needed for video / exotic formats / mic.** The built-in Rust decoder handles common audio formats natively. ffmpeg is used as an automatic fallback for video files and exotic codecs. Microphone capture always depends on ffmpeg.
 - **Path-dependent crates.** `fsqlite` / `fsqlite-types` (and the optional `ftui` / `frankentorch` / `frankenjax` crates) are still local path dependencies. `franken_whisper` is therefore not currently published as a standalone crate on crates.io. The core infrastructure crates (`asupersync`, `franken-kernel`, `franken-evidence`, `franken-decision`) are on crates.io.
 - **Native engines under rollout governance.** Native Rust engine implementations are conformance-gated pilots. They execute in-process only when `FRANKEN_WHISPER_NATIVE_EXECUTION=1` and the rollout stage is `primary` or `sole`; otherwise bridge adapters remain active.
@@ -2709,7 +2709,7 @@ rm .franken_whisper/locks/sync.lock
 ## FAQ
 
 **Q: Do I need all three backends installed?**
-No. `franken_whisper` works with any single backend. The `auto` router will use whatever is available. You can also force a specific backend with `--backend whisper_cpp`.
+No. `franken_whisper` works with any single backend — and as of v0.2.0, with **no** bridge backend at all: drop a ggml model file in `$FRANKEN_WHISPER_MODEL_DIR` (or `~/.cache/franken_whisper/models`) and the in-process native engine transcribes by itself. The `auto` router will use whatever is available. You can also force a specific backend with `--backend whisper_cpp`.
 
 **Q: What audio formats are supported?**
 Common audio formats (MP3, AAC, FLAC, WAV, OGG, Vorbis, ALAC) are decoded natively by the built-in Rust decoder with zero external dependencies. Video files and exotic codecs (AC3, DTS, Opus-in-MKV) fall back to ffmpeg automatically.

@@ -317,7 +317,14 @@ while [ $# -gt 0 ]; do
         --version=*) VERSION="${1#*=}"; shift;;
         --dest) DEST="$2"; shift 2;;
         --dest=*) DEST="${1#*=}"; shift;;
-        --system) SYSTEM=1; DEST="/usr/local/bin"; shift;;
+        --system)
+            SYSTEM=1; DEST="/usr/local/bin"
+            # Keep the version marker beside the system binary (not under the
+            # invoking user's HOME) so a later `sudo ... --uninstall` finds and
+            # removes it regardless of which user's HOME sudo preserves.
+            VERSION_MARKER_DIR="/usr/local/share/franken_whisper"
+            VERSION_MARKER="$VERSION_MARKER_DIR/.installed-version"
+            shift;;
         --easy-mode) EASY=1; shift;;
         --verify) VERIFY=1; shift;;
         --force) FORCE_INSTALL=1; shift;;
@@ -528,7 +535,10 @@ trap cleanup EXIT
 # Preflight checks
 # ============================================================================
 check_disk_space() {
-    local min_kb=51200   # ~50MB headroom for the archive + extracted binary
+    # ~50MB headroom for the archive + extracted binary. Source builds need
+    # far more (3 repo clones + crate cache + release target: several GB) —
+    # build_from_source emits its own explicit disk warning before cloning.
+    local min_kb=51200
     # Walk up to the nearest existing ancestor so df has a real path to stat.
     local path="$DEST"
     while [ -n "$path" ] && [ ! -d "$path" ]; do
@@ -790,6 +800,10 @@ install_offline() {
 ensure_rust() {
     command -v cargo >/dev/null 2>&1 && return 0
     log_step "Installing Rust via rustup..."
+    log_warn "cargo not found: about to install Rust via the official rustup.rs"
+    log_warn "bootstrap (a second remote script, auto-accepted). Ctrl-C now to"
+    log_warn "abort and install Rust yourself if you prefer."
+    sleep 3
     curl -fsSL "${PROXY_ARGS[@]}" https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
     export PATH="$HOME/.cargo/bin:$PATH"
     # shellcheck disable=SC1091  # rustup-generated env file not present at lint time
@@ -799,6 +813,9 @@ ensure_rust() {
 
 build_from_source() {
     log_step "Building from source..."
+    log_warn "Source builds clone three repositories and compile a release"
+    log_warn "binary: expect several GB of disk use (crate cache + target dir)"
+    log_warn "and multiple minutes of compile time."
     ensure_rust || die "Rust (cargo) is required for source builds and could not be installed"
 
     local build_root="$TMP/src"
@@ -881,7 +898,13 @@ download_release() {
         else
             local checksums_url="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/checksums-sha256.txt"
             if download_file "$checksums_url" "$TMP/checksums-sha256.txt"; then
-                expected=$(grep -F "$archive_name" "$TMP/checksums-sha256.txt" 2>/dev/null | awk '{print $1}' | head -1)
+                # Anchor the match to a line ENDING in the exact asset name so a
+                # sidecar entry (e.g. "<asset>.sig") can never shadow the real
+                # checksum, and `|| true` keeps a no-match grep from killing the
+                # script under `set -euo pipefail` (we fall through to the
+                # honest "checksum not available" warning instead).
+                expected=$(awk -v name="$archive_name" '$2 == name { print $1; exit }' \
+                    "$TMP/checksums-sha256.txt" 2>/dev/null || true)
             fi
         fi
 

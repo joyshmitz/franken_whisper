@@ -958,7 +958,16 @@ pub fn transcribe_samples(
             &format!("\"tokens\":{}", decoded.len()),
         );
         // and compute a separate `seek_advance_cs` for the window step.
+        //
+        // Upstream guard (whisper.cpp 7749-7751): when the EOT-forcing budget
+        // (fix #6) cut the window short — i.e. the decode ran PAST max_tokens
+        // and only closed because the filter masked every text token — the
+        // trailing timestamp is artificial, so it must NOT trigger the
+        // whole-chunk skip below. Mirrors `max_tokens_timestamp_ending`,
+        // gated on timestamps being enabled like the filter itself.
+        let max_tokens_ts_ending = params.timestamps && decoded.len() > max_tokens;
         let single_ts_ending = decoded.len() > 1
+            && !max_tokens_ts_ending
             && decoded[decoded.len() - 2] < tk.timestamp_begin
             && decoded[decoded.len() - 1] > tk.timestamp_begin;
         let seek_advance_cs = if single_ts_ending {

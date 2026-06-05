@@ -94,7 +94,7 @@ lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 strip = false
-panic = "unwind"
+panic = "unwind" # deliberate override of release's abort: scoped-thread panics must unwind for clean bench/profiler teardown
 
 [profile.release]
 opt-level = "z"
