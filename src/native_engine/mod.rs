@@ -486,6 +486,22 @@ impl NativeWhisperModel {
         // unbounded with stale entries for models that are never reloaded.
         cache.retain(|_, w| w.strong_count() > 0);
         cache.insert(canonical, Arc::downgrade(&model));
+        drop(guard);
+
+        // Warm the version tag on a background thread: the SHA-256 of a
+        // multi-GB model file costs seconds, and every successful run needs it
+        // for `raw_output` / replay envelopes. Hashing here overlaps with
+        // encode/decode instead of stalling output assembly; `OnceLock`
+        // blocks any concurrent `version_tag()` caller until the value is
+        // ready, so observable behavior (the tag itself) is unchanged. The
+        // clone keeps the model alive until the hash finishes (bounded by
+        // hash time; documented tradeoff).
+        let warm = Arc::clone(&model);
+        let _ = std::thread::Builder::new()
+            .name("fw-model-hash".into())
+            .spawn(move || {
+                let _ = warm.version_tag();
+            });
         Ok(model)
     }
 
