@@ -100,4 +100,80 @@ decision, not a perf-loop edit.
 - Tail-truncation accuracy/precision analysis + kill switch: `DISCREPANCIES.md`
   **DISC-004**.
 - Promotion-criteria status: `docs/native_engine_contract.md` §Performance.
-- Tracking bead: **bd-2th6** (criterion benches still outstanding — see report).
+- Tracking bead: **bd-2th6** (criterion benches landed in Round 2, pass 1 —
+  see §6 below).
+
+---
+
+## 6. Round 2 — f16 compute + cross-repo sgemm + decoder attribution
+
+Round 1 took the in-scope levers to convergence (large 9.73 s, tiny 0.475 s).
+Round 2 (commits `a236433`, `8abea12`, `c703035`, `0a5c939`, + the
+franken-decision-0.3.2 migration / landing commit) reopened the three
+authorized frontiers — f16 weight traffic, the encoder sgemm, and the ft-side
+microkernel — and harvested the one that paid off (decoder f16 compute, now the
+production default) while definitively rejecting the rest with measured proof.
+
+Measurement discipline unchanged from Round 1: interleaved A/B vs a pre-change
+REF binary, min/p25 of ≥6 pairs, host under concurrent agent load,
+`release-perf` profile, `FRANKEN_WHISPER_PERF_SPANS=1` for attribution.
+
+### Pass-by-pass
+
+| Pass | Lever | Result | Disposition |
+|------|-------|--------|-------------|
+| 1 | Criterion bench substrate (`benches/native_engine_bench.rs`): mel 30 s, encoder window (tiny+large), decoder token step (tiny+large), logits GEMV, e2e tiny jfk; saved baselines + `[[bench]]` registration | Baseline **round2-pre** saved: mel 54.1 ms; enc tiny 123 ms / large 5.71 s; tok-step tiny 7.2 ms / large 43 ms; logits_gemv_large 8.96 ms; e2e tiny 382 ms | Measurement infra landed (bd-2th6 deliverable) |
+| 2 | f16-resident decoder compute, **fused** dequant-in-GEMV (per-element widen inside the dot loop) | Micro WIN (tok-step large −54 %, logits −10 %) but **e2e REGRESSION** (tiny +27 %, large +12 %): the per-element scalar widen serialized the FMA and blocked autovectorization | Built, conformance-clean, shipped **default OFF** as opt-in env switch; root cause carried into pass 3 |
+| 3 | **Vectorized** f16 dequant → flip decoder f16 to **default ON**. `WeightMat::F16` now `Vec<Float16>`; bulk-SIMD `convert_to_f32_slice` row-dequant into reused scratch then 8-lane `dot8` | Dequant **13.9 → 56.2 GB/s** (4×, NEON fp16 slice path); isolated f16 GEMV [1280²] ~1080 → ~205 µs (5.3×). **e2e large −11.5 % min / −8.6 % p25** (was +12 % regression), tiny within noise (−0.3 %/−1.6 %). Conformance: byte-exact goldens both models ON+OFF. **Encoder f16 panels prototyped then SKIPPED** — pure overhead (+0.6 %…+6.5 %) on every large encoder matmul: f16 wins only in the GEMV/bandwidth regime (decoder M=1), not GEMM (encoder M=1500, compute-bound) | **DEFAULT FLIPPED ON**; env var becomes opt-OUT kill switch; encoder frontier closed |
+| 4 | ft-side sgemm overhead (CROSS-REPO `frankentorch` ft-kernel-cpu): output-buffer reuse + col-parallel/block-size tuning on M4 Pro | Whisper-large shapes all take the row-split (TALL) path: col-parallel **inapplicable**; block-size sweep **REGRESSES** (oversubscription re-streams the 26 MB B panel, mlp_fc +8.7 %/+16.6 %); `_into` output reuse **NEUTRAL** (alloc is calloc-lazy, sub-ms vs 8–36 ms compute-bound GEMM). Consumer wiring (`EncoderScratch`) BIT-EXACT but **no robust e2e win** (criterion CI pure noise) → reverted | **ft-side rejected** with bit-exact proof. Retained additive `matmul_tensor_contiguous_f32_into` API + whisper benches (ft `4af78e91`); rejection artifact ft `43d0a7b0`, dir `tests/artifacts/perf/20260606T030959Z-m4pro-whisper-sgemm/` (+ `701ca1c4`). No franken_whisper consumer code landed |
+| 5 | Criterion attribution of the decoder token step + logits wider-parallelism | Per-sub-part attribution table delivered (see below). Landed lever: **size-gated logits GEMV widening** (8→12 workers for out ≥ 16384, i.e. the [51866×1280] vocab product only) → logits_gemv_large **−1.9 %…−3.9 %** (p<0.05, bit-identical disjoint row bands). REJECTED with measured proof: cross_attn f16 K/V (already at parallel floor — serial 6.87 ms vs parallel 1.59 ms, 4.3×; f16-OFF cross_attn 1.76 ms ≈ f16-ON 1.59 ms, dtype nearly irrelevant), cross_attn wider head-workers (neutral), per-token-Linear widening (+29 % — too few rows/band) | Logits widening landed; bandwidth-bound-cross-attn thesis measured-and-rejected |
+
+### Decoder attribution table (large-v3-turbo, f16 ON = default, real jfk-derived state, 200 steps)
+
+| Sub-part | ms/tok | % | Note |
+|----------|--------|---|------|
+| mlp_fc_gelu_proj | 2.38 | 23.0 % | already f16; compute/gelu-bound |
+| logits_gemv | 2.13 | 20.6 % | ← attacked (size-gated 12-worker widening) |
+| cross_attn | 1.59 | 15.4 % | at parallel floor; f32 K/V read NOT the bottleneck |
+| self_qkv_proj | 1.55 | 15.0 % | already f16; 3× threaded GEMV |
+| self_attn | 1.00 | 9.6 % | KV-cache attention; grows w/ depth |
+| cross_q_proj | 0.55 | 5.4 % | |
+| cross_out_proj | 0.55 | 5.3 % | |
+| self_out_proj | 0.55 | 5.3 % | |
+| {self,cross,mlp}_ln+clone / embed / final_ln | ~0.012 / ~0.003 | — | negligible |
+
+f32 path (f16 OFF) for contrast: **38.9 ms/tok** — mlp 19.3 ms (48.6 %), logits
+6.9 ms, projections 2.4–3.3 ms each — i.e. pass-3 f16 already crushed every
+weight-bound Linear (mlp 8×, logits 3.3×).
+
+### Current decoder floors (f16 default ON)
+
+| Path | ms/tok |
+|------|--------|
+| large-v3-turbo (f16 ON, production) | **10.3** |
+| large-v3-turbo (f16 OFF, contrast) | 38.9 |
+| tiny.en (f16 ON) | **5.2** |
+
+### Convergence statement
+
+Every remaining decoder sub-part now sits at its parallel/compute floor:
+mlp_fc and self_qkv are already f16 and compute-bound; cross_attn is at its
+head-parallel floor (proven by the 4.3× serial-vs-parallel diagnostic, and by
+f16-OFF cross_attn being within 11 % of f16-ON — the K/V dtype is not the
+lever); logits is the one sub-part that still had daylight to the
+bandwidth thesis, now harvested. The encoder is compute-bound GEMM where
+halving resident weight bytes buys no compute time (f16 panels measured pure
+overhead). The **only frontier left is a GEMM microkernel rewrite** of the
+ft-kernel-cpu sgemm — and that has already been rejected by frankentorch's own
+packed-panel / Strassen pilots (`20260603T18*`), so it is out of reach for this
+loop. Round 2 is therefore converged: the decoder f16 default-ON switch is the
+net win (large e2e −11.5 %), with a small bit-identical logits widening on top.
+
+### Conformance / golden gate (Round 2 landing)
+
+f16 default ON is the production path. Golden extract+diff (`examples/native_ab`)
+vs `/tmp/fw_golden/{tiny.en,large-v3-turbo}.json`: **byte-exact on both models**
+(sha256 identical — `7a45577a…` tiny, `c6702b3a…` large). Full lib suite
+**3086/3086** green; integration suites native_engine_e2e 6, no_canned_phrases 6,
+conformance_comparator 26, cli_integration 82 — all green. fmt --check clean,
+clippy --all-targets -D warnings clean.

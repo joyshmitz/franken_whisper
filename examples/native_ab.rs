@@ -76,8 +76,8 @@ fn main() {
     push_json_str(&mut json, &transcript);
     json.push_str(",\n \"segments\": [\n");
     for (i, s) in out.segments.iter().enumerate() {
-        let start = round2(s.start_sec.unwrap_or(0.0));
-        let end = round2(s.end_sec.unwrap_or(0.0));
+        let start = fmt_secs(round2(s.start_sec.unwrap_or(0.0)));
+        let end = fmt_secs(round2(s.end_sec.unwrap_or(0.0)));
         json.push_str("  [\n");
         json.push_str(&format!("   {start},\n   {end},\n   "));
         push_json_str(&mut json, s.text.trim());
@@ -93,6 +93,25 @@ fn main() {
 
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
+}
+
+/// Render a seconds value with at least one fractional digit so whole numbers
+/// serialize as `0.0` (matching the golden files) rather than `0`. Rust's
+/// default `f64` Display drops the fraction for integral values; the golden
+/// gate is byte-exact, so we restore the trailing `.0` here.
+fn fmt_secs(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{v:.1}")
+    } else {
+        // Trim to the shortest representation that round-trips at 2-decimal
+        // precision, matching `round2` (e.g. 10.4, 8.99, 10.99).
+        let s = format!("{v}");
+        if s.contains('.') {
+            s
+        } else {
+            format!("{v:.1}")
+        }
+    }
 }
 
 fn push_json_str(out: &mut String, s: &str) {

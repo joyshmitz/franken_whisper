@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use franken_decision::{
-    DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior,
-    evaluate as decision_evaluate,
+    DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior, UpdatePosteriorError,
+    ValidationError, evaluate as decision_evaluate,
 };
 use franken_kernel::{DecisionId, TraceId};
 use serde::{Deserialize, Serialize};
@@ -2332,10 +2332,32 @@ impl DecisionContract for BackendSelectionContract {
         &self.losses
     }
 
-    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
-        let mut likelihoods = vec![0.1; 3];
+    fn update_posterior(
+        &self,
+        posterior: &mut Posterior,
+        observation: usize,
+    ) -> Result<(), UpdatePosteriorError> {
+        // Fail-closed per the franken-decision 0.3.2 contract: refuse a
+        // posterior whose length disagrees with the state space, or an
+        // observation index outside the state space, leaving `posterior`
+        // unchanged so the caller can fall back without observing a
+        // partially-applied update.
+        if posterior.len() != self.states.len() {
+            return Err(UpdatePosteriorError::LengthMismatch {
+                expected: self.states.len(),
+                actual: posterior.len(),
+            });
+        }
+        if observation >= self.states.len() {
+            return Err(UpdatePosteriorError::ObservationOutOfRange {
+                observation,
+                state_count: self.states.len(),
+            });
+        }
+        let mut likelihoods = vec![0.1; self.states.len()];
         likelihoods[observation] = 0.8;
         posterior.bayesian_update(&likelihoods);
+        Ok(())
     }
 
     fn choose_action(&self, posterior: &Posterior) -> usize {
@@ -2348,6 +2370,167 @@ impl DecisionContract for BackendSelectionContract {
 
     fn fallback_policy(&self) -> &FallbackPolicy {
         &self.policy
+    }
+}
+
+/// Record a lightweight routing-evidence event (e.g. a failed posterior
+/// update) into the global evidence ledger.
+///
+/// A `kind`/`detail` pair is stored as a minimal but schema-valid
+/// [`RoutingEvidenceLedgerEntry`] whose `observed_state` carries the event
+/// kind and whose `fallback_reason` carries the human-readable detail
+/// string. This keeps the evidence ledger the single audit channel for
+/// adaptive-router anomalies that do not produce a full decision outcome.
+fn record_router_evidence_event(kind: &str, detail: &str, trace_id: TraceId) {
+    let ts_ms = Utc::now().timestamp_millis() as u64;
+    let decision_random = (uuid::Uuid::new_v4().as_u128()) & 0xFFFF_FFFF_FFFF_FFFF_FFFF;
+    let decision_id = DecisionId::from_parts(ts_ms, decision_random);
+    let entry = RoutingEvidenceLedgerEntry {
+        decision_id: decision_id.to_string(),
+        trace_id: trace_id.to_string(),
+        timestamp_rfc3339: Utc::now().to_rfc3339(),
+        observed_state: kind.to_owned(),
+        chosen_action: String::new(),
+        recommended_order: Vec::new(),
+        fallback_active: true,
+        fallback_reason: Some(format!("{kind}: {detail}")),
+        posterior_snapshot: Vec::new(),
+        calibration_score: 0.0,
+        brier_score: None,
+        e_process: 0.0,
+        ci_width: 0.0,
+        adaptive_mode: false,
+        policy_id: ROUTING_POLICY_ID.to_owned(),
+        loss_matrix_hash: String::new(),
+        availability: Vec::new(),
+        duration_bucket: String::new(),
+        diarize: false,
+        actual_outcome: None,
+    };
+    if let Ok(mut guard) = ROUTER_STATE.lock() {
+        let state = guard.get_or_insert_with(RouterState::new);
+        state.record_evidence(entry);
+    }
+}
+
+/// Build a deterministic static-priority [`BackendSelectionOutcome`] when the
+/// formal decision contract fails validation (`evaluate()` returned
+/// `Err(ValidationError)`).
+///
+/// The Alien-Artifact Engineering Contract requires every adaptive controller
+/// to have a deterministic fallback: a contract-validation failure must never
+/// panic or drop a transcription request. This wires the validation failure
+/// into the same static-priority order used by `resolve_static_backend` /
+/// `auto_priority`, records the failure in the evidence ledger with the error
+/// string, and emits a `tracing::warn`. `fallback_triggered` is set so callers
+/// and downstream calibration treat this as a forced-static decision.
+#[allow(clippy::too_many_arguments)]
+fn static_fallback_selection_outcome(
+    request: &TranscribeRequest,
+    contract: &BackendSelectionContract,
+    duration: f64,
+    observed_state: usize,
+    availability: &[(BackendKind, bool)],
+    calibration_score: f64,
+    e_process: f64,
+    ci_width: f64,
+    decision_id: DecisionId,
+    trace_id: TraceId,
+    err: &ValidationError,
+) -> BackendSelectionOutcome {
+    let err_str = err.to_string();
+    tracing::warn!(
+        target: "franken_whisper::routing::evidence",
+        evidence_type = "contract_validation_error",
+        contract = "backend_selection",
+        error = err_str.as_str(),
+        "decision contract validation failed; engaging deterministic static-priority fallback (transcription preserved)"
+    );
+
+    let rollout_stage = native_rollout_stage();
+    let static_order_raw = auto_priority(request.diarize).to_vec();
+    let (recommended_order, _rollout_forced_static) =
+        gate_recommended_order_for_rollout(request.diarize, static_order_raw, rollout_stage);
+
+    let fallback_reason = Some(format!("contract_validation_error: {err_str}"));
+    let decision_id_str = decision_id.to_string();
+    let loss_matrix_hash = loss_matrix_content_hash(&contract.losses);
+    let static_order = auto_priority(request.diarize);
+
+    let routing_log = serde_json::json!({
+        "version": "decision-contract-v1",
+        "schema_version": ROUTING_EVIDENCE_SCHEMA_VERSION,
+        "policy_id": ROUTING_POLICY_ID,
+        "mode": "static",
+        "contract": "backend_selection",
+        "state_space": contract.state_space(),
+        "observed_state": contract.state_space()[observed_state],
+        "action_set": contract.action_set(),
+        "chosen_action": Value::Null,
+        "fallback_active": true,
+        "fallback_reason": fallback_reason,
+        "validation_error": err_str,
+        "recommended_order": recommended_order.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
+        "static_order": static_order.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
+        "native_rollout_stage": rollout_stage.as_str(),
+        "calibration_score": calibration_score,
+        "e_process": e_process,
+        "ci_width": ci_width,
+        "availability": availability
+            .iter()
+            .map(|(kind, ok)| serde_json::json!({"backend": kind.as_str(), "available": ok}))
+            .collect::<Vec<Value>>(),
+        "duration_seconds": duration,
+        "duration_bucket": duration_bucket(duration),
+        "diarize": request.diarize,
+        "decision_id": decision_id_str,
+        "trace_id": trace_id.to_string(),
+    });
+
+    let evidence_entries = vec![routing_log.clone()];
+
+    let ledger_entry = RoutingEvidenceLedgerEntry {
+        decision_id: decision_id_str.clone(),
+        trace_id: trace_id.to_string(),
+        timestamp_rfc3339: Utc::now().to_rfc3339(),
+        observed_state: contract.state_space()[observed_state].clone(),
+        chosen_action: String::new(),
+        recommended_order: recommended_order
+            .iter()
+            .map(|k| k.as_str().to_owned())
+            .collect(),
+        fallback_active: true,
+        fallback_reason,
+        posterior_snapshot: Vec::new(),
+        calibration_score,
+        brier_score: None,
+        e_process,
+        ci_width,
+        adaptive_mode: false,
+        policy_id: ROUTING_POLICY_ID.to_owned(),
+        loss_matrix_hash,
+        availability: availability
+            .iter()
+            .map(|(kind, ok)| (kind.as_str().to_owned(), *ok))
+            .collect(),
+        duration_bucket: duration_bucket(duration).to_owned(),
+        diarize: request.diarize,
+        actual_outcome: None,
+    };
+
+    if let Ok(mut guard) = ROUTER_STATE.lock() {
+        let state = guard.get_or_insert_with(RouterState::new);
+        state.record_evidence(ledger_entry);
+    }
+
+    BackendSelectionOutcome {
+        routing_log,
+        recommended_order,
+        evidence_entries,
+        fallback_triggered: true,
+        calibration_score,
+        e_process,
+        ci_width,
     }
 }
 
@@ -2399,7 +2582,23 @@ pub fn evaluate_backend_selection(
     };
 
     let mut posterior = Posterior::uniform(3);
-    contract.update_posterior(&mut posterior, observed_state);
+    // br-asupersync-u5uhpt: a failed posterior update must never kill a
+    // transcription. Skip the update (the uniform prior is the deterministic
+    // safe default), record the error in the evidence ledger, and warn. The
+    // decision then proceeds against the uniform posterior, which is exactly
+    // the high-entropy / low-margin state that drives `should_fallback`
+    // toward the static-priority order anyway.
+    if let Err(err) = contract.update_posterior(&mut posterior, observed_state) {
+        let err_str = err.to_string();
+        tracing::warn!(
+            target: "franken_whisper::routing::evidence",
+            evidence_type = "posterior_update_error",
+            contract = "backend_selection",
+            error = err_str.as_str(),
+            "posterior update failed; proceeding with uniform prior (transcription preserved)"
+        );
+        record_router_evidence_event("posterior_update_error", &err_str, trace_id);
+    }
 
     let probs = posterior.probs();
     let mut sorted_probs = probs.to_vec();
@@ -2435,7 +2634,30 @@ pub fn evaluate_backend_selection(
         ts_unix_ms: ts_ms,
     };
 
-    let outcome = decision_evaluate(&contract, &posterior, &ctx);
+    let outcome = match decision_evaluate(&contract, &posterior, &ctx) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            // br-asupersync-g1pzep: contract validation failed (e.g. a
+            // `choose_action`/`fallback_action` index out of range). A
+            // validation failure must engage the deterministic
+            // static-priority fallback rather than panic or drop the
+            // request. Record the failure in the evidence ledger and return
+            // the static-priority routing outcome.
+            return Some(static_fallback_selection_outcome(
+                request,
+                &contract,
+                duration,
+                observed_state,
+                &availability,
+                calibration_score,
+                e_process,
+                ci_width,
+                decision_id,
+                trace_id,
+                &err,
+            ));
+        }
+    };
 
     // Build recommended order from expected losses (excluding fallback_error).
     let action_set = contract.action_set();
@@ -3654,7 +3876,7 @@ mod tests {
         posterior_success_probability, prior_for, probe_system_health,
         probe_system_health_uncached, quality_proxy, runtime_metadata,
         runtime_metadata_with_implementation, sanitize_timestamp, segment_end, segment_start,
-        transcript_from_segments,
+        static_fallback_selection_outcome, transcript_from_segments,
     };
     use crate::conformance::NativeEngineRolloutStage;
     use crate::model::{
@@ -3662,6 +3884,7 @@ mod tests {
         TranscriptionSegment,
     };
     use franken_decision::DecisionContract;
+    use franken_kernel::DecisionId;
     use franken_kernel::TraceId;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex as StdMutex};
@@ -5231,7 +5454,9 @@ mod tests {
         assert!((probs_before[0] - probs_before[1]).abs() < 1e-9);
 
         // After observing state 0 (all_available), probability should concentrate.
-        contract.update_posterior(&mut posterior, 0);
+        contract
+            .update_posterior(&mut posterior, 0)
+            .expect("valid posterior + in-range observation");
         let probs_after = posterior.probs().to_vec();
         assert!(
             probs_after[0] > probs_after[1],
@@ -5243,6 +5468,110 @@ mod tests {
             "observed state should have highest probability: {:?}",
             probs_after
         );
+    }
+
+    #[test]
+    fn update_posterior_rejects_out_of_range_observation_without_mutating() {
+        use franken_decision::{Posterior, UpdatePosteriorError};
+
+        let contract = BackendSelectionContract::new(&test_request(false), 30.0);
+        let mut posterior = Posterior::uniform(3);
+        let before = posterior.probs().to_vec();
+
+        // Observation index >= state-space size must fail-closed and leave the
+        // posterior untouched (the 0.3.2 contract guarantees no partial apply).
+        let err = contract
+            .update_posterior(&mut posterior, 3)
+            .expect_err("observation 3 is out of range for a 3-state space");
+        assert_eq!(
+            err,
+            UpdatePosteriorError::ObservationOutOfRange {
+                observation: 3,
+                state_count: 3,
+            }
+        );
+        assert_eq!(posterior.probs().to_vec(), before);
+    }
+
+    #[test]
+    fn update_posterior_rejects_length_mismatch_without_mutating() {
+        use franken_decision::{Posterior, UpdatePosteriorError};
+
+        let contract = BackendSelectionContract::new(&test_request(false), 30.0);
+        // Wrong-length posterior (2 states vs the contract's 3).
+        let mut posterior = Posterior::uniform(2);
+        let before = posterior.probs().to_vec();
+
+        let err = contract
+            .update_posterior(&mut posterior, 0)
+            .expect_err("posterior length 2 does not match 3-state space");
+        assert_eq!(
+            err,
+            UpdatePosteriorError::LengthMismatch {
+                expected: 3,
+                actual: 2,
+            }
+        );
+        assert_eq!(posterior.probs().to_vec(), before);
+    }
+
+    #[test]
+    fn validation_error_engages_deterministic_static_fallback() {
+        use franken_decision::ValidationError;
+
+        // Craft a contract-validation failure (an out-of-range action index,
+        // the panic-DoS shape the 0.3.2 `evaluate` now returns as an error)
+        // and assert the wiring helper engages the static-priority fallback
+        // rather than panicking or dropping the request.
+        for diarize in [false, true] {
+            let request = test_request(diarize);
+            let contract = BackendSelectionContract::new(&request, 30.0);
+            let err = ValidationError::ActionIndexOutOfRange {
+                index: 99,
+                action_set_len: contract.action_set().len(),
+                from_fallback: false,
+            };
+            let availability = [
+                (BackendKind::WhisperCpp, true),
+                (BackendKind::InsanelyFast, true),
+                (BackendKind::WhisperDiarization, true),
+            ];
+            let decision_id = DecisionId::from_parts(1_700_000_000_000, 0xDEAD_BEEF);
+
+            let outcome = static_fallback_selection_outcome(
+                &request,
+                &contract,
+                30.0,
+                0,
+                &availability,
+                0.5,
+                1.0,
+                0.0,
+                decision_id,
+                TraceId::from_parts(1_700_000_000_000, 7),
+                &err,
+            );
+
+            // The deterministic fallback must (a) flag fallback, (b) emit the
+            // exact static-priority order from `auto_priority`, and (c) surface
+            // the validation error string in the routing log.
+            assert!(outcome.fallback_triggered, "fallback must be triggered");
+            let expected: Vec<BackendKind> = auto_priority(diarize).to_vec();
+            assert_eq!(
+                outcome.recommended_order, expected,
+                "recommended order must equal the static-priority list"
+            );
+            let log_str = outcome.routing_log.to_string();
+            assert!(
+                log_str.contains("action_index 99"),
+                "routing log must carry the validation error: {log_str}"
+            );
+            assert_eq!(
+                outcome.routing_log["mode"], "static",
+                "validation-fallback mode must be static"
+            );
+            assert!(!outcome.evidence_entries.is_empty());
+        }
     }
 
     #[test]

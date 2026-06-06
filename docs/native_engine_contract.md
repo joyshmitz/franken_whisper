@@ -331,7 +331,37 @@ Final interleaved hyperfine vs `whisper-cli` on the same host:
 Cumulative speedup over the optimization arc (release profile): tiny.en
 1.57 s → 0.475 s (**3.3×**); large-v3-turbo 44.6 s → 9.73 s (**4.6×**). Full
 lever-by-lever breakdown and evidence-backed abandons:
-`tests/artifacts/perf/20260605T0218Z-native-engine-baseline/RESULTS.md`.
+`tests/artifacts/perf/20260605T0218Z-native-engine-baseline/RESULTS.md`
+(Round 1: `§1–5`; Round 2 f16 / sgemm / attribution: `§6`).
+
+#### Decoder per-token floors (Round 2, f16 compute default ON)
+
+Decoder token-step latency at the parallel/compute floor (real
+jfk-derived state, 200 steps, M4 Pro under variable agent load):
+
+| Path | ms/token |
+|------|----------|
+| large-v3-turbo (f16 ON, production) | **10.3** |
+| large-v3-turbo (f16 OFF, contrast) | 38.9 |
+| tiny.en (f16 ON) | **5.2** |
+
+The f16-resident decoder compute path (vectorized NEON-fp16 slice dequant →
+8-lane dot) crushed every weight-bound Linear vs the f32 path — mlp 8×,
+logits 3.3× — and shaved **−11.5 % off the large e2e wall** (Round 2 pass 3).
+The encoder stays f32: it is compute-bound GEMM (M=1500) where halving
+resident weight bytes buys no compute time (f16 panels measured pure
+overhead), so the f16 frontier is decoder-only.
+
+#### `FRANKEN_WHISPER_NATIVE_F16_COMPUTE` — opt-**out** kill switch
+
+f16-resident decoder compute is now the **default ON** production path. The
+env var is an **opt-out** kill switch: set
+`FRANKEN_WHISPER_NATIVE_F16_COMPUTE=0` (or `false`, read once via `OnceLock`)
+to force the legacy f32-everywhere decoder weights. Both states are
+conformance-clean — golden transcripts and segment timestamps are byte-exact
+on tiny.en and large-v3-turbo with the switch ON **and** OFF. Use the opt-out
+only on hosts without a hardware fp16 convert intrinsic, where the slice
+dequant would not pay for itself.
 
 > Profile note: the `release` profile ships `opt-level = "z"`, which costs
 > ~26% on large-v3-turbo vs `release-perf`. A `dist`/`release` profile
@@ -363,7 +393,7 @@ Per bd-2th6 acceptance, against the rollout gates in §5:
 |-----------|--------|----------------------|--------|
 | tiny.en RTF | < 1.0 on ≥ 8 cores | **0.043** | **EXCEEDED** |
 | large-v3-turbo | functional e2e, no OOM on 32 GB | RTF **0.88** (now < 1.0) | **MET** (and faster than realtime) |
-| criterion benches (`benches/native_engine_bench.rs`) | committed | not yet written | **OUTSTANDING** |
+| criterion benches (`benches/native_engine_bench.rs`) | committed | landed (Round 2 pass 1) with saved baselines: mel, encoder window, decoder token step, logits GEMV, f16 GEMV dequant throughput, e2e tiny | **MET** |
 | clippy | no regressions | clean | MET |
 
 ## 9. References

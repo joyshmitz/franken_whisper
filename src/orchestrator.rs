@@ -5048,13 +5048,23 @@ mod tests {
 
     #[test]
     fn stage_budget_timeout_maps_to_timeout_error_code() {
-        let runtime = RuntimeBuilder::current_thread()
+        // Use a multi-worker runtime with a real blocking pool — the
+        // production configuration for `run_stage_with_budget`. On a
+        // single-threaded `current_thread` runtime the blocking sleep and the
+        // budget timer cannot make progress concurrently (asupersync 0.3.2
+        // drives the timer on the runtime's worker, which the blocking
+        // `spawn_blocking` body would otherwise monopolize), so the timeout
+        // could never fire. The wide sleep-vs-budget margin keeps the
+        // assertion deterministic under host load.
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .blocking_threads(1, 2)
             .build()
             .expect("runtime build");
 
         let result: Result<(), FwError> =
             runtime.block_on(run_stage_with_budget("backend", 1, || {
-                std::thread::sleep(Duration::from_millis(25));
+                std::thread::sleep(Duration::from_millis(250));
                 Ok(())
             }));
         let error = result.expect_err("stage should time out");
