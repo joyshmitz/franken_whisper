@@ -860,7 +860,12 @@ pub fn forward_step(
 /// `[n_vocab, n_state]` embedding and the `[1, n_state]` last hidden row,
 /// avoiding a second transposed embedding copy (see the module-level memory
 /// note). Returns the flat `[n_vocab]` logits.
-fn logits_last(w: &DecoderWeights, x_last: &Mat) -> FwResult<Vec<f32>> {
+///
+/// Exposed `pub` (bd-2th6, round-2 bench pass) so the criterion
+/// `logits_gemv_large` bench can isolate this `[n_vocab, n_state]` tied product
+/// — the direct instrument for the upcoming f16-compute GEMV lever — against a
+/// fixed hidden vector. Visibility-only: behavior is unchanged.
+pub fn logits_last(w: &DecoderWeights, x_last: &Mat) -> FwResult<Vec<f32>> {
     // x_last^T is [n_state, 1].
     let x_t = Mat::from_vec(w.n_state, 1, x_last.data.clone());
 

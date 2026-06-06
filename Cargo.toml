@@ -84,6 +84,10 @@ harness = false
 name = "sync_bench"
 harness = false
 
+[[bench]]
+name = "native_engine_bench"
+harness = false
+
 # Profiling build: full optimization + symbols/frame pointers so samplers
 # (samply/Instruments) can attribute frames. Never profile the size-optimized
 # `release` profile (opt-level="z", strip=true → useless flames).
