@@ -75,6 +75,47 @@ pub(crate) fn worker_count() -> usize {
         .min(8)
 }
 
+/// Worker count for the fused-dequant f16 GEMV ([`gemv_f16`] / its batch form),
+/// as a function of the output dimension `out`.
+///
+/// Unlike the other parallel-glue kernels, the f16 GEMV does **not** nest a
+/// rayon-parallel sgemm inside each band (it is a pure per-row
+/// `convert_to_f32_slice` + [`dot8`]), so there is no inner pool to
+/// oversubscribe — the 8-cap that protects the sgemm kernels buys nothing here.
+///
+/// The right width is **size-dependent**, and pass-5 criterion measured both
+/// regimes on the M4 Pro (10 perf + 4 efficiency cores):
+///
+/// * **Huge `out` (logits, `out = 51866`, ~133 MB of f16 reads/token):**
+///   memory-bandwidth-bound at ~50 GB/s, well under the controller ceiling.
+///   Going from 8 → 12 load-issuing threads saturates it better: −2.8% on
+///   `logits_gemv_large`. There are ~4300 rows/band even at 12 workers, so band
+///   overhead stays negligible.
+/// * **Moderate `out` (per-token Linears, `out = 1280`, ~3.3 MB):** NOT
+///   bandwidth-bound; only ~107 rows/band at 12 workers, so the extra threads
+///   (including the slower efficiency cores) add pure spawn/scheduling overhead
+///   — measured **+29%** on `f16_gemv_dequant_1280x1280`. Capping at 8 keeps the
+///   prior (good) behavior here.
+///
+/// So we widen to 12 ONLY past a row threshold where each band still carries
+/// substantial work AND the read volume is bandwidth-class (the vocab GEMV is
+/// the only decoder shape that qualifies); everything else keeps the 8-cap.
+///
+/// Row bands are disjoint and each output row's [`dot8`] is independent of the
+/// band split, so the worker count is **bit-identical** (order-preserving) —
+/// only scheduling changes. The split is purely a performance knob.
+#[inline]
+fn gemv_worker_count(out: usize) -> usize {
+    let avail = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(1);
+    // Only the vocab-class GEMV (tens of thousands of rows) is bandwidth-bound
+    // enough to want >8 threads; below that the 8-cap wins (see fn docs).
+    const WIDE_OUT_THRESHOLD: usize = 1 << 14; // 16384 rows
+    let cap = if out >= WIDE_OUT_THRESHOLD { 12 } else { 8 };
+    avail.min(cap)
+}
+
 /// Map a FrankenTorch `KernelError` into [`FwError`].
 ///
 /// Kernel failures here are almost always shape/contract violations from
@@ -286,14 +327,15 @@ pub fn gemv_f16(
     // MACs of real work = out * inp. Below the threshold the spawn cost
     // dominates, so stay serial (covers tiny's [384,384] per-token Linears).
     const PAR_THRESHOLD: usize = 1 << 16;
-    if out * inp < PAR_THRESHOLD || worker_count() < 2 {
+    let workers = gemv_worker_count(out);
+    if out * inp < PAR_THRESHOLD || workers < 2 {
         let mut scratch = vec![0.0f32; inp];
         for (o, slot) in out_slice.iter_mut().enumerate() {
             *slot = row_dot(o, &mut scratch);
         }
         return;
     }
-    let band = out.div_ceil(worker_count()).max(1);
+    let band = out.div_ceil(workers).max(1);
     std::thread::scope(|s| {
         let row_dot = &row_dot;
         for (w, band_slice) in out_slice.chunks_mut(band).enumerate() {
@@ -371,7 +413,8 @@ pub fn gemv_f16_batch(
     };
 
     const PAR_THRESHOLD: usize = 1 << 16;
-    if tq * out * inp < PAR_THRESHOLD || worker_count() < 2 {
+    let workers = gemv_worker_count(out);
+    if tq * out * inp < PAR_THRESHOLD || workers < 2 {
         compute_band(0, out, out_slice);
         return;
     }
@@ -379,7 +422,6 @@ pub fn gemv_f16_batch(
     // Parallelize over output-column bands; each worker fills a private
     // [tq, out] buffer (writing only its band), then we disjoint-merge them
     // (every column written by exactly one worker → `0.0 + x == x` exactly).
-    let workers = worker_count();
     let band = out.div_ceil(workers).max(1);
     let parts: Vec<(usize, usize, Vec<f32>)> = std::thread::scope(|s| {
         let compute_band = &compute_band;

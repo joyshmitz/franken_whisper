@@ -64,6 +64,91 @@ use crate::error::{FwError, FwResult};
 /// Layer-norm epsilon used throughout whisper (`hparams.eps = 1e-5f`).
 const LN_EPS: f32 = 1e-5;
 
+// ─────────────────────────────────────────────────────────────────────────
+// Per-sub-part attribution (measurement-only; OFF unless perf spans enabled)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The decoder-step sub-parts attributed by [`forward_step`] when perf-span
+/// measurement is enabled. Index order is fixed so the accumulator is a flat
+/// array (no hashing on the hot path). Kept in declaration order of the step.
+#[derive(Clone, Copy)]
+pub enum Sub {
+    /// `token_emb[token] + pos_emb` lookup/add.
+    Embed = 0,
+    /// Self-attention input layer-norm + the residual `x.clone()`.
+    SelfLn = 1,
+    /// Self-attention Q/K/V projections (the threaded `project_qkv`).
+    SelfQkv = 2,
+    /// Causal cache-append + scaled-dot-product self-attention.
+    SelfAttn = 3,
+    /// Self-attention output projection + residual add.
+    SelfOut = 4,
+    /// Cross-attention input layer-norm + the residual `x.clone()`.
+    CrossLn = 5,
+    /// Cross-attention query projection.
+    CrossQ = 6,
+    /// Cross-attention (q·k^T over enc_frames → softmax → @v).
+    CrossAttn = 7,
+    /// Cross-attention output projection + residual add.
+    CrossOut = 8,
+    /// MLP input layer-norm + residual `x.clone()`.
+    MlpLn = 9,
+    /// MLP fc + gelu + proj.
+    Mlp = 10,
+    /// Final pre-logits layer-norm.
+    FinalLn = 11,
+    /// Tied output projection (the `[n_vocab, n_state]` logits GEMV).
+    Logits = 12,
+}
+
+/// Number of attributed sub-parts (= `Sub` variant count).
+pub const SUB_COUNT: usize = 13;
+
+/// Human-readable labels for [`Sub`], in index order (for report tables).
+pub const SUB_LABELS: [&str; SUB_COUNT] = [
+    "embed+pos",
+    "self_ln+clone",
+    "self_qkv_proj",
+    "self_attn",
+    "self_out_proj",
+    "cross_ln+clone",
+    "cross_q_proj",
+    "cross_attn",
+    "cross_out_proj",
+    "mlp_ln+clone",
+    "mlp_fc_gelu_proj",
+    "final_ln",
+    "logits_gemv",
+];
+
+thread_local! {
+    /// Per-sub-part cumulative nanoseconds, summed across every [`forward_step`]
+    /// call on this thread. Only written when [`super::perf_spans_enabled`] is
+    /// set; otherwise the instrumentation is skipped entirely (no `Instant`).
+    static SUB_NS: std::cell::RefCell<[u128; SUB_COUNT]> =
+        const { std::cell::RefCell::new([0u128; SUB_COUNT]) };
+}
+
+/// Add `dt` nanoseconds to sub-part `s`'s thread-local accumulator.
+#[inline]
+fn sub_add(s: Sub, dt: u128) {
+    SUB_NS.with(|c| c.borrow_mut()[s as usize] += dt);
+}
+
+/// Drain and return this thread's per-sub-part cumulative nanoseconds, zeroing
+/// the accumulator. Measurement-only: pairs with [`forward_step`]'s perf-span
+/// instrumentation so an attribution harness can read the split for a batch of
+/// steps then reset between phases. Returns all-zero when measurement was off.
+#[must_use]
+pub fn take_sub_ns() -> [u128; SUB_COUNT] {
+    SUB_NS.with(|c| {
+        let mut b = c.borrow_mut();
+        let out = *b;
+        *b = [0u128; SUB_COUNT];
+        out
+    })
+}
+
 /// One worker band's cross-K/V precompute result: the band's starting layer
 /// index plus its layers' `(Kcross, Vcross)` pairs, in layer order. Used to
 /// reassemble [`DecoderState::new`]'s parallel layer fan-out deterministically.
@@ -909,8 +994,27 @@ pub fn forward_step(
         ));
     }
 
+    // Per-sub-part attribution is measurement-only: when perf spans are off
+    // (the default) this is `false` and not a single `Instant` is taken, so the
+    // production hot path is byte-for-byte the un-instrumented step. When on, a
+    // small `timed` helper accumulates each sub-part's wall time into a
+    // thread-local (drained by `take_sub_ns`).
+    let measure = super::perf_spans_enabled();
+    macro_rules! timed {
+        ($sub:expr, $body:expr) => {{
+            if measure {
+                let __t = std::time::Instant::now();
+                let __r = $body;
+                sub_add($sub, __t.elapsed().as_nanos());
+                __r
+            } else {
+                $body
+            }
+        }};
+    }
+
     let cache_len = st.len;
-    let mut x = embed_tokens(w, tokens, cache_len)?;
+    let mut x = timed!(Sub::Embed, embed_tokens(w, tokens, cache_len)?);
 
     if st.record_cross_attn {
         st.cross_attn_weights.clear();
@@ -918,42 +1022,66 @@ pub fn forward_step(
 
     for (li, layer) in w.layers.iter().enumerate() {
         // ── self-attention (causal, over the KV cache) ──
-        let mut h = x.clone();
-        layer.attn_ln.apply(&mut h);
+        let h = timed!(Sub::SelfLn, {
+            let mut h = x.clone();
+            layer.attn_ln.apply(&mut h);
+            h
+        });
         // Q/K/V are three independent projections of the same `h`. On wide
         // models each is a serial GEMV (`[1,n_state] x [n_state,n_state]`, below
         // the kernel's parallel threshold), so running them on separate threads
         // turns three sequential single-core matmuls into one concurrent pass.
         // Each `forward` is unchanged, so the outputs are bit-identical.
-        let (q, k, v) = project_qkv(&layer.attn_q, &layer.attn_k, &layer.attn_v, &h)?;
-        let attn = nn::attention_with_cache(&q, &k, &v, w.n_head, &mut st.kv[li])?;
-        let attn_out = layer.attn_out.forward(&attn)?;
-        add_into(&mut x, &attn_out);
+        let (q, k, v) = timed!(
+            Sub::SelfQkv,
+            project_qkv(&layer.attn_q, &layer.attn_k, &layer.attn_v, &h)?
+        );
+        let attn = timed!(
+            Sub::SelfAttn,
+            nn::attention_with_cache(&q, &k, &v, w.n_head, &mut st.kv[li])?
+        );
+        timed!(Sub::SelfOut, {
+            let attn_out = layer.attn_out.forward(&attn)?;
+            add_into(&mut x, &attn_out);
+        });
 
         // ── cross-attention (encoder K/V, no mask, optional recording) ──
-        let mut hc = x.clone();
-        layer.cross_attn_ln.apply(&mut hc);
-        let qc = layer.cross_attn_q.forward(&hc)?;
+        let hc = timed!(Sub::CrossLn, {
+            let mut hc = x.clone();
+            layer.cross_attn_ln.apply(&mut hc);
+            hc
+        });
+        let qc = timed!(Sub::CrossQ, layer.cross_attn_q.forward(&hc)?);
         let h0 = li * w.n_head;
-        let cross = cross_attention(
-            &qc,
-            &st.cross_kh_t[h0..h0 + w.n_head],
-            &st.cross_vh[h0..h0 + w.n_head],
-            st.enc_frames,
-            w.n_head,
-            st.record_cross_attn,
-            &mut st.cross_attn_weights,
-        )?;
-        let cross_out = layer.cross_attn_out.forward(&cross)?;
-        add_into(&mut x, &cross_out);
+        let cross = timed!(
+            Sub::CrossAttn,
+            cross_attention(
+                &qc,
+                &st.cross_kh_t[h0..h0 + w.n_head],
+                &st.cross_vh[h0..h0 + w.n_head],
+                st.enc_frames,
+                w.n_head,
+                st.record_cross_attn,
+                &mut st.cross_attn_weights,
+            )?
+        );
+        timed!(Sub::CrossOut, {
+            let cross_out = layer.cross_attn_out.forward(&cross)?;
+            add_into(&mut x, &cross_out);
+        });
 
         // ── MLP ──
-        let mut hm = x.clone();
-        layer.mlp_ln.apply(&mut hm);
-        let mut ff = layer.mlp_0.forward(&hm)?;
-        nn::gelu(&mut ff);
-        let ff = layer.mlp_2.forward(&ff)?;
-        add_into(&mut x, &ff);
+        let hm = timed!(Sub::MlpLn, {
+            let mut hm = x.clone();
+            layer.mlp_ln.apply(&mut hm);
+            hm
+        });
+        timed!(Sub::Mlp, {
+            let mut ff = layer.mlp_0.forward(&hm)?;
+            nn::gelu(&mut ff);
+            let ff = layer.mlp_2.forward(&ff)?;
+            add_into(&mut x, &ff);
+        });
 
         // Per-layer cancellation point (nn kernels are uncancellable).
         if li + 1 < w.layers.len() {
@@ -965,10 +1093,10 @@ pub fn forward_step(
     st.len += tokens.len();
 
     // Final layer norm, then logits for the last position only.
-    w.ln.apply(&mut x);
+    timed!(Sub::FinalLn, w.ln.apply(&mut x));
     let last = x.rows - 1;
     let x_last = Mat::from_vec(1, w.n_state, x.row(last).to_vec());
-    logits_last(w, &x_last)
+    timed!(Sub::Logits, logits_last(w, &x_last))
 }
 
 /// Tied output projection for a single position.
