@@ -57,7 +57,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use super::nn::{self, KvCache};
+use super::nn::{self, KvCache, WeightMat};
 use super::{Mat, WhisperHParams};
 use crate::error::{FwError, FwResult};
 
@@ -69,23 +69,44 @@ const LN_EPS: f32 = 1e-5;
 /// reassemble [`DecoderState::new`]'s parallel layer fan-out deterministically.
 type CrossKvBand = FwResult<(usize, Vec<(Mat, Mat)>)>;
 
-/// Pre-transposed linear weight `[in, out]` plus its optional bias `[out]`.
+/// Linear weight (in one of two representations) plus its optional bias `[out]`.
 ///
-/// Whisper linear layers are `y = x @ W^T + b` with `W` shaped `[out, in]`;
-/// we transpose to `[in, out]` at load time so every forward matmul is a
-/// contiguous `[m, in] x [in, out]` (see [`nn::matmul_bias`]).
+/// Whisper linear layers are `y = x @ W^T + b` with `W` shaped `[out, in]`.
+/// Two storage strategies, chosen once at load time (see [`load_linear`]):
+///
+/// * **f32 path** ([`WeightMat::F32`]): the weight is pre-transposed to
+///   `[in, out]` so the forward is a contiguous `x @ w_t` ([`nn::matmul_bias`]).
+/// * **f16 path** ([`WeightMat::F16`]): the weight is kept f16-resident in its
+///   NATURAL `[out, in]` row-major layout (the transpose is skipped entirely),
+///   and the forward is a fused dequant-in-GEMV
+///   ([`nn::gemv_f16_batch`]: `out[t,o] = dot(W[o,:], x[t,:]) + b[o]`). Half the
+///   resident bytes and half the weight-memory traffic per token.
 #[derive(Debug, Clone)]
 struct Linear {
-    /// Pre-transposed weight, shape `[in, out]`.
-    w_t: Mat,
+    /// Weight in f32-transposed or f16-natural form.
+    w: WeightMat,
     /// Optional bias, length `out`.
     bias: Option<Vec<f32>>,
 }
 
 impl Linear {
-    /// Apply `x @ w_t (+ bias)`.
+    /// Apply `y = x @ W^T + b` over `x` (`[tq, in]`), returning `[tq, out]`.
     fn forward(&self, x: &Mat) -> FwResult<Mat> {
-        nn::matmul_bias(x, &self.w_t, self.bias.as_deref())
+        match &self.w {
+            WeightMat::F32(w_t) => nn::matmul_bias(x, w_t, self.bias.as_deref()),
+            WeightMat::F16 { data, out, inp } => {
+                if x.cols != *inp {
+                    return Err(FwError::InvalidRequest(format!(
+                        "Linear(f16) forward: x.cols {} != in {inp}",
+                        x.cols
+                    )));
+                }
+                let tq = x.rows;
+                let mut y = vec![0.0f32; tq * out];
+                nn::gemv_f16_batch(data, *out, *inp, &x.data, tq, self.bias.as_deref(), &mut y);
+                Ok(Mat::from_vec(tq, *out, y))
+            }
+        }
     }
 }
 
@@ -129,9 +150,18 @@ struct DecoderLayer {
 #[derive(Debug, Clone)]
 pub struct DecoderWeights {
     /// Token embedding, kept in its natural `[n_vocab, n_state]` orientation
-    /// and reused (transposed implicitly) for the tied output projection. See
-    /// the module-level "Logits product" note for the memory rationale.
-    token_embedding: Mat,
+    /// and reused for both the per-token embedding lookup and the tied output
+    /// projection (the logits GEMV). See the module-level "Logits product" note
+    /// for the memory rationale.
+    ///
+    /// Under the f16-compute switch (and an f16-stored embedding) this is held
+    /// as raw f16 bits ([`WeightMat::F16`], natural `[n_vocab, n_state]`),
+    /// halving the resident footprint of the model's single largest tensor:
+    /// the per-token `embed_tokens` lookup dequantizes just the one row it
+    /// reads, and `logits_last` runs the fused dequant-GEMV directly over the
+    /// natural rows. Otherwise it is a plain f32 [`WeightMat::F32`] in the same
+    /// `[n_vocab, n_state]` orientation.
+    token_embedding: WeightMat,
     /// Learned positional embedding `[n_text_ctx, n_state]`.
     positional_embedding: Mat,
     layers: Vec<DecoderLayer>,
@@ -188,8 +218,15 @@ fn transpose(m: &Mat) -> Mat {
     )
 }
 
-/// Load a whisper linear layer (`[out, in]` weight) pre-transposed to
-/// `[in, out]`, plus an optional `[out]` bias.
+/// Load a whisper linear layer (`[out, in]` weight) plus an optional `[out]`
+/// bias.
+///
+/// When the f16-compute switch ([`crate::native_engine::f16_compute_enabled`])
+/// is on AND the weight tensor is stored as f16 in the file, the weight is kept
+/// f16-resident in its NATURAL `[out, in]` layout (no transpose, no f32
+/// materialization) for the fused dequant-GEMV path. Otherwise — switch off, or
+/// an f32-stored tensor — it is dequantized/loaded and pre-transposed to
+/// `[in, out]` for the contiguous-sgemm f32 path, exactly as before.
 fn load_linear(
     model: &crate::native_engine::ggml::GgmlModel,
     weight_name: &str,
@@ -197,13 +234,67 @@ fn load_linear(
     out_dim: usize,
     in_dim: usize,
 ) -> FwResult<Linear> {
-    let w = load_mat(model, weight_name, out_dim, in_dim)?; // [out, in]
-    let w_t = transpose(&w); // [in, out]
+    let want_f16 = crate::native_engine::f16_compute_enabled()
+        && model
+            .tensor(weight_name)
+            .is_some_and(|t| t.dtype == crate::native_engine::GgmlDType::F16);
+
+    let w = if want_f16 {
+        // Natural [out, in] f16 bits — skip the transpose entirely.
+        let (shape, data) = model.tensor_f16(weight_name)?;
+        if shape != [out_dim, in_dim] {
+            return Err(FwError::InvalidRequest(format!(
+                "decoder f16 tensor '{weight_name}' shape {shape:?} != expected [{out_dim}, {in_dim}]"
+            )));
+        }
+        WeightMat::F16 {
+            data,
+            out: out_dim,
+            inp: in_dim,
+        }
+    } else {
+        let w = load_mat(model, weight_name, out_dim, in_dim)?; // [out, in]
+        WeightMat::F32(transpose(&w)) // [in, out]
+    };
+
     let bias = match bias_name {
         Some(name) => Some(load_vec(model, name, out_dim)?),
         None => None,
     };
-    Ok(Linear { w_t, bias })
+    Ok(Linear { w, bias })
+}
+
+/// Load the token embedding `[n_vocab, n_state]` in its NATURAL orientation
+/// (no transpose — it is reused as-is for both the per-token lookup and the
+/// tied logits GEMV).
+///
+/// Under the f16-compute switch and an f16-stored embedding, it is kept as raw
+/// f16 bits ([`WeightMat::F16`]); otherwise a plain f32 [`WeightMat::F32`].
+fn load_embedding(
+    model: &crate::native_engine::ggml::GgmlModel,
+    name: &str,
+    n_vocab: usize,
+    n_state: usize,
+) -> FwResult<WeightMat> {
+    let want_f16 = crate::native_engine::f16_compute_enabled()
+        && model
+            .tensor(name)
+            .is_some_and(|t| t.dtype == crate::native_engine::GgmlDType::F16);
+    if want_f16 {
+        let (shape, data) = model.tensor_f16(name)?;
+        if shape != [n_vocab, n_state] {
+            return Err(FwError::InvalidRequest(format!(
+                "decoder f16 tensor '{name}' shape {shape:?} != expected [{n_vocab}, {n_state}]"
+            )));
+        }
+        Ok(WeightMat::F16 {
+            data,
+            out: n_vocab,
+            inp: n_state,
+        })
+    } else {
+        Ok(WeightMat::F32(load_mat(model, name, n_vocab, n_state)?))
+    }
 }
 
 /// Load a layer-norm (`weight`, `bias`), each length `n_state`.
@@ -247,7 +338,8 @@ impl DecoderWeights {
             )));
         }
 
-        let token_embedding = load_mat(model, "decoder.token_embedding.weight", n_vocab, n_state)?;
+        let token_embedding =
+            load_embedding(model, "decoder.token_embedding.weight", n_vocab, n_state)?;
         let positional_embedding =
             load_mat(model, "decoder.positional_embedding", n_text_ctx, n_state)?;
         let ln = load_layer_norm(model, "decoder.ln", n_state)?;
@@ -612,10 +704,24 @@ fn embed_tokens(w: &DecoderWeights, tokens: &[i32], cache_len: usize) -> FwResul
             )));
         }
         let dst = &mut x[i * n_state..(i + 1) * n_state];
-        let te = w.token_embedding.row(tok_idx);
         let pe = w.positional_embedding.row(pos);
-        for ((d, &t), &p) in dst.iter_mut().zip(te).zip(pe) {
-            *d = t + p;
+        // Token embedding row + positional embedding row. For the f16-resident
+        // embedding we dequantize just this one row on the fly (one row per
+        // token — cheap); the f32 arm borrows the row directly. Either way the
+        // value added is the exact stored embedding value.
+        match &w.token_embedding {
+            WeightMat::F32(emb) => {
+                let te = emb.row(tok_idx);
+                for ((d, &t), &p) in dst.iter_mut().zip(te).zip(pe) {
+                    *d = t + p;
+                }
+            }
+            WeightMat::F16 { data, inp, .. } => {
+                let row = &data[tok_idx * inp..(tok_idx + 1) * inp];
+                for ((d, &tb), &p) in dst.iter_mut().zip(row).zip(pe) {
+                    *d = nn::f16_to_f32_pub(tb) + p;
+                }
+            }
         }
     }
     Ok(Mat::from_vec(tokens.len(), n_state, x))
@@ -866,6 +972,25 @@ pub fn forward_step(
 /// — the direct instrument for the upcoming f16-compute GEMV lever — against a
 /// fixed hidden vector. Visibility-only: behavior is unchanged.
 pub fn logits_last(w: &DecoderWeights, x_last: &Mat) -> FwResult<Vec<f32>> {
+    let n_vocab = w.n_vocab;
+    let n_state = w.n_state;
+
+    // f16-resident embedding: fused dequant-GEMV directly over the natural
+    // `[n_vocab, n_state]` rows. `out[o] = dot(emb[o, :], x_last)`, contiguous
+    // rows, dequant-in-loop — half the weight-memory traffic of the f32 path,
+    // and it skips the `x^T` / band-copy bookkeeping entirely (gemv_f16 already
+    // parallelizes over output-row bands with the same worker count). This is
+    // the numerics-affecting arm gated by `f16_compute_enabled`.
+    if let WeightMat::F16 { data, out, inp } = &w.token_embedding {
+        debug_assert_eq!((*out, *inp), (n_vocab, n_state));
+        let mut logits = vec![0.0f32; *out];
+        nn::gemv_f16(data, *out, *inp, &x_last.data, None, &mut logits);
+        return Ok(logits);
+    }
+    let WeightMat::F32(emb_mat) = &w.token_embedding else {
+        unreachable!("token_embedding is F32 or F16");
+    };
+
     // x_last^T is [n_state, 1].
     let x_t = Mat::from_vec(w.n_state, 1, x_last.data.clone());
 
@@ -878,18 +1003,15 @@ pub fn logits_last(w: &DecoderWeights, x_last: &Mat) -> FwResult<Vec<f32>> {
     // across worker threads (the GEMV's n=1 inner shape barely rayon-splits
     // on its own, hence the explicit row-band fan-out). Small n_vocab stays
     // serial via the threshold.
-    let n_vocab = w.n_vocab;
-    let n_state = w.n_state;
-
     const PAR_THRESHOLD: usize = 1 << 14; // n_vocab*n_state MACs
     let workers = nn::worker_count();
     if n_vocab.saturating_mul(n_state) < PAR_THRESHOLD || workers < 2 {
-        let logits = nn::matmul(&w.token_embedding, &x_t)?; // [n_vocab, 1]
+        let logits = nn::matmul(emb_mat, &x_t)?; // [n_vocab, 1]
         return Ok(logits.data);
     }
 
     let band = n_vocab.div_ceil(workers).max(1);
-    let emb = &w.token_embedding.data; // [n_vocab, n_state], row-major
+    let emb = &emb_mat.data; // [n_vocab, n_state], row-major
     let bands: Vec<FwResult<(usize, Vec<f32>)>> = std::thread::scope(|s| {
         let mut handles = Vec::new();
         let mut r0 = 0;
@@ -989,9 +1111,9 @@ mod tests {
     fn synthetic_weights(seed: u64) -> DecoderWeights {
         let mut rng = Lcg::new(seed);
         let lin = |rng: &mut Lcg, out: usize, inp: usize, bias: bool| {
-            // Store pre-transposed [in, out] directly.
+            // Store pre-transposed [in, out] directly (the f32 arm).
             Linear {
-                w_t: rng.mat(inp, out),
+                w: WeightMat::F32(rng.mat(inp, out)),
                 bias: if bias { Some(rng.vec(out)) } else { None },
             }
         };
@@ -1025,7 +1147,7 @@ mod tests {
             });
         }
         DecoderWeights {
-            token_embedding: rng.mat(N_VOCAB, N_STATE),
+            token_embedding: WeightMat::F32(rng.mat(N_VOCAB, N_STATE)),
             positional_embedding: rng.mat(N_CTX, N_STATE),
             layers,
             ln: ln(&mut rng),

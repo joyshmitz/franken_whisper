@@ -164,6 +164,221 @@ pub fn matmul_bias(x: &Mat, w_t: &Mat, bias: Option<&[f32]>) -> FwResult<Mat> {
     Ok(out)
 }
 
+/// A linear-layer weight matrix in EITHER representation.
+///
+/// The f32 path stores a pre-transposed `[in, out]` [`Mat`] (so the forward is
+/// a contiguous `x @ w_t`); the f16 path keeps the weight in its **natural**
+/// ggml `[out, in]` row-major layout as raw f16 bit patterns and runs a fused
+/// dequant-in-GEMV ([`gemv_f16`]) — `out[o] = dot(W[o, :], x)`, contiguous rows,
+/// no transpose, half the resident bytes.
+///
+/// Which arm a given weight uses is decided once at load time by the
+/// [`super::f16_compute_enabled`] switch AND the source dtype: only tensors
+/// that are f16 in the ggml file ever take the [`Self::F16`] arm; f32-stored
+/// tensors (and the whole model when the switch is off) stay [`Self::F32`].
+#[derive(Debug, Clone)]
+pub enum WeightMat {
+    /// Pre-transposed `[in, out]` f32 weight for the contiguous-sgemm path.
+    F32(Mat),
+    /// Natural `[out, in]` f16 weight (raw little-endian half bit patterns,
+    /// row-major), dequantized on the fly by [`gemv_f16`].
+    F16 {
+        /// Raw IEEE-754 half bit patterns, `out * in` elements row-major.
+        data: Vec<u16>,
+        /// Output dimension (number of rows of the natural weight).
+        out: usize,
+        /// Input dimension (contraction length; number of columns).
+        inp: usize,
+    },
+}
+
+/// Convert one IEEE-754 half bit pattern to f32 (exact; no value change).
+///
+/// Delegates to `ft_core::Float16` (the `half` crate) — the same routine the
+/// ggml loader uses for the f32 path, so a dequantized f16 weight is the exact
+/// value the f32 path would have loaded.
+#[inline]
+#[must_use]
+fn f16_to_f32(bits: u16) -> f32 {
+    ft_core::Float16::from_bits(bits).to_f32()
+}
+
+/// Public (crate-internal) exact f16→f32 dequant, for callers that need to
+/// convert a single embedding row outside the GEMV kernels (e.g. the decoder's
+/// per-token embedding lookup). Same exact `half`-crate conversion the GEMV and
+/// the ggml loader use, so a value dequantized here equals the f32 path's.
+#[inline]
+#[must_use]
+pub(crate) fn f16_to_f32_pub(bits: u16) -> f32 {
+    f16_to_f32(bits)
+}
+
+/// Fused dequant + GEMV: `out[o] = bias[o] + dot(W[o, :], x)` for a natural
+/// `[out, in]` row-major f16 weight `w_f16` and an `[in]` activation `x`.
+///
+/// Each output row is an independent dot product over the `in`-dim contraction;
+/// the weight's f16 bytes are dequantized to f32 inside the inner loop (one
+/// `f16_to_f32` per element, then an FMA into an **f32** accumulator — matching
+/// the sgemm accumulator precision; NOT f64, which would diverge *more* from the
+/// f32-path result). Output rows are disjoint, so we fan out over contiguous
+/// row bands with the house worker count; tiny shapes stay serial via the
+/// element threshold so they never pay spawn overhead.
+///
+/// Numerics: the per-element dequant is exact, but the accumulation order over
+/// `in` differs from `matrixmultiply`'s blocked f32 kernel, so this is a
+/// numerics-affecting path (gated by [`super::f16_compute_enabled`]).
+///
+/// # Panics (debug) / contract
+/// `w_f16.len()` must equal `out * inp`, `x.len() == inp`, `out_slice.len() ==
+/// out`, and `bias` (if present) length `out`. Callers are model-shaped, so a
+/// mismatch is a load bug; the debug asserts catch it in tests.
+pub fn gemv_f16(
+    w_f16: &[u16],
+    out: usize,
+    inp: usize,
+    x: &[f32],
+    bias: Option<&[f32]>,
+    out_slice: &mut [f32],
+) {
+    debug_assert_eq!(w_f16.len(), out * inp, "gemv_f16 weight shape mismatch");
+    debug_assert_eq!(x.len(), inp, "gemv_f16 x length mismatch");
+    debug_assert_eq!(out_slice.len(), out, "gemv_f16 out length mismatch");
+    debug_assert!(
+        bias.is_none_or(|b| b.len() == out),
+        "gemv_f16 bias length mismatch"
+    );
+
+    // One output row: dequant-and-FMA dot product, f32 accumulator.
+    let row_dot = |o: usize| -> f32 {
+        let w_row = &w_f16[o * inp..(o + 1) * inp];
+        let mut acc = 0.0f32;
+        for (&wb, &xv) in w_row.iter().zip(x.iter()) {
+            acc += f16_to_f32(wb) * xv;
+        }
+        match bias {
+            Some(b) => acc + b[o],
+            None => acc,
+        }
+    };
+
+    // MACs of real work = out * inp. Below the threshold the spawn cost
+    // dominates, so stay serial (covers tiny's [384,384] per-token Linears).
+    const PAR_THRESHOLD: usize = 1 << 16;
+    if out * inp < PAR_THRESHOLD || worker_count() < 2 {
+        for (o, slot) in out_slice.iter_mut().enumerate() {
+            *slot = row_dot(o);
+        }
+        return;
+    }
+    let band = out.div_ceil(worker_count()).max(1);
+    std::thread::scope(|s| {
+        let row_dot = &row_dot;
+        for (w, band_slice) in out_slice.chunks_mut(band).enumerate() {
+            let o_base = w * band;
+            s.spawn(move || {
+                for (i, slot) in band_slice.iter_mut().enumerate() {
+                    *slot = row_dot(o_base + i);
+                }
+            });
+        }
+    });
+}
+
+/// Batched fused dequant + GEMV: `out[t, o] = bias[o] + dot(W[o, :], x[t, :])`
+/// for `tq` activation rows `x` (`[tq, in]` row-major) against a natural
+/// `[out, in]` f16 weight, producing `[tq, out]` row-major.
+///
+/// Used by the prefill (multi-token batch). Each `(t, o)` is an independent
+/// dot product; we parallelize over the OUTPUT-row dimension (disjoint output
+/// columns across the whole `[tq, out]` block) and loop `t` inside so every
+/// token's row reuses the just-dequantized weight row's cache residency. The
+/// per-element math is identical to calling [`gemv_f16`] once per token, so
+/// results are the same; for `tq == 1` this reduces to a single GEMV.
+///
+/// # Contract
+/// `w_f16.len() == out * inp`, `x.len() == tq * inp`, `out_slice.len() ==
+/// tq * out`, `bias` (if present) length `out`.
+pub fn gemv_f16_batch(
+    w_f16: &[u16],
+    out: usize,
+    inp: usize,
+    x: &[f32],
+    tq: usize,
+    bias: Option<&[f32]>,
+    out_slice: &mut [f32],
+) {
+    debug_assert_eq!(
+        w_f16.len(),
+        out * inp,
+        "gemv_f16_batch weight shape mismatch"
+    );
+    debug_assert_eq!(x.len(), tq * inp, "gemv_f16_batch x length mismatch");
+    debug_assert_eq!(
+        out_slice.len(),
+        tq * out,
+        "gemv_f16_batch out length mismatch"
+    );
+
+    if tq == 1 {
+        gemv_f16(w_f16, out, inp, x, bias, out_slice);
+        return;
+    }
+
+    // Compute the column band [o0, o1) for every token row. `out_slice` is
+    // `[tq, out]` row-major, so a column band is strided per token; we write it
+    // directly (each band owns disjoint columns → no overlap across workers).
+    let compute_band = |o0: usize, o1: usize, dst: &mut [f32]| {
+        // dst is the FULL [tq, out] buffer in serial mode, or in parallel mode a
+        // per-worker private [tq, out] buffer it later disjoint-merges. Either
+        // way we write only columns [o0, o1).
+        for o in o0..o1 {
+            let w_row = &w_f16[o * inp..(o + 1) * inp];
+            let b = bias.map_or(0.0, |bb| bb[o]);
+            for t in 0..tq {
+                let xr = &x[t * inp..(t + 1) * inp];
+                let mut acc = 0.0f32;
+                for (&wb, &xv) in w_row.iter().zip(xr.iter()) {
+                    acc += f16_to_f32(wb) * xv;
+                }
+                dst[t * out + o] = acc + b;
+            }
+        }
+    };
+
+    const PAR_THRESHOLD: usize = 1 << 16;
+    if tq * out * inp < PAR_THRESHOLD || worker_count() < 2 {
+        compute_band(0, out, out_slice);
+        return;
+    }
+
+    // Parallelize over output-column bands; each worker fills a private
+    // [tq, out] buffer (writing only its band), then we disjoint-merge them
+    // (every column written by exactly one worker → `0.0 + x == x` exactly).
+    let workers = worker_count();
+    let band = out.div_ceil(workers).max(1);
+    let parts: Vec<(usize, usize, Vec<f32>)> = std::thread::scope(|s| {
+        let compute_band = &compute_band;
+        let mut handles = Vec::new();
+        let mut o0 = 0;
+        while o0 < out {
+            let o1 = (o0 + band).min(out);
+            handles.push(s.spawn(move || {
+                let mut local = vec![0.0f32; tq * out];
+                compute_band(o0, o1, &mut local);
+                (o0, o1, local)
+            }));
+            o0 = o1;
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (o0, o1, local) in parts {
+        for t in 0..tq {
+            let dst = &mut out_slice[t * out + o0..t * out + o1];
+            dst.copy_from_slice(&local[t * out + o0..t * out + o1]);
+        }
+    }
+}
+
 /// In-place per-row layer normalization with affine scale/shift.
 ///
 /// For each row: subtract the row mean, divide by `sqrt(var + eps)`, then
@@ -984,6 +1199,140 @@ mod tests {
                 max_rel_err_k(&got.data, &want.data, k) < 1e-5,
                 "shape {m}x{k}x{n} rel err too high"
             );
+        }
+    }
+
+    /// Build a natural `[out, in]` f16 weight (raw u16 bits) plus the exact f32
+    /// matrix it dequantizes to, from the LCG.
+    fn rand_f16_weight(rng: &mut Lcg, out: usize, inp: usize) -> (Vec<u16>, Vec<f32>) {
+        let mut bits = Vec::with_capacity(out * inp);
+        let mut f32s = Vec::with_capacity(out * inp);
+        for _ in 0..out * inp {
+            let h = ft_core::Float16::from_f32(rng.next_f32());
+            bits.push(h.to_bits());
+            f32s.push(h.to_f32()); // the EXACT value the f16 stores
+        }
+        (bits, f32s)
+    }
+
+    #[test]
+    fn gemv_f16_matches_dequant_then_matmul() {
+        let mut rng = Lcg::new(11);
+        // Covers the decoder Linear shapes ([out,in]) and the logits-sized one.
+        for (out, inp) in [
+            (1usize, 4usize),
+            (384, 384),
+            (5, 64),
+            (2048, 1280),
+            (51866, 16),
+        ] {
+            let (w_bits, w_f32) = rand_f16_weight(&mut rng, out, inp);
+            let x: Vec<f32> = (0..inp).map(|_| rng.next_f32()).collect();
+            let bias: Vec<f32> = (0..out).map(|_| rng.next_f32()).collect();
+
+            // Reference: dequant the weight to f32, then run it through the SAME
+            // ft sgemm the f32 path uses. The f32-path Linear pre-transposes
+            // [out,in] -> [in,out] and computes x[1,in] @ w_t[in,out]; reproduce
+            // that exactly so we compare like-for-like accumulation environments.
+            let w_t = {
+                let mut t = vec![0.0f32; inp * out];
+                for o in 0..out {
+                    for i in 0..inp {
+                        t[i * out + o] = w_f32[o * inp + i];
+                    }
+                }
+                Mat::from_vec(inp, out, t)
+            };
+            let x_mat = Mat::from_vec(1, inp, x.clone());
+            let want = matmul_bias(&x_mat, &w_t, Some(&bias)).unwrap();
+
+            let mut got = vec![0.0f32; out];
+            gemv_f16(&w_bits, out, inp, &x, Some(&bias), &mut got);
+
+            // Both accumulate in f32 over the same exact weight values; only the
+            // summation order differs (row-dot vs sgemm block), so the diff is
+            // tiny rounding noise. Spec gate: max abs diff < 1e-4.
+            let max = got
+                .iter()
+                .zip(&want.data)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max < 1e-4,
+                "gemv_f16 vs dequant-matmul diff {max} at [{out},{inp}]"
+            );
+        }
+    }
+
+    #[test]
+    fn gemv_f16_dequant_is_exact() {
+        // Every f16 value must dequantize to EXACTLY the same f32 used inside
+        // the kernel: a single-element identity weight reads back the stored
+        // value bit-for-bit (x = 1, no bias).
+        let vals = [1.0f32, 0.5, -2.0, 0.0, 65504.0, 6.103_515_6e-5];
+        for &v in &vals {
+            let h = ft_core::Float16::from_f32(v);
+            let bits = vec![h.to_bits()];
+            let mut got = [0.0f32];
+            gemv_f16(&bits, 1, 1, &[1.0], None, &mut got);
+            assert_eq!(
+                got[0].to_bits(),
+                h.to_f32().to_bits(),
+                "dequant of f16({v}) must be exact"
+            );
+        }
+    }
+
+    #[test]
+    fn gemv_f16_no_bias_and_threshold_paths() {
+        let mut rng = Lcg::new(13);
+        // A shape above the parallel threshold exercises the threaded bands.
+        let (out, inp) = (4096usize, 256usize);
+        let (w_bits, w_f32) = rand_f16_weight(&mut rng, out, inp);
+        let x: Vec<f32> = (0..inp).map(|_| rng.next_f32()).collect();
+
+        let mut got = vec![0.0f32; out];
+        gemv_f16(&w_bits, out, inp, &x, None, &mut got);
+
+        // Reference: plain row-dot in f32 over the exact dequantized weight.
+        for o in 0..out {
+            let mut acc = 0.0f32;
+            for i in 0..inp {
+                acc += w_f32[o * inp + i] * x[i];
+            }
+            assert!((got[o] - acc).abs() < 1e-3, "row {o} mismatch");
+        }
+    }
+
+    #[test]
+    fn gemv_f16_batch_equals_per_token_gemv() {
+        let mut rng = Lcg::new(17);
+        let (out, inp, tq) = (300usize, 128usize, 5usize);
+        let (w_bits, _w_f32) = rand_f16_weight(&mut rng, out, inp);
+        let x: Vec<f32> = (0..tq * inp).map(|_| rng.next_f32()).collect();
+        let bias: Vec<f32> = (0..out).map(|_| rng.next_f32()).collect();
+
+        let mut batch = vec![0.0f32; tq * out];
+        gemv_f16_batch(&w_bits, out, inp, &x, tq, Some(&bias), &mut batch);
+
+        // Per-token gemv must be byte-identical to the batch (same math).
+        for t in 0..tq {
+            let mut row = vec![0.0f32; out];
+            gemv_f16(
+                &w_bits,
+                out,
+                inp,
+                &x[t * inp..(t + 1) * inp],
+                Some(&bias),
+                &mut row,
+            );
+            for (o, &r) in row.iter().enumerate() {
+                assert_eq!(
+                    batch[t * out + o].to_bits(),
+                    r.to_bits(),
+                    "batch[{t},{o}] != per-token gemv"
+                );
+            }
         }
     }
 

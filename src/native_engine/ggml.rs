@@ -369,6 +369,56 @@ impl GgmlModel {
 
         Ok((entry.shape.clone(), values))
     }
+
+    /// Borrow a tensor's **raw little-endian f16 bit patterns** as
+    /// `(logical_shape, Vec<u16>)`, WITHOUT dequantizing to f32.
+    ///
+    /// This is the load-path accessor for the f16-resident decoder compute
+    /// lever (`FRANKEN_WHISPER_NATIVE_F16_COMPUTE`): the GEMV kernel
+    /// ([`super::nn::gemv_f16`]) dequantizes each weight to f32 on the fly while
+    /// it multiplies, so keeping the weights as `u16` halves their resident
+    /// footprint and weight-memory traffic. Each `u16` is the IEEE-754 half bit
+    /// pattern in the file's native (little-endian) order; element order is the
+    /// flat row-major contiguous order matching `shape` (same as
+    /// [`Self::tensor_f32`]).
+    ///
+    /// # Errors
+    ///
+    /// - [`FwError::InvalidRequest`] if `name` is unknown, the stored byte
+    ///   length is inconsistent with the shape (corruption), or the tensor is
+    ///   stored as **f32** in the file (callers must keep f32-stored tensors on
+    ///   the f32 path — there is nothing to dequantize).
+    pub fn tensor_f16(&self, name: &str) -> FwResult<(Vec<usize>, Vec<u16>)> {
+        let entry = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| FwError::InvalidRequest(format!("unknown tensor '{name}'")))?;
+        if entry.dtype != GgmlDType::F16 {
+            return Err(FwError::InvalidRequest(format!(
+                "tensor '{name}' is stored as f32, not f16; use tensor_f32 \
+                 (f16-compute path applies only to f16-stored tensors)"
+            )));
+        }
+        let raw = self
+            .blob
+            .get(entry.byte_offset..entry.byte_offset + entry.byte_len)
+            .ok_or_else(|| {
+                FwError::InvalidRequest(format!("tensor '{name}' payload out of bounds"))
+            })?;
+        let n_elements = entry.n_elements();
+        if raw.len() != n_elements * 2 {
+            return Err(FwError::InvalidRequest(format!(
+                "tensor '{name}' f16 byte length {} != {} elements * 2",
+                raw.len(),
+                n_elements
+            )));
+        }
+        let bits: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        Ok((entry.shape.clone(), bits))
+    }
 }
 
 /// Dequantize a little-endian f16 byte stream to `f32`, splitting large
@@ -700,6 +750,31 @@ mod tests {
         let (shape, vals) = model.tensor_f32("w_f16").expect("decode w_f16");
         assert_eq!(shape, vec![2, 2]);
         assert_eq!(vals, vec![1.0, 0.0, -2.0, 0.5]);
+    }
+
+    #[test]
+    fn tensor_f16_raw_bits_and_f32_rejected() {
+        let model = GgmlModel::parse(SyntheticModel::minimal().bytes).expect("parse");
+        // f16 tensor: raw u16 bit patterns, in flat row-major order. The
+        // synthetic w_f16 holds [1.0, 0.0, -2.0, 0.5] (logical [2,2]).
+        let (shape, bits) = model.tensor_f16("w_f16").expect("raw f16");
+        assert_eq!(shape, vec![2, 2]);
+        let want: Vec<u16> = [1.0f32, 0.0, -2.0, 0.5]
+            .iter()
+            .map(|&v| Float16::from_f32(v).to_bits())
+            .collect();
+        assert_eq!(bits, want, "raw f16 bit patterns must round-trip exactly");
+        // Each raw bit pattern dequantizes to exactly the f32 path's value.
+        let (_s, f32_vals) = model.tensor_f32("w_f16").expect("f32 f16");
+        for (b, &f) in bits.iter().zip(&f32_vals) {
+            assert_eq!(f16_to_f32(*b), f, "dequant of raw bits == tensor_f32 value");
+        }
+        // f32-stored tensors are rejected (nothing to dequantize).
+        let err = model
+            .tensor_f16("w_f32")
+            .expect_err("f32 tensor must be rejected");
+        assert!(matches!(err, FwError::InvalidRequest(_)), "got {err:?}");
+        assert!(err.to_string().contains("f32"), "{err}");
     }
 
     #[test]

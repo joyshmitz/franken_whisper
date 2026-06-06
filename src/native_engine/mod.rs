@@ -189,6 +189,61 @@ pub(crate) fn perf_spans_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("FRANKEN_WHISPER_PERF_SPANS").is_ok_and(|v| v == "1"))
 }
 
+/// Whether the f16-resident decoder compute path is enabled.
+///
+/// This is the runtime kill-switch for the pass-2 f16-GEMV lever
+/// (`FRANKEN_WHISPER_NATIVE_F16_COMPUTE`): when ON, decoder linear/logits
+/// weights that are stored as f16 in the ggml file are kept f16-resident and
+/// dequantized inside a fused GEMV (`out[o] = dot(W[o,:], x)` over natural
+/// `[out, in]` rows) instead of being dequantized to a full f32 `Mat` and
+/// pre-transposed at load. This halves the decoder weights' resident footprint
+/// AND skips the load-time transpose; the value of every weight is **exact**
+/// (the f16→f32 dequant changes nothing), only the dot-product accumulation
+/// order differs from `matrixmultiply`'s blocked f32 sgemm — so it is a
+/// **numerics-affecting** lever.
+///
+/// # Default is OFF — measured e2e regression on Apple-silicon
+///
+/// The pass-2 conformance gate **passed** (byte-exact transcripts on tiny.en
+/// AND large-v3-turbo, segment timestamps within 0.3 s), so this path is
+/// numerically safe. HOWEVER, the interleaved e2e wall A/B (same binary, env
+/// toggled, jfk, ≥8 pairs, M4-class host) showed a consistent **regression**,
+/// not a win: tiny.en e2e min 311 ms → 396 ms (+27%), large-v3-turbo min
+/// ~5.4 s → ~6.1 s (+12%). The isolated criterion `decoder_token_step_large`
+/// micro-bench *improves* sharply (-55%, 320 ms → 144 ms) because the f16 GEMV
+/// is allocation/dispatch-leaner than the ft-sgemm path AND the model stays
+/// hot across the bench's tight loop — but in a full decode the scalar
+/// `half`→f32 dequant (one non-vectorized bit-twiddle per weight element,
+/// every step, on a cold cache) costs more than the memory bandwidth it saves
+/// on a host with abundant memory bandwidth. The bandwidth-halving thesis does
+/// not hold here, so the lever is shipped **default OFF**, gated behind the env
+/// var for opt-in / bandwidth-bound hosts where it may pay off. Re-evaluate if
+/// the dequant is ever SIMD-vectorized (then it could flip to a real win).
+///
+/// Read once via [`OnceLock`]; off costs one atomic load. Accepts the usual
+/// truthy spellings (`1`/`true`/`on`/`yes`) and falsy ones (`0`/`false`/`off`/
+/// `no`); an unset or unrecognized value falls back to the compiled-in default.
+pub(crate) fn f16_compute_enabled() -> bool {
+    /// Compiled-in default when the env var is unset/unrecognized.
+    ///
+    /// **OFF**: the conformance gate passed but the interleaved e2e wall A/B
+    /// regressed (+27% tiny / +12% large) on the Apple-silicon target — the
+    /// scalar dequant outweighs the bandwidth saving there. See the function
+    /// docs for the full evidence.
+    const DEFAULT_ON: bool = false;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(
+        || match std::env::var("FRANKEN_WHISPER_NATIVE_F16_COMPUTE") {
+            Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "on" | "yes" => true,
+                "0" | "false" | "off" | "no" => false,
+                _ => DEFAULT_ON,
+            },
+            Err(_) => DEFAULT_ON,
+        },
+    )
+}
+
 /// Emit one measurement-only span line (see [`perf_spans_enabled`]).
 pub(crate) fn perf_span(span: &str, ms: f64, extra: &str) {
     if perf_spans_enabled() {
