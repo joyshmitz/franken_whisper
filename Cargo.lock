@@ -1066,6 +1066,7 @@ dependencies = [
  "ft-core",
  "ft-kernel-cpu",
  "ftui",
+ "half",
  "hound",
  "serde",
  "serde_json",

@@ -42,6 +42,11 @@ fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
 # first-party FrankenSuite crates — see the bd-frp7 epic.
 ft-kernel-cpu = { path = "../frankentorch/crates/ft-kernel-cpu" }
 ft-core = { path = "../frankentorch/crates/ft-core" }
+# Direct dep on `half` (same crate ft-core re-exports as `Float16`) for its
+# `HalfFloatSliceExt::convert_to_f32_slice` SIMD bulk f16->f32 dequant — the
+# `std` feature enables runtime aarch64 `fp16` / x86 `f16c` vector paths used
+# by the f16-compute GEMV kernels (nn::gemv_f16). Pinned to ft-core's version.
+half = { version = "2.7", features = ["std"] }
 
 ftui = { path = "../frankentui/crates/ftui", default-features = false, features = ["crossterm"], optional = true }
 ft-api = { path = "../frankentorch/crates/ft-api", optional = true }
@@ -63,6 +68,8 @@ unused_self = "warn"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+# For the f16_gemv_dequant bench to construct `Float16` weights directly.
+ft-core = { path = "../frankentorch/crates/ft-core" }
 
 [[bench]]
 name = "storage_bench"

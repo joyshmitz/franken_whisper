@@ -218,6 +218,17 @@ fn transpose(m: &Mat) -> Mat {
     )
 }
 
+/// Reinterpret a vector of raw little-endian IEEE-754 half bit patterns as
+/// typed [`ft_core::Float16`] (= `half::f16`). Zero numeric change — each
+/// `from_bits(b)` is the identity on the bit pattern — but it gives the GEMV
+/// kernels a `&[Float16]` so they can use the SIMD bulk `convert_to_f32_slice`
+/// dequant. One-time at model load.
+fn bits_to_halves(bits: &[u16]) -> Vec<ft_core::Float16> {
+    bits.iter()
+        .map(|&b| ft_core::Float16::from_bits(b))
+        .collect()
+}
+
 /// Load a whisper linear layer (`[out, in]` weight) plus an optional `[out]`
 /// bias.
 ///
@@ -248,7 +259,7 @@ fn load_linear(
             )));
         }
         WeightMat::F16 {
-            data,
+            data: bits_to_halves(&data),
             out: out_dim,
             inp: in_dim,
         }
@@ -288,7 +299,7 @@ fn load_embedding(
             )));
         }
         Ok(WeightMat::F16 {
-            data,
+            data: bits_to_halves(&data),
             out: n_vocab,
             inp: n_state,
         })
@@ -719,7 +730,7 @@ fn embed_tokens(w: &DecoderWeights, tokens: &[i32], cache_len: usize) -> FwResul
             WeightMat::F16 { data, inp, .. } => {
                 let row = &data[tok_idx * inp..(tok_idx + 1) * inp];
                 for ((d, &tb), &p) in dst.iter_mut().zip(row).zip(pe) {
-                    *d = nn::f16_to_f32_pub(tb) + p;
+                    *d = tb.to_f32() + p;
                 }
             }
         }
