@@ -346,7 +346,9 @@ function handle(m) {
       if (state.recoveryNotice) {
         setStatus(`error: ${state.recoveryNotice}`, "err");
       } else {
-        setStatus(`engine booted (fw-wasm ${m.version}, ${state.lane} lane). Load the models to begin.`);
+        setStatus(
+          `engine booted (fw-wasm ${m.version}, ${state.lane} lane). Load the models to begin.`,
+        );
       }
       $("load-models").disabled = false;
       break;
@@ -382,8 +384,7 @@ function handle(m) {
           eta = ` · ${fmtBytes(d.rate)}/s · about ${fmtDur(remainingBytes / d.rate)} left`;
         }
       }
-      text.textContent =
-        `${m.file}: ${fmtBytes(m.loaded)} of ${fmtBytes(m.total)} (${phase}); ${pct}% overall${eta}`;
+      text.textContent = `${m.file}: ${fmtBytes(m.loaded)} of ${fmtBytes(m.total)} (${phase}); ${pct}% overall${eta}`;
       break;
     }
     case "stage": {
@@ -422,7 +423,9 @@ function handle(m) {
       state.run.offsetSec = m.skipped_leading_sec ?? 0;
       state.run.denoised = m.denoised === true;
       const skipped =
-        state.run.offsetSec > 0.5 ? `skipped ${fmtDur(state.run.offsetSec)} of leading silence; ` : "";
+        state.run.offsetSec > 0.5
+          ? `skipped ${fmtDur(state.run.offsetSec)} of leading silence; `
+          : "";
       setStatus(
         `decoded ${fmtDur(m.audio_sec)} of audio; ${skipped}transcription starts now ` +
           `(${state.run.windowsTotal} window${state.run.windowsTotal === 1 ? "" : "s"} of up to 30 s each)`,
@@ -521,9 +524,7 @@ function handle(m) {
 function renderResult() {
   const r = state.result;
   const rt = r.audio_sec > 0 ? (state.wallMs / 1000 / r.audio_sec).toFixed(2) : "?";
-  const speakers = new Set(
-    r.speaker_segments.map((s) => s.speaker).filter((s) => s != null),
-  );
+  const speakers = new Set(r.speaker_segments.map((s) => s.speaker).filter((s) => s != null));
   $("result-placeholder").hidden = true;
   $("result-wrap").hidden = false;
   const named = state.nameMap.size > 0;
@@ -715,7 +716,9 @@ function init() {
     const language = $("language").value === "auto" ? undefined : $("language").value;
     const denoise = $("denoise").checked;
     const buf = await state.file.arrayBuffer();
-    state.worker.postMessage({ type: "transcribe", audio: buf, ext, prompt, language, denoise }, [buf]);
+    state.worker.postMessage({ type: "transcribe", audio: buf, ext, prompt, language, denoise }, [
+      buf,
+    ]);
   });
 
   $("download-md").addEventListener("click", exportMd);

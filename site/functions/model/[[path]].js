@@ -55,9 +55,7 @@ export async function onRequest({ request, params }) {
   const upstreams = FILES[parts.join("/")];
   if (!upstreams) return new Response("not found", { status: 404 });
 
-  const headers = request.headers.has("range")
-    ? { range: request.headers.get("range") }
-    : {};
+  const headers = request.headers.has("range") ? { range: request.headers.get("range") } : {};
   let last = null;
   for (const url of upstreams) {
     const resp = await fetch(new Request(url, { method: "GET", headers, redirect: "follow" }));

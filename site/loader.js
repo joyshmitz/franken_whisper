@@ -17,8 +17,8 @@
 //
 // Runs inside the engine worker (OPFS sync handles are worker-only anyway).
 
-import { Sha256 } from "./sha256.js?v=@SITEV@";
 import { CHUNK_BYTES, ENDPOINT_BYTES, MODELS } from "./model-manifest.js?v=@SITEV@";
+import { Sha256 } from "./sha256.js?v=@SITEV@";
 
 const FULL_VERIFY = new URLSearchParams(globalThis.location?.search ?? "").has("fullverify");
 

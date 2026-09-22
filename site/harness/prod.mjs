@@ -123,11 +123,25 @@ for (;;) {
   }
   if (/Both models ready/.test(s.status ?? "")) break;
   if (/^error:/.test(s.status ?? "")) {
-    console.log(JSON.stringify({ ok: false, phase: "load", status: s.status, console: consoleLines.slice(-8) }));
+    console.log(
+      JSON.stringify({
+        ok: false,
+        phase: "load",
+        status: s.status,
+        console: consoleLines.slice(-8),
+      }),
+    );
     process.exit(1);
   }
   if ((Date.now() - t0) / 1000 > DEADLINE_S) {
-    console.log(JSON.stringify({ ok: false, phase: "load-timeout", status: s, console: consoleLines.slice(-8) }));
+    console.log(
+      JSON.stringify({
+        ok: false,
+        phase: "load-timeout",
+        status: s,
+        console: consoleLines.slice(-8),
+      }),
+    );
     process.exit(1);
   }
 }
@@ -173,11 +187,25 @@ for (;;) {
     process.exit(0);
   }
   if (/^error:/.test(s.status ?? "")) {
-    console.log(JSON.stringify({ ok: false, phase: "run", status: s.status, console: consoleLines.slice(-8) }));
+    console.log(
+      JSON.stringify({
+        ok: false,
+        phase: "run",
+        status: s.status,
+        console: consoleLines.slice(-8),
+      }),
+    );
     process.exit(1);
   }
   if ((Date.now() - t0) / 1000 > DEADLINE_S) {
-    console.log(JSON.stringify({ ok: false, phase: "run-timeout", lastState: s, console: consoleLines.slice(-8) }));
+    console.log(
+      JSON.stringify({
+        ok: false,
+        phase: "run-timeout",
+        lastState: s,
+        console: consoleLines.slice(-8),
+      }),
+    );
     process.exit(1);
   }
 }

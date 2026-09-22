@@ -23,7 +23,9 @@ try {
   await pkg
     .initThreadPool(Math.max(1, Math.min((navigator.hardwareConcurrency ?? 4) - 1, 8)))
     .catch((e) => {
-      throw new Error(`initThreadPool: ${e?.message ?? e} :: ${String(e?.stack ?? "").slice(0, 300)}`);
+      throw new Error(
+        `initThreadPool: ${e?.message ?? e} :: ${String(e?.stack ?? "").slice(0, 300)}`,
+      );
     });
 
   stage("fetch turbo (1.5 GB, local)");
@@ -35,7 +37,9 @@ try {
 
   stage("fetch + load sortformer");
   const receipt = new Uint8Array(await (await fetch("/local/receipt.json")).arrayBuffer());
-  const weights = new Uint8Array(await (await fetch("/local/sortformer.safetensors")).arrayBuffer());
+  const weights = new Uint8Array(
+    await (await fetch("/local/sortformer.safetensors")).arrayBuffer(),
+  );
   pkg.load_sortformer(receipt, weights);
 
   const threads = pkg.thread_count();
@@ -55,7 +59,10 @@ try {
     rt_ratio: Number((wallSec / result.audio_sec).toFixed(2)),
     dropped_windows: result.dropped_windows,
     speakers: [...new Set(result.speaker_segments.map((s) => s.speaker))],
-    text: result.speaker_segments.map((s) => s.text.trim()).join(" ").slice(0, 400),
+    text: result.speaker_segments
+      .map((s) => s.text.trim())
+      .join(" ")
+      .slice(0, 400),
   });
 } catch (e) {
   post({ ok: false, error: String(e?.message ?? e) });

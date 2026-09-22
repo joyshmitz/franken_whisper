@@ -52,7 +52,9 @@ function markdownExport() {
     "",
     `- Engine: franken_whisper wasm (tiny.en, serial build)`,
     `- Audio: ${result.audio_sec.toFixed(1)} s · transcribed in ${(wallMs / 1000).toFixed(1)} s in this browser`,
-    result.dropped_windows > 0 ? `- **Warning: ${result.dropped_windows} window(s) dropped without output**` : null,
+    result.dropped_windows > 0
+      ? `- **Warning: ${result.dropped_windows} window(s) dropped without output**`
+      : null,
     "",
   ].filter((l) => l !== null);
   for (const seg of result.segments) {
@@ -116,7 +118,10 @@ function bootWorker() {
       setStatus(m.cached ? "verified cached weights" : `downloading tiny.en: ${pct}% of 78 MB`);
     } else if (m.type === "ready") {
       state.ready = true;
-      setStatus(`ready — model loaded in ${(m.load_ms / 1000).toFixed(1)} s. Pick an audio file.`, "ok");
+      setStatus(
+        `ready — model loaded in ${(m.load_ms / 1000).toFixed(1)} s. Pick an audio file.`,
+        "ok",
+      );
       $("demo-file").disabled = false;
     } else if (m.type === "result") {
       state.busy = false;

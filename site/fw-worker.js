@@ -82,7 +82,9 @@ async function modelBytes() {
   const digest = await sha256Hex(buf);
   if (buf.byteLength !== MODEL.bytes || digest !== MODEL.sha256) {
     await root.removeEntry(MODEL.file);
-    throw new Error(`model verification failed: got ${digest.slice(0, 12)}…, want ${MODEL.sha256.slice(0, 12)}…`);
+    throw new Error(
+      `model verification failed: got ${digest.slice(0, 12)}…, want ${MODEL.sha256.slice(0, 12)}…`,
+    );
   }
   return new Uint8Array(buf);
 }
@@ -95,7 +97,12 @@ async function route(e) {
       feedClock();
       const t0 = performance.now();
       const info = JSON.parse(wasm.load_model(bytes));
-      post("ready", { id, info, load_ms: Math.round(performance.now() - t0), version: wasm.version() });
+      post("ready", {
+        id,
+        info,
+        load_ms: Math.round(performance.now() - t0),
+        version: wasm.version(),
+      });
     } else if (type === "transcribe") {
       feedClock();
       const t0 = performance.now();
