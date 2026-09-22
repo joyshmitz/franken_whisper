@@ -22,7 +22,17 @@
     },
     "stage": {
       "type": "object",
-      "required": ["event", "schema_version", "run_id", "seq", "ts", "stage", "code", "message", "payload"],
+      "required": [
+        "event",
+        "schema_version",
+        "run_id",
+        "seq",
+        "ts",
+        "stage",
+        "code",
+        "message",
+        "payload"
+      ],
       "properties": {
         "event": { "const": "stage" },
         "schema_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
@@ -65,9 +75,19 @@
     "run_complete": {
       "type": "object",
       "required": [
-        "event", "schema_version", "run_id", "trace_id",
-        "started_at", "finished_at", "backend", "language",
-        "transcript", "segments", "acceleration", "warnings", "evidence"
+        "event",
+        "schema_version",
+        "run_id",
+        "trace_id",
+        "started_at",
+        "finished_at",
+        "backend",
+        "language",
+        "transcript",
+        "segments",
+        "acceleration",
+        "warnings",
+        "evidence"
       ],
       "properties": {
         "event": { "const": "run_complete" },

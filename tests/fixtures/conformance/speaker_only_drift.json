@@ -34,7 +34,7 @@
       "end_sec": 2.01,
       "text": "world",
       "speaker": "spk_1",
-      "confidence": 0.90
+      "confidence": 0.9
     }
   ],
   "expect_within_tolerance": false,

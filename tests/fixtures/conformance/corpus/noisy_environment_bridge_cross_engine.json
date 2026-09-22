@@ -1,9 +1,6 @@
 {
   "name": "golden_noisy_environment_bridge_cross_engine",
-  "tags": [
-    "noisy_environment",
-    "bridge"
-  ],
+  "tags": ["noisy_environment", "bridge"],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,

@@ -1,9 +1,6 @@
 {
   "name": "golden_variable_volume_overlap_bridge_cross_engine",
-  "tags": [
-    "variable_volume_overlap",
-    "bridge"
-  ],
+  "tags": ["variable_volume_overlap", "bridge"],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,

@@ -1,9 +1,6 @@
 {
   "name": "golden_long_form_bridge_cross_engine",
-  "tags": [
-    "long_form",
-    "bridge"
-  ],
+  "tags": ["long_form", "bridge"],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,

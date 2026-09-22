@@ -1,9 +1,6 @@
 {
   "name": "speaker_label_patterns_srt_bridge_native",
-  "tags": [
-    "short_utterance",
-    "speaker_label_patterns"
-  ],
+  "tags": ["short_utterance", "speaker_label_patterns"],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,

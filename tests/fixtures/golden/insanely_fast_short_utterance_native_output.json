@@ -5,45 +5,27 @@
   "chunks": [
     {
       "text": " Yes.",
-      "timestamp": [
-        0.0,
-        0.6
-      ]
+      "timestamp": [0.0, 0.6]
     },
     {
       "text": " No.",
-      "timestamp": [
-        1.1,
-        1.6
-      ]
+      "timestamp": [1.1, 1.6]
     },
     {
       "text": " Maybe.",
-      "timestamp": [
-        2.2,
-        2.9
-      ]
+      "timestamp": [2.2, 2.9]
     },
     {
       "text": " Go.",
-      "timestamp": [
-        3.4,
-        3.9
-      ]
+      "timestamp": [3.4, 3.9]
     },
     {
       "text": " Stop.",
-      "timestamp": [
-        4.5,
-        5.2
-      ]
+      "timestamp": [4.5, 5.2]
     },
     {
       "text": " Done.",
-      "timestamp": [
-        5.9,
-        6.6
-      ]
+      "timestamp": [5.9, 6.6]
     }
   ],
   "text": "Yes. No. Maybe. Go. Stop. Done."

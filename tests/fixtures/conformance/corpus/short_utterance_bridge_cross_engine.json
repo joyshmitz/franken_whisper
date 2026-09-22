@@ -1,9 +1,6 @@
 {
   "name": "golden_short_utterance_bridge_cross_engine",
-  "tags": [
-    "short_utterance",
-    "bridge"
-  ],
+  "tags": ["short_utterance", "bridge"],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,

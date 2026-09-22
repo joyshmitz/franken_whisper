@@ -1,9 +1,6 @@
 {
   "name": "golden_code_switching_bridge_cross_engine",
-  "tags": [
-    "code_switching",
-    "bridge"
-  ],
+  "tags": ["code_switching", "bridge"],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,

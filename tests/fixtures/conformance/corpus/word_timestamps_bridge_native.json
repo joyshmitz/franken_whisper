@@ -1,9 +1,6 @@
 {
   "name": "word_timestamps_bridge_native",
-  "tags": [
-    "short_utterance",
-    "word_timestamps"
-  ],
+  "tags": ["short_utterance", "word_timestamps"],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,

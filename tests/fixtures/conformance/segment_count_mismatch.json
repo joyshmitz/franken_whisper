@@ -27,7 +27,7 @@
       "end_sec": 2.1,
       "text": "hello world",
       "speaker": null,
-      "confidence": 0.90
+      "confidence": 0.9
     }
   ],
   "expect_within_tolerance": false,

@@ -16,11 +16,11 @@
   ],
   "observed": [
     {
-      "start_sec": 0.30,
-      "end_sec": 1.40,
+      "start_sec": 0.3,
+      "end_sec": 1.4,
       "text": "HELLO",
       "speaker": "SPEAKER_01",
-      "confidence": 0.40
+      "confidence": 0.4
     }
   ],
   "expect_within_tolerance": false,

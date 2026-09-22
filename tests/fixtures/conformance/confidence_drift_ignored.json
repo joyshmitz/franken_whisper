@@ -18,7 +18,7 @@
       "end_sec": 2.0,
       "text": "world",
       "speaker": null,
-      "confidence": 0.90
+      "confidence": 0.9
     }
   ],
   "observed": [
@@ -27,7 +27,7 @@
       "end_sec": 1.0,
       "text": "hello",
       "speaker": null,
-      "confidence": 0.10
+      "confidence": 0.1
     },
     {
       "start_sec": 1.0,

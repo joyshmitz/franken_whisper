@@ -1,9 +1,6 @@
 {
   "name": "golden_hello_world_bridge_native_pairs",
-  "tags": [
-    "smoke",
-    "native_coverage"
-  ],
+  "tags": ["smoke", "native_coverage"],
   "tolerance": {
     "timestamp_tolerance_sec": 0.05,
     "require_text_exact": true,
