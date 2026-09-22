@@ -4,10 +4,7 @@
   "scope": "self_relative",
   "binary": "/private/tmp/claude-501/-Users-jemanuel-projects-franken-whisper/34a32d9e-3bb4-4a12-b4da-7ad1fbc2ff18/scratchpad/fw-private-target/release/franken_whisper",
   "rounds": 2,
-  "arms": [
-    "alignatt",
-    "endpoint-commit"
-  ],
+  "arms": ["alignatt", "endpoint-commit"],
   "aa_null_commit_lag_ratio": {
     "alignatt": 0.9629438163308005,
     "endpoint-commit": 0.9358231856199779
