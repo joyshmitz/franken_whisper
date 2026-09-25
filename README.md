@@ -22,7 +22,7 @@
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/franken_whisper/main/install.sh?$(date +%s)" | bash
 ```
 
-<sub>SHA-256-verified prebuilt binaries for <b>Linux</b> (x86_64 / aarch64), <b>macOS</b> (Intel / Apple&nbsp;Silicon), and <b>WSL</b> — proxy-aware, airgap-capable (<code>--offline</code>), reversible (<code>--uninstall</code>). Windows users: grab <code>windows_amd64.zip</code> from <a href="https://github.com/Dicklesworthstone/franken_whisper/releases/latest">the latest release</a>. All flags: <a href="#installation">Installation</a>.</sub>
+<sub>SHA-256-verified prebuilt binaries for <b>Linux</b> (x86_64 / aarch64), <b>macOS</b> (Intel / Apple&nbsp;Silicon), and <b>WSL</b> — proxy-aware, airgap-capable (<code>--offline</code>), reversible (<code>--uninstall</code>). Windows users: grab <code>windows_amd64.zip</code> from the newest <code>vX.Y.Z</code> release on <a href="https://github.com/Dicklesworthstone/franken_whisper/releases">the releases page</a> (model packages are published as releases too). All flags: <a href="#installation">Installation</a>.</sub>
 
 </div>
 

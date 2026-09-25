@@ -603,7 +603,9 @@ resolve_version() {
     if [ -n "$VERSION" ]; then return 0; fi
 
     log_step "Resolving latest version..."
-    local latest_url="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
+    # Model packages are published as releases too (e.g. whisper-tiny-f16-v1) and can
+    # hold GitHub's "Latest" flag, so list recent releases and take the newest vX.Y.Z tag.
+    local releases_url="https://api.github.com/repos/${OWNER}/${REPO}/releases?per_page=50"
     local tag="" attempts=0
 
     while [ $attempts -lt $MAX_RETRIES ] && [ -z "$tag" ]; do
@@ -612,9 +614,11 @@ resolve_version() {
             tag=$(curl -fsSL "${PROXY_ARGS[@]}" \
                 --connect-timeout 10 --max-time 30 \
                 -H "Accept: application/vnd.github.v3+json" \
-                "$latest_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "")
+                "$releases_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || echo "")
         elif command -v wget &>/dev/null; then
-            tag=$(wget -qO- --timeout=30 "$latest_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "")
+            tag=$(wget -qO- --timeout=30 "$releases_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || echo "")
         fi
         [ -z "$tag" ] && [ $attempts -lt $MAX_RETRIES ] && sleep 2
     done
